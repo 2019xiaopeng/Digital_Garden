@@ -1,6 +1,6 @@
-import { Calendar, Clock, ArrowRight, Search, Filter, Plus, X, Tag as TagIcon, ChevronLeft, ChevronRight, Eye, Edit3, Save, Smile, Frown, Meh, Zap, Loader2, Sparkles } from "lucide-react";
+import { Calendar, Clock, ArrowRight, Search, Filter, Plus, X, Tag as TagIcon, ChevronLeft, ChevronRight, Eye, Edit3, Save, Smile, Frown, Meh, Zap, Loader2, Sparkles, Trash2 } from "lucide-react";
 import { useState, useMemo, useEffect } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { cn } from "../lib/utils";
 import { MarkdownEditor } from "../components/MarkdownEditor";
 import { DailyLogService, TaskService, AiService, isTauriAvailable } from "../lib/dataService";
@@ -31,6 +31,8 @@ export function Blog() {
   
   // AI Review State
   const [aiReviewLoading, setAiReviewLoading] = useState(false);
+  const [expandedPostIds, setExpandedPostIds] = useState<Set<string>>(new Set());
+  const DRAFT_KEY = "eva.blog.draft.v1";
 
   // Load posts from dataService
   useEffect(() => {
@@ -39,6 +41,20 @@ export function Blog() {
       setDataLoaded(true);
     });
   }, []);
+
+  // Handle incoming editId from BlogPost page
+  const location = useLocation();
+  useEffect(() => {
+    const state = location.state as { editId?: string } | null;
+    if (state?.editId && posts.length > 0) {
+      const post = posts.find(p => p.id === state.editId);
+      if (post) {
+        handleEdit(post);
+        // Clear the state so refresh doesn't re-trigger
+        window.history.replaceState({}, document.title);
+      }
+    }
+  }, [location.state, posts]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -92,7 +108,25 @@ export function Blog() {
     setCurrentPage(1);
   }, [searchQuery, sortOrder, selectedTag]);
 
-  const handleEdit = (post: typeof initialPosts[0]) => {
+  const markdownToHtml = (md: string) => {
+    const escaped = md
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+    return escaped
+      .replace(/^###\s+(.+)$/gm, "<h3>$1</h3>")
+      .replace(/^##\s+(.+)$/gm, "<h2>$1</h2>")
+      .replace(/^#\s+(.+)$/gm, "<h1>$1</h1>")
+      .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+      .replace(/\*(.+?)\*/g, "<em>$1</em>")
+      .replace(/`(.+?)`/g, "<code>$1</code>")
+      .replace(/^-\s+(.+)$/gm, "<li>$1</li>")
+      .replace(/(<li>.*<\/li>)/gs, "<ul>$1</ul>")
+      .replace(/\n\n/g, "<br/><br/>")
+      .replace(/\n/g, "<br/>");
+  };
+
+  const handleEdit = (post: LegacyPost) => {
     setEditingPostId(post.id);
     setNewPost({
       title: post.title,
@@ -105,6 +139,10 @@ export function Blog() {
   };
 
   const handleSave = async () => {
+    if (!newPost.title.trim() || !newPost.content.trim()) {
+      alert("标题和正文不能为空");
+      return;
+    }
     if (editingPostId) {
       const updated: LegacyPost = {
         ...posts.find(p => p.id === editingPostId)!,
@@ -134,13 +172,41 @@ export function Blog() {
     setIsWriting(false);
     setEditingPostId(null);
     setNewPost({ title: "", content: "", tags: "", mood: "neutral", syncRate: 80 });
+    localStorage.removeItem(DRAFT_KEY);
   };
+
+  const handleDelete = async (id: string) => {
+    if (!confirm("确认删除这篇留痕吗？")) return;
+    await DailyLogService.delete(id);
+    const next = posts.filter((p) => p.id !== id);
+    setPosts(next);
+  };
+
+  useEffect(() => {
+    if (!isWriting) return;
+    localStorage.setItem(DRAFT_KEY, JSON.stringify(newPost));
+  }, [newPost, isWriting]);
+
+  useEffect(() => {
+    if (!isWriting) return;
+    try {
+      const raw = localStorage.getItem(DRAFT_KEY);
+      if (raw) {
+        const draft = JSON.parse(raw);
+        if (!editingPostId && (draft.title || draft.content)) {
+          setNewPost((prev) => ({ ...prev, ...draft }));
+        }
+      }
+    } catch {}
+  }, [isWriting, editingPostId]);
 
   // AI 一键复盘
   const handleAiReview = async () => {
-    const apiKey = localStorage.getItem("eva.ai.apiKey") || "";
+    const settings = (await import("../lib/settings")).getSettings();
+    // Prefer Kimi key for blog review; fall back to DeepSeek
+    const apiKey = settings.aiKimiKey || settings.aiApiKey || localStorage.getItem("eva.ai.apiKey") || "";
     if (!apiKey) {
-      alert("请先在任务页的闪电灵感中设置 API Key");
+      alert("请先在设置页配置 AI API Key（支持 DeepSeek / Kimi / MiniMax）");
       return;
     }
     setAiReviewLoading(true);
@@ -318,6 +384,12 @@ export function Blog() {
                 >
                   <Edit3 className="w-4 h-4" />
                 </button>
+                <button 
+                  onClick={(e) => { e.preventDefault(); handleDelete(post.id); }}
+                  className="p-2 bg-red-50 dark:bg-red-500/10 rounded-lg hover:bg-red-100 dark:hover:bg-red-500/20 text-red-500"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
               </div>
 
               <div className="flex flex-wrap items-center gap-4 mb-4 text-xs font-medium text-gray-500 dark:text-gray-400">
@@ -341,9 +413,26 @@ export function Blog() {
                 </Link>
               </h2>
               
-              <p className="text-gray-600 dark:text-gray-400 leading-relaxed text-sm mb-6">
-                {post.excerpt}
+              <p className={cn("text-gray-600 dark:text-gray-400 leading-relaxed text-sm mb-3", !expandedPostIds.has(post.id) && "line-clamp-3")}>
+                {expandedPostIds.has(post.id) ? (
+                  <span dangerouslySetInnerHTML={{ __html: markdownToHtml(post.excerpt) }} />
+                ) : (
+                  post.excerpt.replace(/[#*`\-\[\]]/g, '').slice(0, 200) + (post.excerpt.length > 200 ? '...' : '')
+                )}
               </p>
+              <button
+                onClick={(e) => {
+                  e.preventDefault();
+                  setExpandedPostIds((prev) => {
+                    const next = new Set(prev);
+                    if (next.has(post.id)) next.delete(post.id); else next.add(post.id);
+                    return next;
+                  });
+                }}
+                className="text-xs text-[#88B5D3] hover:text-[#6f9fbe] mb-4"
+              >
+                {expandedPostIds.has(post.id) ? "收起正文" : "展开正文"}
+              </button>
               
               <div className="flex flex-wrap items-center gap-2 mb-6">
                 {post.tags.map(tag => (
@@ -421,7 +510,7 @@ export function Blog() {
                 </div>
               </div>
               <div className="flex items-center gap-3">
-                <span className="text-xs text-gray-400 dark:text-gray-500 font-medium">Ctrl/Cmd + Enter 快速保存</span>
+                <span className="text-xs text-gray-400 dark:text-gray-500 font-medium">Ctrl/Cmd + Enter 快速保存 · {newPost.content.length} 字符</span>
                 <button onClick={handleSave} className="px-5 py-2 text-sm font-semibold text-white bg-gray-900 dark:bg-white dark:text-gray-900 hover:bg-gray-800 dark:hover:bg-gray-200 rounded-xl transition-colors shadow-sm">
                   {editingPostId ? "保存修改" : "发布"}
                 </button>
@@ -501,7 +590,10 @@ export function Blog() {
                       </div>
                     </div>
                     {newPost.content ? (
-                      <div className="whitespace-pre-wrap font-mono text-sm">{newPost.content}</div>
+                      <div
+                        className="text-sm leading-7"
+                        dangerouslySetInnerHTML={{ __html: markdownToHtml(newPost.content) }}
+                      />
                     ) : (
                       <p className="text-gray-400 italic">没有内容可预览</p>
                     )}

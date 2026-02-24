@@ -2,6 +2,7 @@ import { FileText, Image as ImageIcon, FileArchive, Download, Search, Filter, Ch
 import React, { useMemo, useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { cn } from "../lib/utils";
+import { isTauriAvailable } from "../lib/dataService";
 
 type ResourceItem = {
   id: number;
@@ -48,7 +49,30 @@ export function Resources() {
     navigate("/quiz?generated=true");
   };
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (e?: React.ChangeEvent<HTMLInputElement>) => {
+    if (isTauriAvailable() && !e) {
+      try {
+        const { open } = await import("@tauri-apps/plugin-dialog");
+        const picked = await open({ multiple: true, filters: [{ name: "All", extensions: ["*"] }] });
+        const list = Array.isArray(picked) ? picked : picked ? [picked] : [];
+        if (list.length === 0) return;
+        const newResources: ResourceItem[] = list.map((path, index) => {
+          const name = String(path).split(/[\\/]/).pop() || `文件-${index + 1}`;
+          const ext = name.includes(".") ? name.split('.').pop()?.toLowerCase() || "unknown" : "unknown";
+          return {
+            id: Date.now() + index,
+            name,
+            size: "-",
+            type: ext,
+            date: new Date().toISOString().split('T')[0],
+            subject: "未分类"
+          };
+        });
+        setResources([...newResources, ...resources]);
+        return;
+      } catch {}
+    }
+    if (!e) return;
     const files = e.target.files;
     if (!files || files.length === 0) return;
     
@@ -67,7 +91,27 @@ export function Resources() {
     }
   };
 
-  const handleFolderUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFolderUpload = async (e?: React.ChangeEvent<HTMLInputElement>) => {
+    if (isTauriAvailable() && !e) {
+      try {
+        const { open } = await import("@tauri-apps/plugin-dialog");
+        const picked = await open({ directory: true, multiple: false });
+        if (!picked || typeof picked !== "string") return;
+        const folderName = picked.split(/[\\/]/).pop() || "本地目录";
+        const mockFolderEntry: ResourceItem = {
+          id: Date.now(),
+          name: `${folderName} (目录)`,
+          size: "-",
+          type: "folder",
+          date: new Date().toISOString().split('T')[0],
+          subject: "未分类",
+          folder: folderName,
+        };
+        setResources([mockFolderEntry, ...resources]);
+        return;
+      } catch {}
+    }
+    if (!e) return;
     const files = e.target.files;
     if (!files || files.length === 0) return;
 
@@ -123,7 +167,7 @@ export function Resources() {
         
         <div className="flex flex-wrap items-center gap-3">
           <button 
-            onClick={() => fileInputRef.current?.click()}
+            onClick={() => isTauriAvailable() ? handleFileUpload() : fileInputRef.current?.click()}
             className="flex items-center gap-2 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-800 text-gray-700 dark:text-gray-200 px-4 py-2.5 rounded-2xl text-sm font-semibold shadow-sm transition-all active:scale-95"
           >
             <Upload className="w-4 h-4" />
@@ -137,7 +181,7 @@ export function Resources() {
             onChange={handleFileUpload} 
           />
           <button 
-            onClick={() => folderInputRef.current?.click()}
+            onClick={() => isTauriAvailable() ? handleFolderUpload() : folderInputRef.current?.click()}
             className="flex items-center gap-2 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-800 text-gray-700 dark:text-gray-200 px-4 py-2.5 rounded-2xl text-sm font-semibold shadow-sm transition-all active:scale-95"
           >
             <Folder className="w-4 h-4" />
@@ -160,19 +204,23 @@ export function Resources() {
               生成练功房 ({selectedIds.length})
             </button>
           )}
-          <div className="relative">
-            <select
-              value={subjectFilter}
-              onChange={(e) => setSubjectFilter(e.target.value)}
-              className="appearance-none bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-2xl text-sm font-semibold text-gray-700 dark:text-gray-200 pl-4 pr-10 py-2.5 shadow-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all"
-            >
-              {subjects.map(subject => (
-                <option key={subject} value={subject}>
-                  {subject === "all" ? "全部科目" : subject}
-                </option>
-              ))}
-            </select>
-            <Filter className="w-4 h-4 absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 dark:text-gray-500 pointer-events-none" />
+          <div className="flex items-center gap-1.5 rounded-2xl bg-white/80 dark:bg-gray-900/80 border border-gray-200 dark:border-gray-800 px-2 py-1 overflow-x-auto max-w-[420px]">
+            {subjects.map((subject) => {
+              const count = subject === "all" ? resources.length : resources.filter(r => r.subject === subject).length;
+              const active = subjectFilter === subject;
+              return (
+                <button
+                  key={subject}
+                  onClick={() => setSubjectFilter(subject)}
+                  className={cn(
+                    "px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-colors",
+                    active ? "bg-[#88B5D3] text-white" : "text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800"
+                  )}
+                >
+                  {subject === "all" ? "全部" : subject} · {count}
+                </button>
+              );
+            })}
           </div>
           <div className="relative">
             <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 dark:text-gray-500" />
@@ -182,11 +230,12 @@ export function Resources() {
               className="pl-9 pr-4 py-2.5 bg-white dark:bg-gray-900 border border-gray-200/60 dark:border-gray-800 rounded-2xl text-sm font-medium text-gray-700 dark:text-gray-200 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all w-full md:w-64 shadow-sm"
             />
           </div>
-          <button className="p-2.5 bg-white dark:bg-gray-900 border border-gray-200/60 dark:border-gray-800 rounded-2xl text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors shadow-sm">
-            <Filter className="w-4 h-4" />
-          </button>
         </div>
       </header>
+
+      <div className="glass-soft rounded-2xl px-4 py-3 text-xs text-gray-600 dark:text-gray-400 border border-white/40 dark:border-[#2a3b52]">
+        资源存储建议目录：`~/Documents/EVA_Knowledge_Base/Resources`（当前为资源索引模式，可继续扩展为自动复制到该目录）
+      </div>
 
       <section className="glass-card rounded-3xl p-6 md:p-8">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">

@@ -1,8 +1,25 @@
 import { Outlet } from "react-router-dom";
 import { Sidebar } from "./Sidebar";
 import { GlobalClock } from "./GlobalClock";
+import { useEffect } from "react";
+import { getSettings } from "../lib/settings";
 
 export function Layout() {
+  useEffect(() => {
+    const apply = () => {
+      const settings = getSettings();
+      document.documentElement.style.fontSize = `${settings.fontScale}%`;
+      if (settings.animationLevel === "reduced") {
+        document.documentElement.classList.add("reduce-motion");
+      } else {
+        document.documentElement.classList.remove("reduce-motion");
+      }
+    };
+    apply();
+    window.addEventListener("eva:settings-updated", apply);
+    return () => window.removeEventListener("eva:settings-updated", apply);
+  }, []);
+
   return (
     <div className="min-h-screen bg-[#eef3f8] dark:bg-[#070d16] text-gray-900 dark:text-gray-100 font-sans selection:bg-[#88B5D3]/30 dark:selection:bg-[#88B5D3]/40 selection:text-[#88B5D3] dark:selection:text-[#88B5D3] transition-colors relative overflow-hidden">
       {/* EVA Rei Theme Background */}

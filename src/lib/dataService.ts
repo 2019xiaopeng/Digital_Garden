@@ -69,6 +69,8 @@ export interface ImportedTask {
   priority: string;
   tags: string[];
   status: string;
+  startTime?: string;
+  duration?: number;
 }
 
 export interface ImportReport {
@@ -168,6 +170,59 @@ function nowIso(): string {
 function todayStr(): string {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function parseClock(value?: string): number | null {
+  if (!value) return null;
+  const match = value.match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return null;
+  const hh = Number(match[1]);
+  const mm = Number(match[2]);
+  if (Number.isNaN(hh) || Number.isNaN(mm) || hh < 0 || hh > 23 || mm < 0 || mm > 59) return null;
+  return hh * 60 + mm;
+}
+
+function inferDurations(tasks: ImportedTask[]): ImportedTask[] {
+  const grouped = new Map<string, ImportedTask[]>();
+  for (const task of tasks) {
+    const key = task.date || todayStr();
+    const list = grouped.get(key) || [];
+    list.push({ ...task });
+    grouped.set(key, list);
+  }
+
+  const result: ImportedTask[] = [];
+  for (const [, list] of grouped) {
+    const sorted = [...list].sort((a, b) => {
+      const am = parseClock(a.startTime) ?? 24 * 60;
+      const bm = parseClock(b.startTime) ?? 24 * 60;
+      return am - bm;
+    });
+
+    for (let i = 0; i < sorted.length; i++) {
+      const current = sorted[i];
+      if (current.duration && current.duration > 0) continue;
+      const currentMins = parseClock(current.startTime);
+      if (currentMins === null) {
+        current.duration = 1;
+        continue;
+      }
+
+      let inferred = 2;
+      for (let j = i + 1; j < sorted.length; j++) {
+        const nextMins = parseClock(sorted[j].startTime);
+        if (nextMins !== null && nextMins > currentMins) {
+          inferred = Math.max(0.5, Number(((nextMins - currentMins) / 60).toFixed(1)));
+          break;
+        }
+      }
+      current.duration = inferred;
+    }
+
+    result.push(...sorted);
+  }
+
+  return result;
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -394,6 +449,20 @@ export const DailyLogService = {
     return post;
   },
 
+  async delete(id: string): Promise<void> {
+    const invoke = await getInvoke();
+    if (invoke) {
+      try {
+        await invoke("delete_daily_log", { id });
+        return;
+      } catch (e) {
+        console.warn("Tauri delete_daily_log failed:", e);
+      }
+    }
+    const all = await this.getAll();
+    localStorage.setItem(LS_POSTS, JSON.stringify(all.filter(p => p.id !== id)));
+  },
+
   /** Auto-generate today's review entry from completed tasks */
   async generateDailyReview(completedTasks: LegacyTask[], focusHours: number): Promise<LegacyPost> {
     const today = todayStr();
@@ -506,6 +575,12 @@ export const MarkdownImportService = {
       if (taskMatch) {
         const isDone = taskMatch[1] !== " ";
         let rest = taskMatch[2];
+
+        const timeMatch = rest.match(/^\[(\d{1,2}:\d{2})\]\s*/);
+        const startTime = timeMatch ? timeMatch[1] : undefined;
+        if (timeMatch) {
+          rest = rest.replace(/^\[(\d{1,2}:\d{2})\]\s*/, "").trim();
+        }
         
         let taskDate = currentDate;
         const dateInline = rest.match(/@(\d{4}-\d{2}-\d{2})/);
@@ -517,6 +592,12 @@ export const MarkdownImportService = {
         const tags: string[] = [];
         let priority = "medium";
         const titleParts: string[] = [];
+
+        const priorityBracket = rest.match(/\((High|Medium|Low)\)\s*$/i);
+        if (priorityBracket) {
+          priority = priorityBracket[1].toLowerCase();
+          rest = rest.replace(/\((High|Medium|Low)\)\s*$/i, "").trim();
+        }
 
         for (const word of rest.split(/\s+/)) {
           if (word.startsWith("#")) {
@@ -536,25 +617,28 @@ export const MarkdownImportService = {
             priority,
             tags,
             status: isDone ? "done" : "todo",
+            startTime,
           });
         }
       }
     }
 
-    return { total: tasks.length, created: 0, skipped: 0, tasks };
+    const normalized = inferDurations(tasks);
+    return { total: normalized.length, created: 0, skipped: 0, tasks: normalized };
   },
 
   /** Convert parsed tasks to LegacyTask format and batch create */
   async importTasks(importedTasks: ImportedTask[]): Promise<number> {
-    const legacyTasks: LegacyTask[] = importedTasks.map(t => ({
+    const normalized = inferDurations(importedTasks);
+    const legacyTasks: LegacyTask[] = normalized.map(t => ({
       id: genId(),
       title: t.title,
       description: "",
       status: t.status as LegacyTask["status"],
       priority: t.priority as LegacyTask["priority"],
       date: t.date,
-      startTime: "09:00",
-      duration: 1,
+      startTime: t.startTime || "09:00",
+      duration: t.duration || 1,
       tags: t.tags,
       repeat: "none" as const,
       timerType: "none" as const,
@@ -619,6 +703,8 @@ export const AiService = {
         priority: String(item.priority || "medium"),
         tags: Array.isArray(item.tags) ? item.tags.map(String) : [],
         status: "todo",
+        startTime: item.startTime ? String(item.startTime) : undefined,
+        duration: typeof item.duration === "number" ? item.duration : undefined,
       }));
     } catch {
       console.error("Failed to parse AI response as JSON:", response.content);

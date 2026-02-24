@@ -4,11 +4,12 @@ import {
   ListTodo, GitCommit, AlignLeft, Plus, MoreHorizontal,
   Tag, AlertCircle, ChevronLeft, ChevronRight, FileText,
   X, Play, Pause, RotateCcw, Bell, Repeat, Maximize2, Minimize2, Edit2,
-  Upload, Zap, Sparkles, Loader2
+  Upload, Zap, Sparkles, Loader2, Trash2
 } from "lucide-react";
 import { cn } from "../lib/utils";
 import { TaskService, MarkdownImportService, AiService, isTauriAvailable } from "../lib/dataService";
 import type { LegacyTask, ImportedTask } from "../lib/dataService";
+import { bellUrl, getSettings } from "../lib/settings";
 
 type Task = LegacyTask;
 
@@ -35,7 +36,7 @@ export function Tasks() {
   const [aiInput, setAiInput] = useState("");
   const [aiLoading, setAiLoading] = useState(false);
   const [aiParsedTasks, setAiParsedTasks] = useState<ImportedTask[]>([]);
-  const [aiApiKey, setAiApiKey] = useState(() => localStorage.getItem("eva.ai.apiKey") || "");
+  const [aiApiKey, setAiApiKey] = useState(() => getSettings().aiApiKey || localStorage.getItem("eva.ai.apiKey") || "");
 
   // Load tasks from dataService on mount
   useEffect(() => {
@@ -49,7 +50,7 @@ export function Tasks() {
   const [isAddingTask, setIsAddingTask] = useState(false);
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [newTask, setNewTask] = useState<Partial<Task>>({
-    title: "", description: "", priority: "medium", startTime: "09:00", duration: 1, tags: [], repeat: "none", repeatDays: [], timerType: "none", timerDuration: 25
+    title: "", description: "", priority: "medium", startTime: "09:00", duration: 1, tags: [], repeat: "none", repeatDays: [], timerType: "none", timerDuration: getSettings().defaultPomodoroMinutes
   });
   const [newTag, setNewTag] = useState("");
   const [quickTaskTitle, setQuickTaskTitle] = useState("");
@@ -74,9 +75,14 @@ export function Tasks() {
 
   useEffect(() => {
     // Create audio element for bell
-    audioRef.current = new Audio("https://actions.google.com/sounds/v1/alarms/beep_short.ogg");
+    audioRef.current = new Audio(bellUrl(getSettings().pomodoroBell));
+    const refreshBell = () => {
+      audioRef.current = new Audio(bellUrl(getSettings().pomodoroBell));
+    };
+    window.addEventListener("eva:settings-updated", refreshBell);
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
+      window.removeEventListener("eva:settings-updated", refreshBell);
     };
   }, []);
 
@@ -126,6 +132,25 @@ export function Tasks() {
   const handleAddTask = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newTask.title?.trim()) return;
+
+    // Prevent creating tasks in the past
+    const today = getTodayStr();
+    if (selectedDate < today) {
+      alert("不能在过去的日期创建任务，请选择今天或未来的日期。");
+      return;
+    }
+    // If task is for today, check if task start time has already passed
+    if (selectedDate === today && newTask.startTime) {
+      const now = new Date();
+      const [hh, mm] = newTask.startTime.split(':').map(Number);
+      const taskTime = new Date();
+      taskTime.setHours(hh, mm, 0, 0);
+      if (taskTime.getTime() < now.getTime() - 5 * 60 * 1000) {
+        // Allow 5 min grace
+        const proceed = confirm("该任务的开始时间已过，是否仍然创建？");
+        if (!proceed) return;
+      }
+    }
     
     if (editingTaskId) {
       setTasks(tasks.map(t => t.id === editingTaskId ? { ...t, ...newTask } as Task : t));
@@ -180,7 +205,9 @@ export function Tasks() {
   const toggleTaskStatus = (id: string) => {
     setTasks(tasks.map(t => {
       if (t.id === id) {
-        return { ...t, status: t.status === "done" ? "todo" : "done" };
+        const updated = { ...t, status: t.status === "done" ? "todo" : "done" } as Task;
+        TaskService.update(updated as unknown as LegacyTask).catch(console.warn);
+        return updated;
       }
       return t;
     }));
@@ -212,7 +239,12 @@ export function Tasks() {
 
   const handleQuickAddTask = () => {
     if (!quickTaskTitle.trim()) return;
-    setTasks(prev => [{
+    const today = getTodayStr();
+    if (selectedDate < today) {
+      alert("不能在过去的日期创建任务");
+      return;
+    }
+    const task: Task = {
       id: Date.now().toString(),
       title: quickTaskTitle.trim(),
       description: "",
@@ -225,7 +257,9 @@ export function Tasks() {
       repeat: "none",
       timerType: "none",
       timerDuration: 25,
-    }, ...prev]);
+    };
+    setTasks(prev => [task, ...prev]);
+    TaskService.create(task as unknown as LegacyTask).catch(console.warn);
     setQuickTaskTitle("");
   };
 
@@ -234,11 +268,19 @@ export function Tasks() {
       if (task.id !== id) return task;
       const d = new Date(task.date);
       d.setDate(d.getDate() + 1);
-      return {
+      const updated = {
         ...task,
         date: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`,
       };
+      TaskService.update(updated as unknown as LegacyTask).catch(console.warn);
+      return updated;
     }));
+  };
+
+  const handleDeleteTask = async (id: string) => {
+    if (!confirm("确认删除该任务？")) return;
+    await TaskService.delete(id);
+    setTasks(prev => prev.filter(t => t.id !== id));
   };
 
   useEffect(() => {
@@ -618,6 +660,13 @@ export function Tasks() {
                                 title="编辑任务"
                               >
                                 <Edit2 className="w-4 h-4" />
+                              </button>
+                              <button 
+                                onClick={() => handleDeleteTask(task.id)}
+                                className="p-1.5 text-gray-400 dark:text-gray-500 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10 rounded-lg transition-colors opacity-0 group-hover:opacity-100"
+                                title="删除任务"
+                              >
+                                <Trash2 className="w-4 h-4" />
                               </button>
                               {isOverdue && task.status !== "done" && (
                                 <span className="text-[10px] font-bold text-red-600 dark:text-red-300 bg-red-100 dark:bg-red-500/10 px-2 py-0.5 rounded-md">已延期</span>
@@ -1074,6 +1123,8 @@ export function Tasks() {
                       <div key={i} className="flex items-center gap-3 px-3 py-2 rounded-xl bg-gray-50 dark:bg-[#111b29] text-sm">
                         <span className={cn("w-2 h-2 rounded-full", t.priority === "high" ? "bg-red-500" : t.priority === "low" ? "bg-emerald-500" : "bg-amber-500")} />
                         <span className="flex-1 text-gray-900 dark:text-white truncate">{t.title}</span>
+                        {t.startTime && <span className="text-xs text-[#88B5D3] font-mono">{t.startTime}</span>}
+                        {t.duration && <span className="text-xs text-gray-500">{t.duration}h</span>}
                         <span className="text-xs text-gray-500">{t.date}</span>
                         {t.tags.map(tag => <span key={tag} className="text-[10px] bg-[#88B5D3]/10 text-[#88B5D3] px-1.5 py-0.5 rounded">#{tag}</span>)}
                       </div>
@@ -1142,6 +1193,8 @@ export function Tasks() {
                       <div key={i} className="flex items-center gap-3 px-3 py-2 rounded-xl bg-gray-50 dark:bg-[#111b29] text-sm">
                         <span className={cn("w-2 h-2 rounded-full", t.priority === "high" ? "bg-red-500" : t.priority === "low" ? "bg-emerald-500" : "bg-amber-500")} />
                         <span className="flex-1 text-gray-900 dark:text-white truncate">{t.title}</span>
+                        {t.startTime && <span className="text-xs text-purple-500 font-mono">{t.startTime}</span>}
+                        {t.duration && <span className="text-xs text-gray-500">{t.duration}h</span>}
                         <span className="text-xs text-gray-500">{t.date}</span>
                         {t.tags.map(tag => <span key={tag} className="text-[10px] bg-purple-500/10 text-purple-500 px-1.5 py-0.5 rounded">#{tag}</span>)}
                       </div>
@@ -1160,3 +1213,7 @@ export function Tasks() {
           </div>
         </div>
       )}
+
+    </div>
+  );
+}

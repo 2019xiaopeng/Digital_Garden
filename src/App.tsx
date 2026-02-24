@@ -12,6 +12,7 @@ import { Notes } from "./pages/Notes";
 import { Resources } from "./pages/Resources";
 import { Quiz } from "./pages/Quiz";
 import { Tasks } from "./pages/Tasks";
+import { Settings } from "./pages/Settings";
 
 export default function App() {
   return (
@@ -25,6 +26,7 @@ export default function App() {
           <Route path="resources" element={<Resources />} />
           <Route path="quiz" element={<Quiz />} />
           <Route path="tasks" element={<Tasks />} />
+          <Route path="settings" element={<Settings />} />
         </Route>
       </Routes>
     </BrowserRouter>

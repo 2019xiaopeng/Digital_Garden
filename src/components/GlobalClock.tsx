@@ -46,16 +46,16 @@ export function GlobalClock() {
         >
           <Minimize2 className="w-8 h-8" />
         </button>
-        <div className="flex items-baseline gap-4 md:gap-8 font-mono font-bold text-white">
-          <div className="bg-black dark:bg-black rounded-3xl p-8 md:p-16 shadow-2xl flex items-center justify-center min-w-[160px] md:min-w-[300px]">
+        <div className="flex items-baseline gap-4 md:gap-8 font-mono font-bold text-gray-900 dark:text-white">
+          <div className="bg-white dark:bg-black border border-gray-200 dark:border-white/10 rounded-3xl p-8 md:p-16 shadow-2xl flex items-center justify-center min-w-[160px] md:min-w-[300px]">
             <span className="text-7xl md:text-[12rem] leading-none tracking-tighter">{hours}</span>
           </div>
           <span className="text-5xl md:text-8xl text-gray-400 dark:text-gray-600 animate-pulse">:</span>
-          <div className="bg-black dark:bg-black rounded-3xl p-8 md:p-16 shadow-2xl flex items-center justify-center min-w-[160px] md:min-w-[300px]">
+          <div className="bg-white dark:bg-black border border-gray-200 dark:border-white/10 rounded-3xl p-8 md:p-16 shadow-2xl flex items-center justify-center min-w-[160px] md:min-w-[300px]">
             <span className="text-7xl md:text-[12rem] leading-none tracking-tighter">{minutes}</span>
           </div>
-          <div className="bg-black dark:bg-black rounded-2xl p-4 md:p-8 shadow-xl flex items-center justify-center min-w-[100px] md:min-w-[180px] self-end mb-4 md:mb-8">
-            <span className="text-4xl md:text-7xl leading-none tracking-tighter text-gray-300">{seconds}</span>
+          <div className="bg-white dark:bg-black border border-gray-200 dark:border-white/10 rounded-2xl p-4 md:p-8 shadow-xl flex items-center justify-center min-w-[100px] md:min-w-[180px] self-end mb-4 md:mb-8">
+            <span className="text-4xl md:text-7xl leading-none tracking-tighter text-gray-700 dark:text-gray-300">{seconds}</span>
           </div>
         </div>
       </div>
@@ -64,11 +64,11 @@ export function GlobalClock() {
 
   return (
     <div className="fixed top-6 right-6 z-50 flex items-center gap-3 group">
-      <div className="flex items-baseline gap-1.5 font-mono font-bold text-white bg-black/90 dark:bg-black backdrop-blur-md px-4 py-2 rounded-xl shadow-lg border border-white/10 transition-transform hover:scale-105">
+      <div className="flex items-baseline gap-1.5 font-mono font-bold text-gray-900 dark:text-white bg-white/92 dark:bg-black/92 backdrop-blur-md px-4 py-2 rounded-xl shadow-lg border border-gray-200 dark:border-white/10 transition-transform hover:scale-105">
         <span className="text-xl tracking-tight">{hours}</span>
-        <span className="text-gray-400 animate-pulse">:</span>
+        <span className="text-gray-500 dark:text-gray-400 animate-pulse">:</span>
         <span className="text-xl tracking-tight">{minutes}</span>
-        <span className="text-xs text-gray-400 ml-1 tracking-tighter">{seconds}</span>
+        <span className="text-xs text-gray-500 dark:text-gray-400 ml-1 tracking-tighter">{seconds}</span>
       </div>
       <button 
         onClick={toggleFullscreen}

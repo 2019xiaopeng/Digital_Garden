@@ -1,13 +1,13 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tauri::State;
+use tauri::{Manager, State};
 use tokio::sync::Mutex;
 
 // ═══════════════════════════════════════════════════════════
 // Data Structures (shared between Rust & Frontend)
 // ═══════════════════════════════════════════════════════════
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
 pub struct Task {
     pub id: String,
     pub title: String,
@@ -25,7 +25,7 @@ pub struct Task {
     pub updated_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
 pub struct DailyLog {
     pub id: String,
     pub date: String,        // YYYY-MM-DD
@@ -39,7 +39,7 @@ pub struct DailyLog {
     pub updated_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
 pub struct FocusSession {
     pub id: String,
     pub date: String,
@@ -74,6 +74,9 @@ pub struct ImportedTask {
     pub priority: String,
     pub tags: Vec<String>,
     pub status: String,
+    #[serde(rename = "startTime")]
+    pub start_time: Option<String>,
+    pub duration: Option<f64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -184,8 +187,7 @@ async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, String> {
 #[tauri::command]
 async fn get_tasks(db: State<'_, Arc<Mutex<AppDb>>>) -> Result<Vec<Task>, String> {
     let db = db.lock().await;
-    let rows = sqlx::query_as!(
-        Task,
+    let rows = sqlx::query_as::<_, Task>(
         "SELECT id, title, description, status, priority, date, start_time, duration, tags, repeat_type, timer_type, timer_duration, created_at, updated_at FROM tasks ORDER BY date ASC, start_time ASC"
     )
     .fetch_all(&db.db)
@@ -197,11 +199,10 @@ async fn get_tasks(db: State<'_, Arc<Mutex<AppDb>>>) -> Result<Vec<Task>, String
 #[tauri::command]
 async fn get_tasks_by_date(date: String, db: State<'_, Arc<Mutex<AppDb>>>) -> Result<Vec<Task>, String> {
     let db = db.lock().await;
-    let rows = sqlx::query_as!(
-        Task,
-        "SELECT id, title, description, status, priority, date, start_time, duration, tags, repeat_type, timer_type, timer_duration, created_at, updated_at FROM tasks WHERE date = ? ORDER BY start_time ASC",
-        date
+    let rows = sqlx::query_as::<_, Task>(
+        "SELECT id, title, description, status, priority, date, start_time, duration, tags, repeat_type, timer_type, timer_duration, created_at, updated_at FROM tasks WHERE date = ? ORDER BY start_time ASC"
     )
+    .bind(date)
     .fetch_all(&db.db)
     .await
     .map_err(|e| format!("Failed to fetch tasks by date: {}", e))?;
@@ -306,9 +307,8 @@ async fn batch_create_tasks(tasks: Vec<Task>, db: State<'_, Arc<Mutex<AppDb>>>) 
 #[tauri::command]
 async fn get_daily_logs(db: State<'_, Arc<Mutex<AppDb>>>) -> Result<Vec<DailyLog>, String> {
     let db = db.lock().await;
-    let rows = sqlx::query_as!(
-        DailyLog,
-        r#"SELECT id, date, title, content, mood, sync_rate, tags, auto_generated as "auto_generated: bool", created_at, updated_at FROM daily_logs ORDER BY date DESC"#
+    let rows = sqlx::query_as::<_, DailyLog>(
+        "SELECT id, date, title, content, mood, sync_rate, tags, auto_generated, created_at, updated_at FROM daily_logs ORDER BY date DESC"
     )
     .fetch_all(&db.db)
     .await
@@ -357,6 +357,17 @@ async fn update_daily_log(log: DailyLog, db: State<'_, Arc<Mutex<AppDb>>>) -> Re
     Ok(log)
 }
 
+#[tauri::command]
+async fn delete_daily_log(id: String, db: State<'_, Arc<Mutex<AppDb>>>) -> Result<(), String> {
+    let db = db.lock().await;
+    sqlx::query("DELETE FROM daily_logs WHERE id = ?")
+        .bind(&id)
+        .execute(&db.db)
+        .await
+        .map_err(|e| format!("Failed to delete daily log: {}", e))?;
+    Ok(())
+}
+
 // ═══════════════════════════════════════════════════════════
 // Focus Session Commands
 // ═══════════════════════════════════════════════════════════
@@ -364,8 +375,7 @@ async fn update_daily_log(log: DailyLog, db: State<'_, Arc<Mutex<AppDb>>>) -> Re
 #[tauri::command]
 async fn get_focus_sessions(db: State<'_, Arc<Mutex<AppDb>>>) -> Result<Vec<FocusSession>, String> {
     let db = db.lock().await;
-    let rows = sqlx::query_as!(
-        FocusSession,
+    let rows = sqlx::query_as::<_, FocusSession>(
         "SELECT id, date, checked_in_at, checked_out_at, total_focus_seconds, active_task_id FROM focus_sessions ORDER BY date DESC"
     )
     .fetch_all(&db.db)
@@ -417,26 +427,59 @@ async fn parse_markdown_plan(content: String) -> Result<ImportReport, String> {
         if trimmed.starts_with("- [ ] ") || trimmed.starts_with("- [x] ") || trimmed.starts_with("- [X] ") {
             let is_done = trimmed.starts_with("- [x] ") || trimmed.starts_with("- [X] ");
             let rest = &trimmed[6..];
+            let mut start_time: Option<String> = None;
+            let mut rest_text = rest.trim().to_string();
+
+            if rest_text.starts_with('[') {
+                if let Some(end_idx) = rest_text.find(']') {
+                    let maybe_time = rest_text[1..end_idx].trim();
+                    if parse_clock_minutes(maybe_time).is_some() {
+                        start_time = Some(maybe_time.to_string());
+                        rest_text = rest_text[end_idx + 1..].trim().to_string();
+                    }
+                }
+            }
             
             // Extract @date
             let mut task_date = current_date.clone();
-            let mut task_text = rest.to_string();
-            if let Some(pos) = rest.find('@') {
-                let after_at = &rest[pos + 1..];
+            let mut task_text = rest_text.clone();
+            if let Some(pos) = rest_text.find('@') {
+                let after_at = &rest_text[pos + 1..];
                 if let Some(date) = extract_iso_date(after_at) {
                     task_date = date;
                 }
-                task_text = rest[..pos].trim().to_string();
+                task_text = rest_text[..pos].trim().to_string();
                 // Remove trailing date from text if present
                 if let Some(space_pos) = task_text.rfind(" @") {
                     task_text = task_text[..space_pos].trim().to_string();
                 }
             }
-            
+
             // Extract #tags and #priority
             let mut tags: Vec<String> = Vec::new();
             let mut priority = "medium".to_string();
             let mut clean_title = String::new();
+
+            if task_text.ends_with(')') {
+                if let Some(open_idx) = task_text.rfind('(') {
+                    let level = task_text[open_idx + 1..task_text.len() - 1].trim().to_lowercase();
+                    match level.as_str() {
+                        "high" => {
+                            priority = "high".to_string();
+                            task_text = task_text[..open_idx].trim().to_string();
+                        }
+                        "low" => {
+                            priority = "low".to_string();
+                            task_text = task_text[..open_idx].trim().to_string();
+                        }
+                        "medium" => {
+                            priority = "medium".to_string();
+                            task_text = task_text[..open_idx].trim().to_string();
+                        }
+                        _ => {}
+                    }
+                }
+            }
             
             for part in task_text.split_whitespace() {
                 if part.starts_with('#') {
@@ -464,10 +507,14 @@ async fn parse_markdown_plan(content: String) -> Result<ImportReport, String> {
                     priority,
                     tags,
                     status: if is_done { "done".to_string() } else { "todo".to_string() },
+                    start_time,
+                    duration: None,
                 });
             }
         }
     }
+
+    infer_import_durations(&mut tasks);
 
     let total = tasks.len();
     Ok(ImportReport {
@@ -476,6 +523,74 @@ async fn parse_markdown_plan(content: String) -> Result<ImportReport, String> {
         skipped: 0,
         tasks,
     })
+}
+
+fn parse_clock_minutes(input: &str) -> Option<i32> {
+    let parts: Vec<&str> = input.split(':').collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    let hh: i32 = parts[0].parse().ok()?;
+    let mm: i32 = parts[1].parse().ok()?;
+    if !(0..=23).contains(&hh) || !(0..=59).contains(&mm) {
+        return None;
+    }
+    Some(hh * 60 + mm)
+}
+
+fn infer_import_durations(tasks: &mut Vec<ImportedTask>) {
+    use std::collections::HashMap;
+    let mut by_date: HashMap<String, Vec<usize>> = HashMap::new();
+    for (idx, task) in tasks.iter().enumerate() {
+        by_date.entry(task.date.clone()).or_default().push(idx);
+    }
+
+    for (_, mut indices) in by_date {
+        indices.sort_by_key(|idx| {
+            tasks[*idx]
+                .start_time
+                .as_ref()
+                .and_then(|v| parse_clock_minutes(v))
+                .unwrap_or(24 * 60)
+        });
+
+        for i in 0..indices.len() {
+            let cur_idx = indices[i];
+            if tasks[cur_idx].duration.is_some() {
+                continue;
+            }
+            let current_minutes = tasks[cur_idx]
+                .start_time
+                .as_ref()
+                .and_then(|v| parse_clock_minutes(v));
+
+            if current_minutes.is_none() {
+                tasks[cur_idx].duration = Some(1.0);
+                continue;
+            }
+
+            let mut duration_hours = 2.0;
+            for j in i + 1..indices.len() {
+                let next_idx = indices[j];
+                if let Some(next_minutes) = tasks[next_idx]
+                    .start_time
+                    .as_ref()
+                    .and_then(|v| parse_clock_minutes(v))
+                {
+                    let diff = (next_minutes - current_minutes.unwrap()) as f64 / 60.0;
+                    if diff > 0.0 {
+                        duration_hours = (diff * 10.0).round() / 10.0;
+                        if duration_hours < 0.5 {
+                            duration_hours = 0.5;
+                        }
+                        break;
+                    }
+                }
+            }
+
+            tasks[cur_idx].duration = Some(duration_hours);
+        }
+    }
 }
 
 fn extract_iso_date(s: &str) -> Option<String> {
@@ -641,6 +756,7 @@ pub fn run() {
             get_daily_logs,
             create_daily_log,
             update_daily_log,
+            delete_daily_log,
             get_focus_sessions,
             upsert_focus_session,
             parse_markdown_plan,

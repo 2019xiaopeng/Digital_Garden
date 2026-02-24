@@ -22,6 +22,7 @@ type DailyAttendance = {
 type AttendanceMap = Record<string, DailyAttendance>;
 
 const ATTENDANCE_STORAGE_KEY = "qcb.attendance.v1";
+const EXAM_DATE_ISO = "2026-12-20T00:00:00";
 
 const getTodayStr = () => {
   const d = new Date();
@@ -29,6 +30,17 @@ const getTodayStr = () => {
 };
 
 const defaultAttendance = (): DailyAttendance => ({ totalFocusSeconds: 0 });
+
+const getCountdown = (targetIso: string) => {
+  const now = new Date();
+  const target = new Date(targetIso);
+  const difference = Math.max(0, target.getTime() - now.getTime());
+  return {
+    days: Math.floor(difference / (1000 * 60 * 60 * 24)),
+    hours: Math.floor((difference / (1000 * 60 * 60)) % 24),
+    minutes: Math.floor((difference / 1000 / 60) % 60),
+  };
+};
 
 const loadAttendanceMap = (): AttendanceMap => {
   try {
@@ -204,8 +216,7 @@ const FullscreenPomodoro = ({
    Dashboard Component
    ═══════════════════════════════════════════════════════════ */
 export function Dashboard() {
-  const [timeLeft, setTimeLeft] = useState({ days: 0, hours: 0, minutes: 0 });
-  const examDate = new Date("2026-12-20T00:00:00");
+  const [timeLeft, setTimeLeft] = useState(() => getCountdown(EXAM_DATE_ISO));
   const today = getTodayStr();
 
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -218,6 +229,18 @@ export function Dashboard() {
     TaskService.getAll().then((loaded) => {
       setTasks(loaded as unknown as Task[]);
     });
+    FocusService.getAll().then((sessions) => {
+      const mapped: AttendanceMap = {};
+      Object.values(sessions).forEach((s) => {
+        mapped[s.date] = {
+          checkedInAt: s.checked_in_at || undefined,
+          checkedOutAt: s.checked_out_at || undefined,
+          totalFocusSeconds: s.total_focus_seconds || 0,
+          activeTaskId: s.active_task_id || undefined,
+        };
+      });
+      if (Object.keys(mapped).length > 0) setAttendanceMap(mapped);
+    }).catch(() => {});
   }, []);
 
   const [pomodoroSeconds, setPomodoroSeconds] = useState(25 * 60);
@@ -238,24 +261,21 @@ export function Dashboard() {
 
   /* ── Timers ── */
   useEffect(() => {
-    const timer = setInterval(() => {
-      const now = new Date();
-      const difference = examDate.getTime() - now.getTime();
-      if (difference > 0) {
-        setTimeLeft({
-          days: Math.floor(difference / (1000 * 60 * 60 * 24)),
-          hours: Math.floor((difference / (1000 * 60 * 60)) % 24),
-          minutes: Math.floor((difference / 1000 / 60) % 60),
-        });
-      }
-      setSessionNow(Date.now());
-    }, 1000);
+    const countdownTimer = setInterval(() => {
+      setTimeLeft(getCountdown(EXAM_DATE_ISO));
+    }, 30_000);
     const syncTasks = () => {
       TaskService.getAll().then((loaded) => setTasks(loaded as unknown as Task[]));
     };
     window.addEventListener("focus", syncTasks);
-    return () => { clearInterval(timer); window.removeEventListener("focus", syncTasks); };
+    return () => { clearInterval(countdownTimer); window.removeEventListener("focus", syncTasks); };
   }, []);
+
+  useEffect(() => {
+    if (!isCheckedIn) return;
+    const sessionTimer = setInterval(() => setSessionNow(Date.now()), 1000);
+    return () => clearInterval(sessionTimer);
+  }, [isCheckedIn]);
 
   useEffect(() => { localStorage.setItem(ATTENDANCE_STORAGE_KEY, JSON.stringify(attendanceMap)); }, [attendanceMap]);
 
@@ -304,6 +324,16 @@ export function Dashboard() {
   // Persist attendance (localStorage fallback always, plus FocusService for Tauri)
   useEffect(() => {
     localStorage.setItem(ATTENDANCE_STORAGE_KEY, JSON.stringify(attendanceMap));
+    const session = attendanceMap[today];
+    if (!session) return;
+    FocusService.upsert({
+      id: `session-${today}`,
+      date: today,
+      checked_in_at: session.checkedInAt || null,
+      checked_out_at: session.checkedOutAt || null,
+      total_focus_seconds: session.totalFocusSeconds,
+      active_task_id: session.activeTaskId || null,
+    }).catch(() => {});
   }, [attendanceMap]);
 
   /* ── Formatters ── */
@@ -342,6 +372,23 @@ export function Dashboard() {
     }
     return Number((total / 3600).toFixed(1));
   }, [attendanceMap, todayFocusSeconds, today]);
+
+  const focusStats = useMemo(() => {
+    let total7 = 0;
+    let best = 0;
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(); d.setDate(d.getDate() - i);
+      const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      const seconds = dateStr === today ? todayFocusSeconds : (attendanceMap[dateStr]?.totalFocusSeconds || 0);
+      total7 += seconds;
+      best = Math.max(best, seconds);
+    }
+    return {
+      avg7h: Number((total7 / 7 / 3600).toFixed(1)),
+      bestDayH: Number((best / 3600).toFixed(1)),
+      trend: Number(((todayFocusSeconds / 3600) - (total7 / 7 / 3600)).toFixed(1)),
+    };
+  }, [attendanceMap, today, todayFocusSeconds]);
 
   /* ── Active task name ── */
   const activeTaskTitle = useMemo(() => {
@@ -440,10 +487,29 @@ export function Dashboard() {
           <div className="text-center">
             <div className="text-5xl font-mono font-bold text-gray-900 dark:text-white tracking-tight">{formatPomodoro(pomodoroSeconds)}</div>
           </div>
-          <div className="grid grid-cols-3 gap-2 text-xs">
-            <button onClick={() => setPomodoroPreset(25)} className="py-2 rounded-lg glass-soft hover:border-[#88B5D3]/40">25m</button>
-            <button onClick={() => setPomodoroPreset(50)} className="py-2 rounded-lg glass-soft hover:border-[#88B5D3]/40">50m</button>
-            <button onClick={() => setPomodoroPreset(5)} className="py-2 rounded-lg glass-soft hover:border-[#88B5D3]/40">Break</button>
+          <div className="grid grid-cols-4 gap-2 text-xs">
+            <button onClick={() => setPomodoroPreset(25)} className={cn("py-2 rounded-lg glass-soft hover:border-[#88B5D3]/40 transition-colors", pomodoroTotal === 25 * 60 && "border-[#88B5D3] bg-[#88B5D3]/10 text-[#88B5D3] font-semibold")}>25m</button>
+            <button onClick={() => setPomodoroPreset(50)} className={cn("py-2 rounded-lg glass-soft hover:border-[#88B5D3]/40 transition-colors", pomodoroTotal === 50 * 60 && "border-[#88B5D3] bg-[#88B5D3]/10 text-[#88B5D3] font-semibold")}>50m</button>
+            <button onClick={() => setPomodoroPreset(5)} className={cn("py-2 rounded-lg glass-soft hover:border-[#88B5D3]/40 transition-colors", pomodoroTotal === 5 * 60 && "border-[#88B5D3] bg-[#88B5D3]/10 text-[#88B5D3] font-semibold")}>Break</button>
+            <div className="relative">
+              <input
+                type="number"
+                min={1}
+                max={180}
+                placeholder="自定"
+                className="w-full py-2 rounded-lg glass-soft text-center text-xs focus:outline-none focus:border-[#88B5D3] [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    const val = parseInt((e.target as HTMLInputElement).value);
+                    if (val > 0 && val <= 180) setPomodoroPreset(val);
+                  }
+                }}
+                onBlur={(e) => {
+                  const val = parseInt(e.target.value);
+                  if (val > 0 && val <= 180) setPomodoroPreset(val);
+                }}
+              />
+            </div>
           </div>
           <div className="grid grid-cols-2 gap-2">
             <button onClick={() => setIsPomodoroRunning((prev) => !prev)} className="py-2.5 rounded-xl bg-[#88B5D3] hover:bg-[#6f9fbe] text-white text-sm font-semibold">
@@ -503,11 +569,11 @@ export function Dashboard() {
             <HeatmapGrid attendanceMap={attendanceMap} todayFocusSeconds={todayFocusSeconds} />
           </div>
           {/* NERV Stats Grid */}
-          <div className="grid grid-cols-2 gap-3 min-w-[200px]">
+          <div className="grid grid-cols-2 md:grid-cols-2 gap-3 min-w-[180px]">
             <NervDataBlock label="连胜" value={streak} unit="天" accentColor="#FF9900" glowColor="#FF9900" />
             <NervDataBlock label="今日" value={(todayFocusSeconds / 3600).toFixed(1)} unit="h" accentColor="#34d399" />
             <NervDataBlock label="本周" value={weeklyFocusHours} unit="h" accentColor="#88B5D3" />
-            <NervDataBlock label="完成率" value={todayTasks.length ? Math.round((doneTasks.length / todayTasks.length) * 100) : 0} unit="%" accentColor="#a78bfa" />
+            <NervDataBlock label="7日均值" value={focusStats.avg7h} unit="h" accentColor="#22c55e" />
           </div>
         </div>
       </div>

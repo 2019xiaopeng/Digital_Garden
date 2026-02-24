@@ -1,7 +1,8 @@
 import { Link, useLocation } from "react-router-dom";
-import { Home, Clock, BookOpen, FolderOpen, Swords, CalendarDays, Github, Moon, Sun } from "lucide-react";
+import { Home, Clock, BookOpen, FolderOpen, Swords, CalendarDays, Github, Moon, Sun, Settings } from "lucide-react";
 import { cn } from "../lib/utils";
 import { useState, useEffect } from "react";
+import { getSettings } from "../lib/settings";
 
 const navItems = [
   { name: "首页", path: "/", icon: Home },
@@ -10,10 +11,13 @@ const navItems = [
   { name: "知识库", path: "/notes", icon: BookOpen },
   { name: "资源站", path: "/resources", icon: FolderOpen },
   { name: "练功房", path: "/quiz", icon: Swords },
+  { name: "设置", path: "/settings", icon: Settings },
 ];
 
 export function Sidebar() {
   const location = useLocation();
+  const [avatarUrl, setAvatarUrl] = useState(getSettings().avatarUrl);
+  const [bgUrl, setBgUrl] = useState(getSettings().backgroundUrl);
   const [isDark, setIsDark] = useState(() => {
     if (typeof window !== 'undefined') {
       return document.documentElement.classList.contains('dark');
@@ -29,14 +33,29 @@ export function Sidebar() {
     }
   }, [isDark]);
 
+  useEffect(() => {
+    const onSettings = () => {
+      const s = getSettings();
+      setAvatarUrl(s.avatarUrl);
+      setBgUrl(s.backgroundUrl);
+    };
+    window.addEventListener("eva:settings-updated", onSettings);
+    return () => window.removeEventListener("eva:settings-updated", onSettings);
+  }, []);
+
   return (
     <>
       {/* Desktop Sidebar */}
-      <aside className="hidden md:flex flex-col w-64 h-screen fixed left-0 top-0 border-r border-white/50 dark:border-[#2a3b52] bg-white/68 dark:bg-[#0e1724]/66 backdrop-blur-xl p-6 z-40 transition-colors">
+      <aside
+        className="hidden md:flex flex-col w-64 h-screen fixed left-0 top-0 border-r border-white/50 dark:border-[#2a3b52] bg-white/68 dark:bg-[#0e1724]/66 backdrop-blur-xl p-6 z-40 transition-colors overflow-hidden"
+        style={bgUrl ? { backgroundImage: `url(${bgUrl})`, backgroundSize: 'cover', backgroundPosition: 'center' } : undefined}
+      >
+        {bgUrl && <div className="absolute inset-0 bg-white/60 dark:bg-[#0e1724]/75 backdrop-blur-sm" />}
+        <div className={bgUrl ? "relative z-10 flex flex-col h-full" : "flex flex-col h-full"}>
         <div className="flex items-center justify-between mb-10">
           <div className="flex items-center gap-3">
             <img 
-              src="https://images.unsplash.com/photo-1618331835717-801e976710b2?q=80&w=100&auto=format&fit=crop" 
+              src={avatarUrl} 
               alt="Avatar" 
               className="w-10 h-10 rounded-full object-cover shadow-sm ring-2 ring-white dark:ring-gray-800"
               referrerPolicy="no-referrer"
@@ -84,6 +103,7 @@ export function Sidebar() {
             <span>GitHub</span>
           </a>
           <p className="text-[11px] text-gray-400 dark:text-gray-500 mt-3 px-2">© {new Date().getFullYear()} QCB. All rights reserved.</p>
+        </div>
         </div>
       </aside>
 

@@ -4,7 +4,9 @@ import {
   Search, Plus, Sparkles, Send, Bot, User, X, File, Upload, Edit2, Trash2, MessageSquarePlus
 } from "lucide-react";
 import { cn } from "../lib/utils";
-import { GoogleGenAI } from "@google/genai";
+import { ThemedPromptDialog } from "../components/ThemedPromptDialog";
+import { isTauriAvailable, AiService } from "../lib/dataService";
+import { getSettings } from "../lib/settings";
 
 // --- Types & Mock Data ---
 type TreeNode = {
@@ -22,7 +24,13 @@ type ChatMessage = { role: 'user' | 'model'; text: string };
 type ChatSession = { id: string; title: string; messages: ChatMessage[] };
 
 export function Notes() {
-  const [treeData, setTreeData] = useState<TreeNode[]>(initialTree);
+  const [treeData, setTreeData] = useState<TreeNode[]>(() => {
+    try {
+      const saved = localStorage.getItem("eva:knowledge-tree");
+      if (saved) return JSON.parse(saved) as TreeNode[];
+    } catch {}
+    return initialTree;
+  });
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [viewingFile, setViewingFile] = useState<TreeNode | null>(null);
@@ -40,11 +48,17 @@ export function Notes() {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [isAiLoading, setIsAiLoading] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const [promptMode, setPromptMode] = useState<null | "create-folder" | "rename">(null);
 
   const activeSession = chatSessions.find(session => session.id === activeSessionId) || null;
   const chatHistory = activeSession?.messages || [];
 
   const directoryInputProps = { webkitdirectory: "true" } as React.HTMLAttributes<HTMLInputElement>;
+
+  // Persist tree data to localStorage
+  useEffect(() => {
+    localStorage.setItem("eva:knowledge-tree", JSON.stringify(treeData));
+  }, [treeData]);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -69,9 +83,11 @@ export function Notes() {
     setViewingFile(node);
   };
 
-  const handleCreateFolder = () => {
-    const folderName = prompt("请输入新文件夹名称:");
-    if (!folderName) return;
+  const handleCreateFolder = (folderName?: string) => {
+    if (!folderName) {
+      setPromptMode("create-folder");
+      return;
+    }
     
     const newFolder: TreeNode = {
       id: `folder-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -88,7 +104,31 @@ export function Notes() {
     }
   };
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (e?: React.ChangeEvent<HTMLInputElement>) => {
+    if (isTauriAvailable() && !e) {
+      try {
+        const { open } = await import("@tauri-apps/plugin-dialog");
+        const picked = await open({ multiple: true, filters: [{ name: "All", extensions: ["*"] }] });
+        const list = Array.isArray(picked) ? picked : picked ? [picked] : [];
+        if (list.length === 0) return;
+        const targetFolderId = selectedNode?.type === "folder" ? selectedNode.id : null;
+        setTreeData(prev => {
+          let updated = prev;
+          list.forEach((path, index) => {
+            const name = String(path).split(/[\\/]/).pop() || `文件-${index + 1}`;
+            const newFile: TreeNode = {
+              id: `uploaded-${Date.now()}-${name}-${Math.random().toString(36).slice(2, 8)}`,
+              name,
+              type: "file"
+            };
+            updated = addNodeToFolder(updated, targetFolderId, newFile);
+          });
+          return updated;
+        });
+        return;
+      } catch {}
+    }
+    if (!e) return;
     const files = e.target.files;
     if (!files || files.length === 0) return;
     
@@ -110,7 +150,26 @@ export function Notes() {
     }
   };
 
-  const handleFolderUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFolderUpload = async (e?: React.ChangeEvent<HTMLInputElement>) => {
+    if (isTauriAvailable() && !e) {
+      try {
+        const { open } = await import("@tauri-apps/plugin-dialog");
+        const picked = await open({ directory: true, multiple: false });
+        if (picked && typeof picked === "string") {
+          const folderName = picked.split(/[\\/]/).pop() || "新目录";
+          const newFolder: TreeNode = {
+            id: `folder-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            name: folderName,
+            type: "folder",
+            children: [],
+          };
+          const targetFolderId = selectedNode?.type === "folder" ? selectedNode.id : null;
+          setTreeData(prev => addNodeToFolder(prev, targetFolderId, newFolder));
+        }
+        return;
+      } catch {}
+    }
+    if (!e) return;
     const files = e.target.files;
     if (!files || files.length === 0) return;
     setTreeData(prev => {
@@ -127,10 +186,12 @@ export function Notes() {
     }
   };
 
-  const handleRenameNode = () => {
+  const handleRenameNode = (nextName?: string) => {
     if (!selectedNode) return;
-    const nextName = prompt("请输入新的名称:", selectedNode.name);
-    if (!nextName) return;
+    if (!nextName) {
+      setPromptMode("rename");
+      return;
+    }
     setTreeData(prev => updateNodeName(prev, selectedNode.id, nextName));
     if (viewingFile?.id === selectedNode.id) {
       setViewingFile({ ...viewingFile, name: nextName });
@@ -200,20 +261,47 @@ export function Notes() {
   };
 
   const getAiReply = async (userMsg: string) => {
-    const apiKey = (import.meta as any).env.VITE_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
+    const settings = getSettings();
     const modelLabel = getModelLabel(selectedModel);
+    const context = viewingFile ? `当前文件：${viewingFile.name}。` : '当前未选中文件。';
 
-    if (!apiKey) {
-      return `【${modelLabel}】已收到你的问题：${userMsg}\n\n当前未配置云端 API Key，已进入离线回执模式。你可以先上传文档并继续提问，后续接入服务端即可无缝切换到真实推理。`;
+    // Determine API config based on selected model
+    let apiUrl: string;
+    let apiKey: string;
+    let model: string;
+
+    if (selectedModel === "kimi") {
+      apiUrl = "https://api.moonshot.cn/v1/chat/completions";
+      apiKey = settings.aiKimiKey || "";
+      model = "moonshot-v1-8k";
+    } else if (selectedModel === "minimax") {
+      apiUrl = "https://api.minimax.chat/v1/text/chatcompletion_v2";
+      apiKey = settings.aiMinimaxKey || "";
+      model = "MiniMax-Text-01";
+    } else {
+      apiUrl = "https://api.deepseek.com/v1/chat/completions";
+      apiKey = settings.aiApiKey || "";
+      model = "deepseek-chat";
     }
 
-    const ai = new GoogleGenAI({ apiKey });
-    const context = viewingFile ? `当前文件：${viewingFile.name}。` : '当前未选中文件。';
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: `你正在模拟 ${modelLabel} 风格回答，保持简洁清晰。${context} 用户问题：${userMsg}`,
-    });
-    return response.text || "No response.";
+    if (!apiKey) {
+      return `【${modelLabel}】已收到你的问题：${userMsg}\n\n当前未配置 ${modelLabel} 的 API Key，请前往"设置"页面填写。已进入离线回执模式。`;
+    }
+
+    try {
+      const response = await AiService.callApi({
+        api_url: apiUrl,
+        api_key: apiKey,
+        model,
+        system_prompt: `你是EVA系统的知识库AI助手，简洁清晰地回答问题。${context}`,
+        user_message: userMsg,
+        temperature: 0.7,
+        max_tokens: 1024,
+      });
+      return response.content || "No response.";
+    } catch (error: any) {
+      return `调用 ${modelLabel} API 失败: ${error.message || "未知错误"}`;
+    }
   };
 
   const handleAiSubmit = async (e: React.FormEvent) => {
@@ -356,6 +444,7 @@ export function Notes() {
         <div>
           <h1 className="text-3xl font-bold tracking-tight text-gray-900 dark:text-white">知识库</h1>
           <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">管理你的文档、笔记与资料，并使用 AI 辅助阅读。</p>
+          <p className="mt-1 text-xs text-gray-400 dark:text-gray-500">建议存储目录：~/Documents/EVA_Knowledge_Base/Notes</p>
         </div>
       </header>
 
@@ -378,7 +467,7 @@ export function Notes() {
             <div className="flex items-center ml-2 gap-1">
               <button 
                 className="p-1.5 text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-800 rounded-lg transition-colors"
-                onClick={() => fileInputRef.current?.click()}
+                onClick={() => isTauriAvailable() ? handleFileUpload() : fileInputRef.current?.click()}
                 title="上传本地文件"
               >
                 <Upload className="w-4 h-4" />
@@ -392,7 +481,7 @@ export function Notes() {
               />
               <button 
                 className="p-1.5 text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-800 rounded-lg transition-colors"
-                onClick={() => directoryInputRef.current?.click()}
+                onClick={() => isTauriAvailable() ? handleFolderUpload() : directoryInputRef.current?.click()}
                 title="上传文件夹"
               >
                 <Folder className="w-4 h-4" />
@@ -406,14 +495,14 @@ export function Notes() {
                 {...directoryInputProps}
               />
               <button 
-                onClick={handleCreateFolder}
+                onClick={() => handleCreateFolder()}
                 className="p-1.5 text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-800 rounded-lg transition-colors" 
                 title="新建文件夹"
               >
                 <Plus className="w-4 h-4" />
               </button>
               <button 
-                onClick={handleRenameNode}
+                onClick={() => handleRenameNode()}
                 disabled={!selectedNode}
                 className={cn(
                   "p-1.5 rounded-lg transition-colors",
@@ -561,6 +650,31 @@ export function Notes() {
           </div>
         </div>
       </div>
+
+      {/* Prompt Dialogs - rendered unconditionally */}
+      <ThemedPromptDialog
+        open={promptMode === "create-folder"}
+        title="请输入新文件夹名称"
+        placeholder="例如：操作系统 / 线代"
+        confirmText="创建"
+        onCancel={() => setPromptMode(null)}
+        onConfirm={(value) => {
+          handleCreateFolder(value);
+          setPromptMode(null);
+        }}
+      />
+      <ThemedPromptDialog
+        open={promptMode === "rename"}
+        title="请输入新的名称"
+        placeholder={selectedNode?.name || "新名称"}
+        initialValue={selectedNode?.name || ""}
+        confirmText="重命名"
+        onCancel={() => setPromptMode(null)}
+        onConfirm={(value) => {
+          handleRenameNode(value);
+          setPromptMode(null);
+        }}
+      />
 
       {/* Document Viewer Modal */}
       {viewingFile && (
