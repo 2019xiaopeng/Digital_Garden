@@ -5,14 +5,18 @@ import {
 } from "lucide-react";
 import { cn } from "../lib/utils";
 import { ThemedPromptDialog } from "../components/ThemedPromptDialog";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 import { isTauriAvailable, AiService } from "../lib/dataService";
 import { getSettings } from "../lib/settings";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
-// --- Types & Mock Data ---
+// --- Types ---
 type TreeNode = {
   id: string;
   name: string;
   type: "folder" | "file";
+  path?: string;       // absolute path on disk (Tauri) or virtual path
   children?: TreeNode[];
 };
 
@@ -49,6 +53,15 @@ export function Notes() {
   const [isAiLoading, setIsAiLoading] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const [promptMode, setPromptMode] = useState<null | "create-folder" | "rename">(null);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+
+  // Drag-and-drop state
+  const [draggedNodeId, setDraggedNodeId] = useState<string | null>(null);
+  const [dropTargetId, setDropTargetId] = useState<string | null>(null);
+
+  // File preview state
+  const [fileContent, setFileContent] = useState<string | null>(null);
+  const [isLoadingContent, setIsLoadingContent] = useState(false);
 
   const activeSession = chatSessions.find(session => session.id === activeSessionId) || null;
   const chatHistory = activeSession?.messages || [];
@@ -63,6 +76,40 @@ export function Notes() {
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [chatHistory]);
+
+  // Load file content when viewing a file
+  useEffect(() => {
+    if (!viewingFile) {
+      setFileContent(null);
+      return;
+    }
+    const ext = viewingFile.name.split(".").pop()?.toLowerCase() || "";
+    const isText = ["md", "txt", "json", "js", "ts", "tsx", "jsx", "css", "html", "xml", "yaml", "yml", "toml", "csv", "log"].includes(ext);
+    // PDF handled via iframe, skip text loading
+    if (ext === "pdf") { setFileContent(null); return; }
+    if (!isText) { setFileContent(null); return; }
+
+    const loadContent = async () => {
+      setIsLoadingContent(true);
+      try {
+        if (isTauriAvailable() && viewingFile.path) {
+          const { invoke } = await import("@tauri-apps/api/core");
+          const content = await invoke<string>("read_file_content", { path: viewingFile.path });
+          setFileContent(content);
+        } else {
+          // Web fallback: check localStorage
+          const stored = localStorage.getItem(`eva:file:${viewingFile.name}`);
+          setFileContent(stored || null);
+        }
+      } catch (err) {
+        console.warn("Failed to load file content:", err);
+        setFileContent(null);
+      } finally {
+        setIsLoadingContent(false);
+      }
+    };
+    loadContent();
+  }, [viewingFile]);
 
   const toggleFolder = (id: string) => {
     const newExpanded = new Set(expandedFolders);
@@ -83,7 +130,7 @@ export function Notes() {
     setViewingFile(node);
   };
 
-  const handleCreateFolder = (folderName?: string) => {
+  const handleCreateFolder = async (folderName?: string) => {
     if (!folderName) {
       setPromptMode("create-folder");
       return;
@@ -102,49 +149,112 @@ export function Notes() {
       newExpanded.add(targetFolderId);
       setExpandedFolders(newExpanded);
     }
+
+    // Create actual folder on disk
+    if (isTauriAvailable()) {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const parentRelDir = getRelativeDir(treeData, targetFolderId);
+        const relativePath = parentRelDir ? `${parentRelDir}/${folderName}` : folderName;
+        await invoke("create_notes_folder", { relativePath });
+      } catch (err) {
+        console.warn("Failed to create folder on disk:", err);
+      }
+    }
+  };
+
+  // Helper: compute the relative directory path by walking the tree to find the target folder
+  const getRelativeDir = (nodes: TreeNode[], folderId: string | null): string => {
+    if (!folderId) return "";
+    const path: string[] = [];
+    const walk = (items: TreeNode[], target: string): boolean => {
+      for (const n of items) {
+        if (n.id === target) { path.push(n.name); return true; }
+        if (n.children) {
+          if (walk(n.children, target)) { path.unshift(n.name); return true; }
+        }
+      }
+      return false;
+    };
+    walk(nodes, folderId);
+    return path.join("/");
   };
 
   const handleFileUpload = async (e?: React.ChangeEvent<HTMLInputElement>) => {
+    const targetFolderId = selectedNode?.type === "folder" ? selectedNode.id : null;
+
     if (isTauriAvailable() && !e) {
       try {
         const { open } = await import("@tauri-apps/plugin-dialog");
+        const { invoke } = await import("@tauri-apps/api/core");
         const picked = await open({ multiple: true, filters: [{ name: "All", extensions: ["*"] }] });
         const list = Array.isArray(picked) ? picked : picked ? [picked] : [];
         if (list.length === 0) return;
-        const targetFolderId = selectedNode?.type === "folder" ? selectedNode.id : null;
+        const relativeDir = getRelativeDir(treeData, targetFolderId);
+        
         setTreeData(prev => {
           let updated = prev;
-          list.forEach((path, index) => {
-            const name = String(path).split(/[\\/]/).pop() || `文件-${index + 1}`;
+          list.forEach((srcPath) => {
+            const name = String(srcPath).split(/[\\/]/).pop() || "文件";
             const newFile: TreeNode = {
-              id: `uploaded-${Date.now()}-${name}-${Math.random().toString(36).slice(2, 8)}`,
+              id: `uploaded-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
               name,
-              type: "file"
+              type: "file",
+              path: String(srcPath),
             };
             updated = addNodeToFolder(updated, targetFolderId, newFile);
           });
           return updated;
         });
+
+        // Copy files in background
+        for (const srcPath of list) {
+          try {
+            const destPath = await invoke("copy_file_to_notes", { sourcePath: String(srcPath), relativeDir });
+            // Update path in tree
+            setTreeData(prev => {
+              const name = String(srcPath).split(/[\\/]/).pop() || "";
+              return updateNodePath(prev, name, String(destPath));
+            });
+          } catch (err) {
+            console.warn("Failed to copy file:", err);
+          }
+        }
         return;
-      } catch {}
+      } catch (err) {
+        console.warn("Tauri file pick failed:", err);
+      }
     }
+
+    // Web fallback: read file content via FileReader
     if (!e) return;
     const files = e.target.files;
     if (!files || files.length === 0) return;
     
-    const targetFolderId = selectedNode?.type === "folder" ? selectedNode.id : null;
     setTreeData(prev => {
       let updated = prev;
       Array.from(files).forEach((file: File) => {
         const newFile: TreeNode = {
           id: `uploaded-${Date.now()}-${file.name}-${Math.random().toString(36).slice(2, 8)}`,
           name: file.name,
-          type: "file"
+          type: "file",
         };
         updated = addNodeToFolder(updated, targetFolderId, newFile);
       });
       return updated;
     });
+
+    // Store file content in localStorage for web mode
+    for (const file of Array.from(files)) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        localStorage.setItem(`eva:file:${file.name}`, reader.result as string);
+      };
+      if (file.name.endsWith(".md") || file.name.endsWith(".txt")) {
+        reader.readAsText(file);
+      }
+    }
+
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
     }
@@ -200,13 +310,154 @@ export function Notes() {
 
   const handleDeleteNode = () => {
     if (!selectedNode) return;
-    const confirmed = confirm(`确定要删除 "${selectedNode.name}" 吗？`);
-    if (!confirmed) return;
+    setShowDeleteConfirm(true);
+  };
+  const confirmDeleteNode = async () => {
+    if (!selectedNode) return;
+    // Delete from disk
+    if (isTauriAvailable()) {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        // Build relative path from tree ancestors
+        const buildPath = (nodes: TreeNode[], targetId: string, trail: string[]): string[] | null => {
+          for (const n of nodes) {
+            if (n.id === targetId) return [...trail, n.name];
+            if (n.children) {
+              const found = buildPath(n.children, targetId, [...trail, n.name]);
+              if (found) return found;
+            }
+          }
+          return null;
+        };
+        const pathParts = buildPath(treeData, selectedNode.id, []);
+        if (pathParts) {
+          await invoke("delete_notes_item", { relativePath: pathParts.join("/") });
+        }
+      } catch (err) {
+        console.warn("Failed to delete from disk:", err);
+      }
+    }
     setTreeData(prev => removeNode(prev, selectedNode.id));
     if (viewingFile?.id === selectedNode.id) {
       setViewingFile(null);
     }
     setSelectedNodeId(null);
+    setShowDeleteConfirm(false);
+  };
+
+  // --- Drag-and-drop handlers ---
+  const handleDragStart = (e: React.DragEvent, nodeId: string) => {
+    e.stopPropagation();
+    setDraggedNodeId(nodeId);
+    e.dataTransfer.effectAllowed = "move";
+    // Make drag image semi-transparent
+    if (e.currentTarget instanceof HTMLElement) {
+      e.currentTarget.style.opacity = "0.5";
+    }
+  };
+
+  const handleDragEnd = (e: React.DragEvent) => {
+    if (e.currentTarget instanceof HTMLElement) {
+      e.currentTarget.style.opacity = "1";
+    }
+    setDraggedNodeId(null);
+    setDropTargetId(null);
+  };
+
+  const handleDragOver = (e: React.DragEvent, nodeId: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!draggedNodeId || draggedNodeId === nodeId) return;
+    // Only allow dropping onto folders
+    const target = findNode(treeData, nodeId);
+    if (target?.type !== "folder") return;
+    e.dataTransfer.dropEffect = "move";
+    setDropTargetId(nodeId);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.stopPropagation();
+    setDropTargetId(null);
+  };
+
+  const handleDropOnFolder = async (e: React.DragEvent, targetFolderId: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDropTargetId(null);
+    if (!draggedNodeId || draggedNodeId === targetFolderId) return;
+
+    // Prevent dropping a folder into itself or its descendants
+    const draggedNode = findNode(treeData, draggedNodeId);
+    if (!draggedNode) return;
+    if (draggedNode.type === "folder") {
+      const isDescendant = (parent: TreeNode, childId: string): boolean => {
+        if (parent.id === childId) return true;
+        return (parent.children || []).some(c => isDescendant(c, childId));
+      };
+      if (isDescendant(draggedNode, targetFolderId)) return;
+    }
+
+    // Move on disk (Tauri mode)
+    if (isTauriAvailable()) {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const fromPath = getRelativePath(treeData, draggedNodeId);
+        const targetDirPath = getRelativePath(treeData, targetFolderId);
+        if (fromPath && targetDirPath !== null) {
+          const name = fromPath.split("/").pop() || "";
+          const toPath = targetDirPath ? `${targetDirPath}/${name}` : name;
+          await invoke("move_notes_item", { fromRelative: fromPath, toRelative: toPath });
+        }
+      } catch (err) {
+        console.warn("Failed to move on disk:", err);
+      }
+    }
+
+    // Move in tree state
+    setTreeData(prev => moveNodeToFolder(prev, draggedNodeId, targetFolderId));
+    // Auto-expand target folder
+    setExpandedFolders(prev => new Set(prev).add(targetFolderId));
+    setDraggedNodeId(null);
+  };
+
+  const handleDropOnRoot = async (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDropTargetId(null);
+    if (!draggedNodeId) return;
+
+    // Move to root on disk
+    if (isTauriAvailable()) {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const fromPath = getRelativePath(treeData, draggedNodeId);
+        if (fromPath) {
+          const name = fromPath.split("/").pop() || "";
+          await invoke("move_notes_item", { fromRelative: fromPath, toRelative: name });
+        }
+      } catch (err) {
+        console.warn("Failed to move to root on disk:", err);
+      }
+    }
+
+    setTreeData(prev => moveNodeToFolder(prev, draggedNodeId, null));
+    setDraggedNodeId(null);
+  };
+
+  // Build the relative path for a node by walking the tree
+  const getRelativePath = (nodes: TreeNode[], targetId: string): string | null => {
+    const walk = (items: TreeNode[], trail: string[]): string[] | null => {
+      for (const n of items) {
+        if (n.id === targetId) return [...trail, n.name];
+        if (n.children) {
+          const found = walk(n.children, [...trail, n.name]);
+          if (found) return found;
+        }
+      }
+      return null;
+    };
+    const parts = walk(nodes, []);
+    return parts ? parts.join("/") : null;
   };
 
   const handleMouseDown = (e: React.MouseEvent) => {
@@ -363,6 +614,26 @@ export function Notes() {
       });
   };
 
+  const updateNodePath = (nodes: TreeNode[], fileName: string, newPath: string): TreeNode[] => {
+    return nodes.map(node => {
+      if (node.type === "file" && node.name === fileName && !node.path) {
+        return { ...node, path: newPath };
+      }
+      if (node.children) {
+        return { ...node, children: updateNodePath(node.children, fileName, newPath) };
+      }
+      return node;
+    });
+  };
+
+  // Move a node from anywhere in the tree to a target folder (or root)
+  const moveNodeToFolder = (nodes: TreeNode[], nodeId: string, targetFolderId: string | null): TreeNode[] => {
+    const movedNode = findNode(nodes, nodeId);
+    if (!movedNode) return nodes;
+    const cleaned = removeNode(nodes, nodeId);
+    return addNodeToFolder(cleaned, targetFolderId, movedNode);
+  };
+
   const addNodeToFolder = (nodes: TreeNode[], folderId: string | null, node: TreeNode): TreeNode[] => {
     if (!folderId) return [...nodes, node];
     return nodes.map(item => {
@@ -402,17 +673,27 @@ export function Notes() {
     return nodes.map(node => {
       const isExpanded = expandedFolders.has(node.id);
       const isSelected = selectedNodeId === node.id;
+      const isDragTarget = dropTargetId === node.id;
+      const isBeingDragged = draggedNodeId === node.id;
 
       return (
         <div key={node.id}>
           <div 
             className={cn(
-              "flex items-center gap-1.5 py-1.5 px-2 rounded-lg cursor-pointer transition-colors text-sm",
+              "flex items-center gap-1.5 py-1.5 px-2 rounded-lg cursor-pointer transition-all text-sm",
               isSelected ? "bg-[#88B5D3]/10 dark:bg-[#88B5D3]/20 text-[#88B5D3] dark:text-[#88B5D3]" : "hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-700 dark:text-gray-300",
+              isDragTarget && "ring-2 ring-[#88B5D3] bg-[#88B5D3]/15 dark:bg-[#88B5D3]/25",
+              isBeingDragged && "opacity-50",
               level === 0 && "font-medium"
             )}
             style={{ paddingLeft: `${level * 12 + 8}px` }}
             onClick={() => handleNodeClick(node)}
+            draggable
+            onDragStart={(e) => handleDragStart(e, node.id)}
+            onDragEnd={handleDragEnd}
+            onDragOver={node.type === "folder" ? (e) => handleDragOver(e, node.id) : undefined}
+            onDragLeave={node.type === "folder" ? handleDragLeave : undefined}
+            onDrop={node.type === "folder" ? (e) => handleDropOnFolder(e, node.id) : undefined}
           >
             {node.type === "folder" ? (
               <>
@@ -525,7 +806,11 @@ export function Notes() {
               </button>
             </div>
           </div>
-          <div className="flex-1 overflow-y-auto p-2">
+          <div
+            className="flex-1 overflow-y-auto p-2"
+            onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; }}
+            onDrop={handleDropOnRoot}
+          >
             {treeData.length === 0 ? (
               <div className="h-full min-h-48 flex flex-col items-center justify-center text-center px-4 text-gray-500 dark:text-gray-400">
                 <Folder className="w-10 h-10 mb-3 text-[#88B5D3]/70" />
@@ -652,6 +937,15 @@ export function Notes() {
       </div>
 
       {/* Prompt Dialogs - rendered unconditionally */}
+      <ConfirmDialog
+        open={showDeleteConfirm}
+        title={`确定删除「${selectedNode?.name || ""}」？`}
+        description={selectedNode?.type === "folder" ? "该文件夹及其所有子文件将一并删除。" : "删除后将无法恢复。"}
+        confirmText="删除"
+        variant="danger"
+        onConfirm={confirmDeleteNode}
+        onCancel={() => setShowDeleteConfirm(false)}
+      />
       <ThemedPromptDialog
         open={promptMode === "create-folder"}
         title="请输入新文件夹名称"
@@ -690,15 +984,97 @@ export function Notes() {
                 <X className="w-5 h-5" />
               </button>
             </div>
-            <div className="flex-1 bg-gray-100 dark:bg-gray-950 flex items-center justify-center p-8 overflow-y-auto">
-              {/* Placeholder for PDF/Markdown content */}
-              <div className="bg-white dark:bg-gray-900 w-full max-w-3xl min-h-full shadow-sm border border-gray-200 dark:border-gray-800 p-12 flex flex-col items-center justify-center text-gray-400 dark:text-gray-500">
-                <FileText className="w-16 h-16 mb-4 opacity-20" />
-                <p className="text-lg font-medium">文档预览区域</p>
-                <p className="text-sm mt-2 text-center max-w-md">
-                  这里将渲染 {viewingFile.name} 的内容。如果是 PDF，可以使用 react-pdf；如果是 Markdown，可以使用 react-markdown。
-                </p>
-              </div>
+            <div className="flex-1 bg-gray-100 dark:bg-gray-950 overflow-y-auto">
+              {(() => {
+                const ext = viewingFile.name.split(".").pop()?.toLowerCase() || "";
+                // PDF preview
+                if (ext === "pdf") {
+                  if (isTauriAvailable() && viewingFile.path) {
+                    return (
+                      <iframe
+                        src={viewingFile.path}
+                        className="w-full h-full border-none"
+                        title={viewingFile.name}
+                      />
+                    );
+                  }
+                  return (
+                    <div className="flex flex-col items-center justify-center h-full text-gray-400 dark:text-gray-500">
+                      <FileText className="w-16 h-16 mb-4 opacity-20" />
+                      <p className="text-lg font-medium">PDF 预览</p>
+                      <p className="text-sm mt-2">该 PDF 文件无法在当前模式下预览</p>
+                    </div>
+                  );
+                }
+                // Markdown preview
+                if (ext === "md") {
+                  if (isLoadingContent) {
+                    return (
+                      <div className="flex items-center justify-center h-full">
+                        <div className="flex items-center gap-2 text-gray-500">
+                          <span className="w-2 h-2 bg-[#88B5D3] rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                          <span className="w-2 h-2 bg-[#88B5D3] rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                          <span className="w-2 h-2 bg-[#88B5D3] rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                        </div>
+                      </div>
+                    );
+                  }
+                  if (fileContent) {
+                    return (
+                      <div className="bg-white dark:bg-gray-900 w-full max-w-3xl mx-auto min-h-full shadow-sm border-x border-gray-200 dark:border-gray-800 p-8 md:p-12">
+                        <article className="prose prose-gray dark:prose-invert max-w-none prose-headings:text-gray-900 dark:prose-headings:text-white prose-a:text-[#88B5D3] prose-code:bg-gray-100 dark:prose-code:bg-gray-800 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded-md prose-pre:bg-gray-900 dark:prose-pre:bg-gray-950 prose-pre:border prose-pre:border-gray-200 dark:prose-pre:border-gray-800">
+                          <ReactMarkdown remarkPlugins={[remarkGfm]}>{fileContent}</ReactMarkdown>
+                        </article>
+                      </div>
+                    );
+                  }
+                  return (
+                    <div className="flex flex-col items-center justify-center h-full text-gray-400 dark:text-gray-500">
+                      <FileText className="w-16 h-16 mb-4 opacity-20" />
+                      <p className="text-lg font-medium">无法加载文件内容</p>
+                      <p className="text-sm mt-2">请确认文件已正确上传并保存至磁盘</p>
+                    </div>
+                  );
+                }
+                // Text file preview
+                const isText = ["txt", "json", "js", "ts", "tsx", "jsx", "css", "html", "xml", "yaml", "yml", "toml", "csv", "log"].includes(ext);
+                if (isText) {
+                  if (isLoadingContent) {
+                    return (
+                      <div className="flex items-center justify-center h-full">
+                        <div className="flex items-center gap-2 text-gray-500">
+                          <span className="w-2 h-2 bg-[#88B5D3] rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                          <span className="w-2 h-2 bg-[#88B5D3] rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                          <span className="w-2 h-2 bg-[#88B5D3] rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                        </div>
+                      </div>
+                    );
+                  }
+                  if (fileContent) {
+                    return (
+                      <div className="bg-white dark:bg-gray-900 w-full max-w-3xl mx-auto min-h-full shadow-sm border-x border-gray-200 dark:border-gray-800 p-8 md:p-12">
+                        <pre className="text-sm text-gray-800 dark:text-gray-200 whitespace-pre-wrap break-words font-mono leading-relaxed">
+                          {fileContent}
+                        </pre>
+                      </div>
+                    );
+                  }
+                  return (
+                    <div className="flex flex-col items-center justify-center h-full text-gray-400 dark:text-gray-500">
+                      <FileText className="w-16 h-16 mb-4 opacity-20" />
+                      <p className="text-lg font-medium">无法加载文件内容</p>
+                    </div>
+                  );
+                }
+                // Unsupported format
+                return (
+                  <div className="flex flex-col items-center justify-center h-full text-gray-400 dark:text-gray-500">
+                    <FileText className="w-16 h-16 mb-4 opacity-20" />
+                    <p className="text-lg font-medium">不支持预览此文件格式</p>
+                    <p className="text-sm mt-2">{viewingFile.name}（.{ext}）暂不支持在线预览</p>
+                  </div>
+                );
+              })()}
             </div>
           </div>
         </div>

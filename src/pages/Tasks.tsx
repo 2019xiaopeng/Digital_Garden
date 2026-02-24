@@ -7,6 +7,7 @@ import {
   Upload, Zap, Sparkles, Loader2, Trash2
 } from "lucide-react";
 import { cn } from "../lib/utils";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 import { TaskService, MarkdownImportService, AiService, isTauriAvailable } from "../lib/dataService";
 import type { LegacyTask, ImportedTask } from "../lib/dataService";
 import { bellUrl, getSettings } from "../lib/settings";
@@ -49,6 +50,7 @@ export function Tasks() {
   // Add Task Modal State
   const [isAddingTask, setIsAddingTask] = useState(false);
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
+  const [deletingTaskId, setDeletingTaskId] = useState<string | null>(null);
   const [newTask, setNewTask] = useState<Partial<Task>>({
     title: "", description: "", priority: "medium", startTime: "09:00", duration: 1, tags: [], repeat: "none", repeatDays: [], timerType: "none", timerDuration: getSettings().defaultPomodoroMinutes
   });
@@ -278,9 +280,13 @@ export function Tasks() {
   };
 
   const handleDeleteTask = async (id: string) => {
-    if (!confirm("确认删除该任务？")) return;
-    await TaskService.delete(id);
-    setTasks(prev => prev.filter(t => t.id !== id));
+    setDeletingTaskId(id);
+  };
+  const confirmDeleteTask = async () => {
+    if (!deletingTaskId) return;
+    await TaskService.delete(deletingTaskId);
+    setTasks(prev => prev.filter(t => t.id !== deletingTaskId));
+    setDeletingTaskId(null);
   };
 
   useEffect(() => {
@@ -1214,6 +1220,15 @@ export function Tasks() {
         </div>
       )}
 
+      <ConfirmDialog
+        open={!!deletingTaskId}
+        title="确认删除该任务？"
+        description="删除后将无法恢复，请确认操作。"
+        confirmText="删除"
+        variant="danger"
+        onConfirm={confirmDeleteTask}
+        onCancel={() => setDeletingTaskId(null)}
+      />
     </div>
   );
 }

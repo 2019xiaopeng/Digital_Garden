@@ -2,6 +2,7 @@ import { Calendar, Clock, ArrowRight, Search, Filter, Plus, X, Tag as TagIcon, C
 import { useState, useMemo, useEffect } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { cn } from "../lib/utils";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 import { MarkdownEditor } from "../components/MarkdownEditor";
 import { DailyLogService, TaskService, AiService, isTauriAvailable } from "../lib/dataService";
 import type { LegacyPost } from "../lib/dataService";
@@ -32,6 +33,7 @@ export function Blog() {
   // AI Review State
   const [aiReviewLoading, setAiReviewLoading] = useState(false);
   const [expandedPostIds, setExpandedPostIds] = useState<Set<string>>(new Set());
+  const [deletingPostId, setDeletingPostId] = useState<string | null>(null);
   const DRAFT_KEY = "eva.blog.draft.v1";
 
   // Load posts from dataService
@@ -176,10 +178,13 @@ export function Blog() {
   };
 
   const handleDelete = async (id: string) => {
-    if (!confirm("确认删除这篇留痕吗？")) return;
-    await DailyLogService.delete(id);
-    const next = posts.filter((p) => p.id !== id);
-    setPosts(next);
+    setDeletingPostId(id);
+  };
+  const confirmDeletePost = async () => {
+    if (!deletingPostId) return;
+    await DailyLogService.delete(deletingPostId);
+    setPosts(prev => prev.filter(p => p.id !== deletingPostId));
+    setDeletingPostId(null);
   };
 
   useEffect(() => {
@@ -377,16 +382,18 @@ export function Blog() {
         ) : (
           currentPosts.map((post) => (
             <article key={post.id} className="group relative glass-card rounded-3xl p-8 hover:shadow-md transition-all duration-300">
-              <div className="absolute top-8 right-8 flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+              <div className="absolute top-8 right-8 flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity z-10">
                 <button 
-                  onClick={(e) => { e.preventDefault(); handleEdit(post); }}
+                  onClick={(e) => { e.stopPropagation(); e.preventDefault(); handleEdit(post); }}
                   className="p-2 bg-gray-100 dark:bg-gray-800 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-400"
+                  title="编辑"
                 >
                   <Edit3 className="w-4 h-4" />
                 </button>
                 <button 
-                  onClick={(e) => { e.preventDefault(); handleDelete(post.id); }}
+                  onClick={(e) => { e.stopPropagation(); e.preventDefault(); handleDelete(post.id); }}
                   className="p-2 bg-red-50 dark:bg-red-500/10 rounded-lg hover:bg-red-100 dark:hover:bg-red-500/20 text-red-500"
+                  title="删除"
                 >
                   <Trash2 className="w-4 h-4" />
                 </button>
@@ -423,13 +430,14 @@ export function Blog() {
               <button
                 onClick={(e) => {
                   e.preventDefault();
+                  e.stopPropagation();
                   setExpandedPostIds((prev) => {
                     const next = new Set(prev);
                     if (next.has(post.id)) next.delete(post.id); else next.add(post.id);
                     return next;
                   });
                 }}
-                className="text-xs text-[#88B5D3] hover:text-[#6f9fbe] mb-4"
+                className="relative z-10 text-xs text-[#88B5D3] hover:text-[#6f9fbe] mb-4"
               >
                 {expandedPostIds.has(post.id) ? "收起正文" : "展开正文"}
               </button>
@@ -604,6 +612,16 @@ export function Blog() {
           </div>
         </div>
       )}
+
+      <ConfirmDialog
+        open={!!deletingPostId}
+        title="确认删除这篇留痕？"
+        description="删除后将无法恢复此留痕记录。"
+        confirmText="删除"
+        variant="danger"
+        onConfirm={confirmDeletePost}
+        onCancel={() => setDeletingPostId(null)}
+      />
     </div>
   );
 }

@@ -2,6 +2,7 @@ import { Calendar, ArrowLeft, Edit3, Trash2, Smile, Frown, Meh, Zap } from "luci
 import { useParams, Link, useNavigate } from "react-router-dom";
 import { useEffect, useState, useMemo } from "react";
 import { DailyLogService } from "../lib/dataService";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 import type { LegacyPost } from "../lib/dataService";
 
 const markdownToHtml = (md: string) => {
@@ -38,6 +39,7 @@ export function BlogPost() {
   const navigate = useNavigate();
   const [post, setPost] = useState<LegacyPost | null>(null);
   const [loading, setLoading] = useState(true);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
   useEffect(() => {
     DailyLogService.getAll().then((posts) => {
@@ -49,7 +51,6 @@ export function BlogPost() {
 
   const handleDelete = async () => {
     if (!post) return;
-    if (!confirm("\u786e\u8ba4\u5220\u9664\u8fd9\u7bc7\u7559\u75d5\u5417\uff1f")) return;
     await DailyLogService.delete(post.id);
     navigate("/blog");
   };
@@ -61,7 +62,7 @@ export function BlogPost() {
   if (loading) {
     return (
       <div className="max-w-3xl mx-auto py-20 text-center text-gray-500 dark:text-gray-400 animate-pulse">
-        \u52a0\u8f7d\u4e2d\u2026
+        加载中…
       </div>
     );
   }
@@ -71,14 +72,14 @@ export function BlogPost() {
       <div className="max-w-3xl mx-auto animate-in fade-in slide-in-from-bottom-4 duration-700 ease-out pb-20">
         <header className="mb-10">
           <Link to="/blog" className="inline-flex items-center gap-1 text-sm text-[#88B5D3] hover:text-[#6f9fbe] mb-6 transition-colors">
-            <ArrowLeft className="w-4 h-4" /> \u8fd4\u56de\u7559\u75d5\u5217\u8868
+            <ArrowLeft className="w-4 h-4" /> 返回留痕列表
           </Link>
           <h1 className="text-4xl font-bold tracking-tight text-gray-900 dark:text-white sm:text-5xl mb-6 leading-tight">
-            \u672a\u627e\u5230\u6587\u7ae0
+            未找到文章
           </h1>
         </header>
         <article className="glass-card rounded-3xl p-10 text-center text-gray-500 dark:text-gray-400">
-          \u8be5\u7559\u75d5\u4e0d\u5b58\u5728\u6216\u5df2\u88ab\u5220\u9664\u3002
+          该留痕不存在或已被删除。
         </article>
       </div>
     );
@@ -88,7 +89,7 @@ export function BlogPost() {
     <div className="max-w-3xl mx-auto animate-in fade-in slide-in-from-bottom-4 duration-700 ease-out pb-20">
       <header className="mb-10">
         <Link to="/blog" className="inline-flex items-center gap-1 text-sm text-[#88B5D3] hover:text-[#6f9fbe] mb-6 transition-colors">
-          <ArrowLeft className="w-4 h-4" /> \u8fd4\u56de\u7559\u75d5\u5217\u8868
+          <ArrowLeft className="w-4 h-4" /> 返回留痕列表
         </Link>
         <div className="flex flex-wrap items-center gap-4 mb-6 text-xs font-medium text-gray-500 dark:text-gray-400">
           <span className="text-gray-900 dark:text-white bg-gray-100 dark:bg-gray-800 px-3 py-1.5 rounded-full uppercase tracking-widest">
@@ -120,13 +121,13 @@ export function BlogPost() {
             state={{ editId: post.id }}
             className="px-3 py-1.5 rounded-lg text-sm font-medium text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 flex items-center gap-1.5 transition-colors"
           >
-            <Edit3 className="w-4 h-4" /> \u7f16\u8f91
+            <Edit3 className="w-4 h-4" /> 编辑
           </Link>
           <button
-            onClick={handleDelete}
+            onClick={() => setShowDeleteConfirm(true)}
             className="px-3 py-1.5 rounded-lg text-sm font-medium text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10 flex items-center gap-1.5 transition-colors"
           >
-            <Trash2 className="w-4 h-4" /> \u5220\u9664
+            <Trash2 className="w-4 h-4" /> 删除
           </button>
         </div>
         <div
@@ -134,6 +135,16 @@ export function BlogPost() {
           dangerouslySetInnerHTML={{ __html: htmlContent }}
         />
       </article>
+
+      <ConfirmDialog
+        open={showDeleteConfirm}
+        title="确认删除这篇留痕？"
+        description="删除后将无法恢复此留痕记录。"
+        confirmText="删除"
+        variant="danger"
+        onConfirm={handleDelete}
+        onCancel={() => setShowDeleteConfirm(false)}
+      />
     </div>
   );
 }

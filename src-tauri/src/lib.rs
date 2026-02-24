@@ -707,6 +707,100 @@ async fn read_file_content(path: String) -> Result<String, String> {
 }
 
 // ═══════════════════════════════════════════════════════════
+// Knowledge base file operations
+// ═══════════════════════════════════════════════════════════
+
+/// Get the Notes directory path, creating it if needed
+#[tauri::command]
+async fn get_notes_dir() -> Result<String, String> {
+    let home = dirs_next_home();
+    let notes_dir = format!("{}/Documents/EVA_Knowledge_Base/Notes", home);
+    std::fs::create_dir_all(&notes_dir)
+        .map_err(|e| format!("Failed to create Notes dir: {}", e))?;
+    Ok(notes_dir)
+}
+
+/// Copy a file into the Notes directory (preserving name), return the dest path
+#[tauri::command]
+async fn copy_file_to_notes(source_path: String, relative_dir: String) -> Result<String, String> {
+    let home = dirs_next_home();
+    let base = format!("{}/Documents/EVA_Knowledge_Base/Notes", home);
+    let target_dir = if relative_dir.is_empty() {
+        base.clone()
+    } else {
+        format!("{}/{}", base, relative_dir)
+    };
+    std::fs::create_dir_all(&target_dir)
+        .map_err(|e| format!("Failed to create directory {}: {}", target_dir, e))?;
+
+    let file_name = std::path::Path::new(&source_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown");
+    let dest = format!("{}/{}", target_dir, file_name);
+    std::fs::copy(&source_path, &dest)
+        .map_err(|e| format!("Failed to copy {} -> {}: {}", source_path, dest, e))?;
+    Ok(dest)
+}
+
+/// Write text content to a file in the Notes directory
+#[tauri::command]
+async fn write_notes_file(relative_path: String, content: String) -> Result<String, String> {
+    let home = dirs_next_home();
+    let full_path = format!("{}/Documents/EVA_Knowledge_Base/Notes/{}", home, relative_path);
+    if let Some(parent) = std::path::Path::new(&full_path).parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create dir: {}", e))?;
+    }
+    std::fs::write(&full_path, &content)
+        .map_err(|e| format!("Failed to write {}: {}", full_path, e))?;
+    Ok(full_path)
+}
+
+/// Create a folder in the Notes directory
+#[tauri::command]
+async fn create_notes_folder(relative_path: String) -> Result<String, String> {
+    let home = dirs_next_home();
+    let full_path = format!("{}/Documents/EVA_Knowledge_Base/Notes/{}", home, relative_path);
+    std::fs::create_dir_all(&full_path)
+        .map_err(|e| format!("Failed to create folder {}: {}", full_path, e))?;
+    Ok(full_path)
+}
+
+/// Delete a file or folder from Notes directory
+#[tauri::command]
+async fn delete_notes_item(relative_path: String) -> Result<(), String> {
+    let home = dirs_next_home();
+    let full_path = format!("{}/Documents/EVA_Knowledge_Base/Notes/{}", home, relative_path);
+    let path = std::path::Path::new(&full_path);
+    if path.is_dir() {
+        std::fs::remove_dir_all(path)
+            .map_err(|e| format!("Failed to delete folder: {}", e))?;
+    } else if path.is_file() {
+        std::fs::remove_file(path)
+            .map_err(|e| format!("Failed to delete file: {}", e))?;
+    }
+    Ok(())
+}
+
+/// Move (rename) a file or folder within Notes directory
+#[tauri::command]
+async fn move_notes_item(from_relative: String, to_relative: String) -> Result<(), String> {
+    let home = dirs_next_home();
+    let base = format!("{}/Documents/EVA_Knowledge_Base/Notes", home);
+    let src = format!("{}/{}", base, from_relative);
+    let dest = format!("{}/{}", base, to_relative);
+    // Ensure destination parent directory exists
+    if let Some(parent) = std::path::Path::new(&dest).parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create dest dir: {}", e))?;
+    }
+    std::fs::rename(&src, &dest)
+        .map_err(|e| format!("Failed to move {} -> {}: {}", src, dest, e))?;
+    Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════
 // App Entry Point
 // ═══════════════════════════════════════════════════════════
 
@@ -762,6 +856,12 @@ pub fn run() {
             parse_markdown_plan,
             ai_proxy,
             read_file_content,
+            get_notes_dir,
+            copy_file_to_notes,
+            write_notes_file,
+            create_notes_folder,
+            delete_notes_item,
+            move_notes_item,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
