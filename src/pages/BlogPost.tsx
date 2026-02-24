@@ -3,14 +3,16 @@ import { useParams, Link, useNavigate } from "react-router-dom";
 import { useEffect, useState, useMemo } from "react";
 import { DailyLogService } from "../lib/dataService";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { buildVideoUrlWithTimestamp, getVideoUrlFromMarkdown, openExternalUrl, parseFrontmatter, replaceTimestampTagsWithLinks } from "../lib/videoBookmark";
 import type { LegacyPost } from "../lib/dataService";
 
 const markdownToHtml = (md: string) => {
-  const escaped = md
+  const { body, frontmatter } = parseFrontmatter(md);
+  const escaped = body
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
-  return escaped
+  const html = escaped
     .replace(/^###\s+(.+)$/gm, '<h3 class="text-lg font-semibold mt-6 mb-2">$1</h3>')
     .replace(/^##\s+(.+)$/gm, '<h2 class="text-xl font-bold mt-8 mb-3">$1</h2>')
     .replace(/^#\s+(.+)$/gm, '<h1 class="text-2xl font-bold mt-8 mb-4">$1</h1>')
@@ -23,6 +25,8 @@ const markdownToHtml = (md: string) => {
     .replace(/^---$/gm, '<hr class="my-6 border-gray-200 dark:border-gray-800" />')
     .replace(/\n\n/g, "<br/><br/>")
     .replace(/\n/g, "<br/>");
+
+  return replaceTimestampTagsWithLinks(html, frontmatter.video || null);
 };
 
 const getMoodIcon = (mood: string) => {
@@ -58,6 +62,20 @@ export function BlogPost() {
   const htmlContent = useMemo(() => {
     return post ? markdownToHtml(post.excerpt) : "";
   }, [post]);
+
+  const handleTimestampClick = async (e: React.MouseEvent<HTMLElement>) => {
+    const target = e.target as HTMLElement;
+    const tag = target.closest("[data-video-seconds]") as HTMLElement | null;
+    if (!tag || !post) return;
+    e.preventDefault();
+
+    const videoUrl = getVideoUrlFromMarkdown(post.excerpt);
+    if (!videoUrl) return;
+
+    const seconds = Number(tag.dataset.videoSeconds || "0");
+    if (!Number.isFinite(seconds) || seconds < 0) return;
+    await openExternalUrl(buildVideoUrlWithTimestamp(videoUrl, seconds));
+  };
 
   if (loading) {
     return (
@@ -132,6 +150,7 @@ export function BlogPost() {
         </div>
         <div
           className="prose prose-lg dark:prose-invert max-w-none text-gray-700 dark:text-gray-300 leading-relaxed"
+          onClick={handleTimestampClick}
           dangerouslySetInnerHTML={{ __html: htmlContent }}
         />
       </article>

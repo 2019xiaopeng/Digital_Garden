@@ -10,6 +10,7 @@ import { isTauriAvailable, AiService } from "../lib/dataService";
 import { getSettings } from "../lib/settings";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { useKnowledgeSelection } from "../context/KnowledgeSelectionContext";
 
 // --- Types ---
 type TreeNode = {
@@ -36,7 +37,9 @@ export function Notes() {
     return initialTree;
   });
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>([]);
+  const [activeNodeId, setActiveNodeId] = useState<string | null>(null);
+  const [selectionAnchorId, setSelectionAnchorId] = useState<string | null>(null);
   const [viewingFile, setViewingFile] = useState<TreeNode | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const directoryInputRef = useRef<HTMLInputElement>(null);
@@ -62,6 +65,7 @@ export function Notes() {
   // File preview state
   const [fileContent, setFileContent] = useState<string | null>(null);
   const [isLoadingContent, setIsLoadingContent] = useState(false);
+  const { selected_knowledge_files, setSelectedKnowledgeFiles } = useKnowledgeSelection();
 
   const activeSession = chatSessions.find(session => session.id === activeSessionId) || null;
   const chatHistory = activeSession?.messages || [];
@@ -111,6 +115,14 @@ export function Notes() {
     loadContent();
   }, [viewingFile]);
 
+  useEffect(() => {
+    const selectedFiles = selectedNodeIds
+      .map(id => findNode(treeData, id))
+      .filter((node): node is TreeNode => !!node && node.type === "file")
+      .map(node => ({ id: node.id, name: node.name, path: node.path }));
+    setSelectedKnowledgeFiles(selectedFiles);
+  }, [selectedNodeIds, treeData, setSelectedKnowledgeFiles]);
+
   const toggleFolder = (id: string) => {
     const newExpanded = new Set(expandedFolders);
     if (newExpanded.has(id)) {
@@ -121,8 +133,46 @@ export function Notes() {
     setExpandedFolders(newExpanded);
   };
 
-  const handleNodeClick = (node: TreeNode) => {
-    setSelectedNodeId(node.id);
+  const flattenTreeNodes = (nodes: TreeNode[]): TreeNode[] => {
+    const result: TreeNode[] = [];
+    const walk = (items: TreeNode[]) => {
+      for (const n of items) {
+        result.push(n);
+        if (n.children && expandedFolders.has(n.id)) {
+          walk(n.children);
+        }
+      }
+    };
+    walk(nodes);
+    return result;
+  };
+
+  const handleNodeSelect = (e: React.MouseEvent, node: TreeNode) => {
+    const isMultiToggle = e.metaKey || e.ctrlKey;
+    const isRangeSelect = e.shiftKey;
+
+    if (isRangeSelect && selectionAnchorId) {
+      const ordered = flattenTreeNodes(treeData).map(n => n.id);
+      const start = ordered.indexOf(selectionAnchorId);
+      const end = ordered.indexOf(node.id);
+      if (start >= 0 && end >= 0) {
+        const [from, to] = start < end ? [start, end] : [end, start];
+        setSelectedNodeIds(ordered.slice(from, to + 1));
+      } else {
+        setSelectedNodeIds([node.id]);
+      }
+    } else if (isMultiToggle) {
+      setSelectedNodeIds(prev => prev.includes(node.id) ? prev.filter(id => id !== node.id) : [...prev, node.id]);
+      setSelectionAnchorId(node.id);
+    } else {
+      setSelectedNodeIds([node.id]);
+      setSelectionAnchorId(node.id);
+    }
+
+    setActiveNodeId(node.id);
+  };
+
+  const handleNodeDoubleClick = (node: TreeNode) => {
     if (node.type === "folder") {
       toggleFolder(node.id);
       return;
@@ -344,7 +394,9 @@ export function Notes() {
     if (viewingFile?.id === selectedNode.id) {
       setViewingFile(null);
     }
-    setSelectedNodeId(null);
+    setActiveNodeId(null);
+    setSelectedNodeIds([]);
+    setSelectionAnchorId(null);
     setShowDeleteConfirm(false);
   };
 
@@ -401,6 +453,7 @@ export function Notes() {
     }
 
     // Move on disk (Tauri mode)
+    let canUpdateTree = true;
     if (isTauriAvailable()) {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
@@ -413,7 +466,13 @@ export function Notes() {
         }
       } catch (err) {
         console.error("[Notes] Failed to move on disk:", err);
+        canUpdateTree = false;
       }
+    }
+
+    if (!canUpdateTree) {
+      setDraggedNodeId(null);
+      return;
     }
 
     // Move in tree state
@@ -430,6 +489,7 @@ export function Notes() {
     if (!draggedNodeId) return;
 
     // Move to root on disk
+    let canUpdateTree = true;
     if (isTauriAvailable()) {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
@@ -440,7 +500,13 @@ export function Notes() {
         }
       } catch (err) {
         console.error("[Notes] Failed to move to root on disk:", err);
+        canUpdateTree = false;
       }
+    }
+
+    if (!canUpdateTree) {
+      setDraggedNodeId(null);
+      return;
     }
 
     setTreeData(prev => moveNodeToFolder(prev, draggedNodeId, null));
@@ -514,10 +580,38 @@ export function Notes() {
     return "MiniMax";
   };
 
+  const buildSelectedFilesContext = async (): Promise<string> => {
+    if (selected_knowledge_files.length === 0) return "";
+
+    const filesToRead = selected_knowledge_files.slice(0, 5);
+    const chunks: string[] = [];
+
+    for (const file of filesToRead) {
+      try {
+        if (isTauriAvailable() && file.path) {
+          const { invoke } = await import("@tauri-apps/api/core");
+          const content = await invoke<string>("read_file_content", { path: file.path });
+          chunks.push(`### ${file.name}\n${content.slice(0, 3000)}`);
+          continue;
+        }
+        const local = localStorage.getItem(`eva:file:${file.name}`);
+        if (local) {
+          chunks.push(`### ${file.name}\n${local.slice(0, 3000)}`);
+        }
+      } catch (err) {
+        console.error(`[Notes] Failed to read selected file for AI context: ${file.name}`, err);
+      }
+    }
+
+    if (chunks.length === 0) return "";
+    return `\n\n以下是用户当前选中的知识库文件内容片段，请优先结合这些上下文回答：\n${chunks.join("\n\n---\n\n")}`;
+  };
+
   const getAiReply = async (userMsg: string) => {
     const settings = getSettings();
     const modelLabel = getModelLabel(selectedModel);
-    const context = viewingFile ? `当前文件：${viewingFile.name}。` : '当前未选中文件。';
+    const selectedContext = await buildSelectedFilesContext();
+    const context = viewingFile ? `当前文件：${viewingFile.name}。` : "当前未选中文件。";
 
     // Determine API config based on selected model
     let apiUrl: string;
@@ -547,7 +641,7 @@ export function Notes() {
         api_url: apiUrl,
         api_key: apiKey,
         model,
-        system_prompt: `你是EVA系统的知识库AI助手，简洁清晰地回答问题。${context}`,
+        system_prompt: `你是EVA系统的知识库AI助手，简洁清晰地回答问题。${context}${selectedContext}`,
         user_message: userMsg,
         temperature: 0.7,
         max_tokens: 1024,
@@ -670,12 +764,12 @@ export function Notes() {
     return [...nodes, updatedFolder];
   };
 
-  const selectedNode = selectedNodeId ? findNode(treeData, selectedNodeId) : null;
+  const selectedNode = activeNodeId ? findNode(treeData, activeNodeId) : null;
 
   const renderTree = (nodes: TreeNode[], level = 0) => {
     return nodes.map(node => {
       const isExpanded = expandedFolders.has(node.id);
-      const isSelected = selectedNodeId === node.id;
+      const isSelected = selectedNodeIds.includes(node.id);
       const isDragTarget = dropTargetId === node.id;
       const isBeingDragged = draggedNodeId === node.id;
 
@@ -690,7 +784,8 @@ export function Notes() {
               level === 0 && "font-medium"
             )}
             style={{ paddingLeft: `${level * 12 + 8}px` }}
-            onClick={() => handleNodeClick(node)}
+            onClick={(e) => handleNodeSelect(e, node)}
+            onDoubleClick={() => handleNodeDoubleClick(node)}
             draggable
             onDragStart={(e) => handleDragStart(e, node.id)}
             onDragEnd={handleDragEnd}
@@ -700,7 +795,13 @@ export function Notes() {
           >
             {node.type === "folder" ? (
               <>
-                <button className="p-0.5 hover:bg-gray-200 dark:hover:bg-gray-700 rounded text-gray-400 dark:text-gray-500">
+                <button
+                  className="p-0.5 hover:bg-gray-200 dark:hover:bg-gray-700 rounded text-gray-400 dark:text-gray-500"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    toggleFolder(node.id);
+                  }}
+                >
                   {isExpanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
                 </button>
                 <Folder className="w-4 h-4 text-[#88B5D3]" />
@@ -728,7 +829,6 @@ export function Notes() {
         <div>
           <h1 className="text-3xl font-bold tracking-tight text-gray-900 dark:text-white">知识库</h1>
           <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">管理你的文档、笔记与资料，并使用 AI 辅助阅读。</p>
-          <p className="mt-1 text-xs text-gray-400 dark:text-gray-500">建议存储目录：~/Documents/EVA_Knowledge_Base/Notes</p>
         </div>
       </header>
 
@@ -787,10 +887,10 @@ export function Notes() {
               </button>
               <button 
                 onClick={() => handleRenameNode()}
-                disabled={!selectedNode}
+                disabled={!selectedNode || selectedNodeIds.length !== 1}
                 className={cn(
                   "p-1.5 rounded-lg transition-colors",
-                  selectedNode ? "text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-800" : "text-gray-300 dark:text-gray-700 cursor-not-allowed"
+                  selectedNode && selectedNodeIds.length === 1 ? "text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-800" : "text-gray-300 dark:text-gray-700 cursor-not-allowed"
                 )}
                 title="重命名"
               >
@@ -798,10 +898,10 @@ export function Notes() {
               </button>
               <button 
                 onClick={handleDeleteNode}
-                disabled={!selectedNode}
+                disabled={!selectedNode || selectedNodeIds.length !== 1}
                 className={cn(
                   "p-1.5 rounded-lg transition-colors",
-                  selectedNode ? "text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-800" : "text-gray-300 dark:text-gray-700 cursor-not-allowed"
+                  selectedNode && selectedNodeIds.length === 1 ? "text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-800" : "text-gray-300 dark:text-gray-700 cursor-not-allowed"
                 )}
                 title="删除"
               >

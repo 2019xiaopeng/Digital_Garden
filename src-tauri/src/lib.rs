@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::{Manager, State};
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tokio::fs;
 use tokio::sync::Mutex;
 
@@ -735,9 +737,36 @@ async fn ensure_workspace_dirs() -> Result<String, String> {
     Ok(root)
 }
 
+async fn ensure_workspace_dirs_at(root: &str) -> Result<String, String> {
+    let required = [
+        root.to_string(),
+        format!("{}/Database", root),
+        format!("{}/Logs", root),
+        format!("{}/Notes", root),
+        format!("{}/Resources", root),
+    ];
+
+    for dir in required {
+        fs::create_dir_all(&dir)
+            .await
+            .map_err(|e| format!("Failed to create workspace dir {}: {}", dir, e))?;
+    }
+
+    Ok(root.to_string())
+}
+
 #[tauri::command]
 async fn initialize_workspace() -> Result<String, String> {
     ensure_workspace_dirs().await
+}
+
+#[tauri::command]
+async fn initialize_workspace_at(root_path: String) -> Result<String, String> {
+    let normalized = root_path.replace('\\', "/").trim().to_string();
+    if normalized.is_empty() {
+        return Err("Workspace root path cannot be empty".to_string());
+    }
+    ensure_workspace_dirs_at(&normalized).await
 }
 
 /// Get the Notes directory path, creating it if needed
@@ -847,7 +876,62 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_http::init())
+        .plugin(tauri_plugin_opener::init())
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                if let Err(e) = window.hide() {
+                    log::error!("Failed to hide window on close: {}", e);
+                }
+            }
+        })
         .setup(|app| {
+            let tray_show = MenuItem::with_id(app, "tray_show", "显示 EVA 终端", true, None::<&str>)?;
+            let tray_quit = MenuItem::with_id(app, "tray_quit", "退出系统", true, None::<&str>)?;
+            let tray_menu = Menu::with_items(app, &[&tray_show, &tray_quit])?;
+
+            let mut tray_builder = TrayIconBuilder::with_id("eva_tray")
+                .menu(&tray_menu)
+                .tooltip("EVA 考研辅助终端")
+                .on_menu_event(|app: &tauri::AppHandle, event| match event.id.as_ref() {
+                    "tray_show" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.unminimize();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    "tray_quit" => {
+                        app.exit(0);
+                    }
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray: &tauri::tray::TrayIcon, event| match event {
+                    TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    }
+                    | TrayIconEvent::DoubleClick {
+                        button: MouseButton::Left,
+                        ..
+                    } => {
+                        let app = tray.app_handle();
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.unminimize();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    _ => {}
+                });
+
+            if let Some(default_icon) = app.default_window_icon().cloned() {
+                tray_builder = tray_builder.icon(default_icon);
+            }
+
+            let _tray = tray_builder.build(app)?;
+
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
@@ -903,6 +987,7 @@ pub fn run() {
             parse_markdown_plan,
             ai_proxy,
             initialize_workspace,
+            initialize_workspace_at,
             read_file_content,
             get_notes_dir,
             copy_file_to_notes,

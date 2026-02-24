@@ -12,6 +12,7 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "QCB's Digital Garden",
         "width": 800,
         "height": 600,

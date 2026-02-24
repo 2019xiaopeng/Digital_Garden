@@ -3,6 +3,7 @@ import React, { useMemo, useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { cn } from "../lib/utils";
 import { isTauriAvailable } from "../lib/dataService";
+import { extractBilibiliVideoUrl, openExternalUrl } from "../lib/videoBookmark";
 
 type ResourceItem = {
   id: number;
@@ -12,6 +13,38 @@ type ResourceItem = {
   date: string;
   subject: string;
   folder?: string;
+};
+
+type VideoBookmark = {
+  id: string;
+  url: string;
+  bvid: string;
+  title: string;
+  pic: string;
+  ownerName: string;
+  duration: number;
+  createdAt: string;
+};
+
+type LegacyVideoBookmark = {
+  id: string;
+  url: string;
+  bvid: string;
+  createdAt: string;
+};
+
+type BilibiliApiResponse = {
+  code: number;
+  message: string;
+  data?: {
+    bvid: string;
+    title: string;
+    pic: string;
+    duration: number;
+    owner: {
+      name: string;
+    };
+  };
 };
 
 const initialResources: ResourceItem[] = [
@@ -31,7 +64,28 @@ export function Resources() {
   const [resources, setResources] = useState(initialResources);
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
   const [subjectFilter, setSubjectFilter] = useState("all");
-  const [bilibiliInput, setBilibiliInput] = useState("https://www.bilibili.com/video/BV1iT411b7yB");
+  const [bilibiliInput, setBilibiliInput] = useState("");
+  const [bookmarkToast, setBookmarkToast] = useState<string | null>(null);
+  const [videoBookmarks, setVideoBookmarks] = useState<VideoBookmark[]>(() => {
+    try {
+      const raw = localStorage.getItem("eva.video-bookmarks.v1");
+      if (!raw) return [];
+      const parsed = JSON.parse(raw) as Array<VideoBookmark | LegacyVideoBookmark>;
+      return parsed.map((item) => {
+        if ("title" in item) return item as VideoBookmark;
+        const legacy = item as LegacyVideoBookmark;
+        return {
+          ...legacy,
+          title: legacy.bvid,
+          pic: "",
+          ownerName: "未知UP主",
+          duration: 0,
+        };
+      });
+    } catch {
+      return [];
+    }
+  });
   const navigate = useNavigate();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
@@ -135,19 +189,108 @@ export function Resources() {
     }
   };
 
-  const embedUrl = useMemo(() => {
-    const raw = bilibiliInput.trim();
-    if (!raw) return "";
-    const bvidMatch = raw.match(/BV[A-Za-z0-9]+/);
-    if (bvidMatch) {
-      return `https://player.bilibili.com/player.html?bvid=${bvidMatch[0]}&autoplay=0`;
+  const parseBvid = (input: string): string | null => {
+    const direct = input.match(/BV[0-9A-Za-z]+/i);
+    if (direct) return direct[0];
+    const maybeUrl = extractBilibiliVideoUrl(input);
+    if (!maybeUrl) return null;
+    const fromUrl = maybeUrl.match(/BV[0-9A-Za-z]+/i);
+    return fromUrl ? fromUrl[0] : null;
+  };
+
+  const formatDuration = (seconds: number): string => {
+    if (!Number.isFinite(seconds) || seconds <= 0) return "--:--";
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = seconds % 60;
+    if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+    return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  };
+
+  const fetchBilibiliMetadata = async (bvid: string): Promise<VideoBookmark | null> => {
+    const apiUrl = `https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(bvid)}`;
+    const parsePayload = (payload: BilibiliApiResponse): VideoBookmark | null => {
+      if (!payload || payload.code !== 0 || !payload.data) return null;
+      return {
+        id: `video-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        bvid: payload.data.bvid || bvid,
+        url: `https://www.bilibili.com/video/${payload.data.bvid || bvid}`,
+        title: payload.data.title || bvid,
+        pic: payload.data.pic || "",
+        ownerName: payload.data.owner?.name || "未知UP主",
+        duration: payload.data.duration || 0,
+        createdAt: new Date().toISOString(),
+      };
+    };
+
+    try {
+      const resp = await fetch(apiUrl);
+      const json = (await resp.json()) as BilibiliApiResponse;
+      const parsed = parsePayload(json);
+      if (parsed) return parsed;
+    } catch (error) {
+      console.error("[Resources] Web fetch bilibili metadata failed:", error);
     }
-    const aidMatch = raw.match(/av(\d+)/i);
-    if (aidMatch) {
-      return `https://player.bilibili.com/player.html?aid=${aidMatch[1]}&autoplay=0`;
+
+    if (isTauriAvailable()) {
+      try {
+        const { fetch: tauriFetch } = await import("@tauri-apps/plugin-http");
+        const resp = await tauriFetch(apiUrl, { method: "GET" });
+        const json = (await resp.json()) as BilibiliApiResponse;
+        const parsed = parsePayload(json);
+        if (parsed) return parsed;
+      } catch (error) {
+        console.error("[Resources] Tauri HTTP fetch bilibili metadata failed:", error);
+      }
     }
-    return raw.startsWith("http") ? raw : "";
-  }, [bilibiliInput]);
+
+    return null;
+  };
+
+  const addVideoBookmark = async () => {
+    const bvid = parseBvid(bilibiliInput.trim());
+    if (!bvid) {
+      setBookmarkToast("请输入有效 B 站链接或 BV 号");
+      setTimeout(() => setBookmarkToast(null), 1200);
+      return;
+    }
+
+    if (videoBookmarks.some((x) => x.bvid.toLowerCase() === bvid.toLowerCase())) {
+      setBookmarkToast("该视频已存在书签");
+      setTimeout(() => setBookmarkToast(null), 1200);
+      return;
+    }
+
+    const metadata = await fetchBilibiliMetadata(bvid);
+    const bookmark: VideoBookmark = metadata || {
+      id: `video-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      bvid,
+      url: `https://www.bilibili.com/video/${bvid}`,
+      title: bvid,
+      pic: "",
+      ownerName: "未知UP主",
+      duration: 0,
+      createdAt: new Date().toISOString(),
+    };
+
+    setVideoBookmarks((prev) => {
+      const next = [bookmark, ...prev];
+      localStorage.setItem("eva.video-bookmarks.v1", JSON.stringify(next));
+      return next;
+    });
+
+    setBookmarkToast(metadata ? "已添加视频书签" : "已添加书签（元数据获取失败）");
+    setTimeout(() => setBookmarkToast(null), 1400);
+    setBilibiliInput("");
+  };
+
+  const removeVideoBookmark = (id: string) => {
+    setVideoBookmarks((prev) => {
+      const next = prev.filter((x) => x.id !== id);
+      localStorage.setItem("eva.video-bookmarks.v1", JSON.stringify(next));
+      return next;
+    });
+  };
 
   const subjects = useMemo(() => {
     const set = new Set<string>(["all"]);
@@ -233,40 +376,70 @@ export function Resources() {
         </div>
       </header>
 
-      <div className="glass-soft rounded-2xl px-4 py-3 text-xs text-gray-600 dark:text-gray-400 border border-white/40 dark:border-[#2a3b52]">
-        资源存储建议目录：`~/Documents/EVA_Knowledge_Base/Resources`（当前为资源索引模式，可继续扩展为自动复制到该目录）
-      </div>
-
       <section className="glass-card rounded-3xl p-6 md:p-8">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">
           <div>
-            <h2 className="text-xl font-semibold text-gray-900 dark:text-white">内置视频浏览器</h2>
-            <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">支持直接输入 B 站链接或 BV 号进行播放。</p>
+            <h2 className="text-xl font-semibold text-gray-900 dark:text-white">外部视频书签</h2>
+            <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">保存 B 站链接，点击后使用系统默认浏览器打开。</p>
           </div>
-          <div className="w-full md:w-[420px]">
+          <div className="w-full md:w-[460px] flex gap-2">
             <input
               value={bilibiliInput}
               onChange={(e) => setBilibiliInput(e.target.value)}
-              placeholder="粘贴 B 站链接或 BV 号"
+              placeholder="粘贴 B 站视频链接 (https://www.bilibili.com/video/BV...)"
               className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-950 border border-gray-200 dark:border-gray-800 rounded-2xl text-sm text-gray-700 dark:text-gray-200 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all"
             />
+            <button
+              onClick={addVideoBookmark}
+              className="px-4 py-2.5 rounded-2xl bg-gray-900 dark:bg-white text-white dark:text-gray-900 text-sm font-semibold"
+            >
+              添加
+            </button>
           </div>
         </div>
-        <div className="relative w-full overflow-hidden rounded-2xl border border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-950 aspect-video">
-          {embedUrl ? (
-            <iframe
-              key={embedUrl}
-              src={embedUrl}
-              className="w-full h-full"
-              allowFullScreen
-              referrerPolicy="strict-origin-when-cross-origin"
-            />
-          ) : (
-            <div className="flex items-center justify-center h-full text-sm text-gray-400 dark:text-gray-500">
-              请输入有效的 B 站链接或 BV 号
+
+        <div className="space-y-2">
+          {videoBookmarks.length === 0 ? (
+            <div className="text-sm text-gray-500 dark:text-gray-400">暂无视频书签</div>
+          ) : videoBookmarks.map((item) => (
+            <div key={item.id} className="flex items-center justify-between gap-3 rounded-xl border border-gray-200 dark:border-gray-800 px-3 py-2.5 bg-gray-50/70 dark:bg-gray-950/70">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="w-24 h-14 rounded-md overflow-hidden bg-gray-200 dark:bg-gray-800 flex-shrink-0">
+                  {item.pic ? (
+                    <img src={item.pic} alt={item.title} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                  ) : (
+                    <div className="w-full h-full flex items-center justify-center text-[10px] text-gray-400">No Cover</div>
+                  )}
+                </div>
+                <div className="min-w-0">
+                  <div className="text-sm font-semibold text-gray-900 dark:text-white truncate">{item.title}</div>
+                  <div className="text-xs text-gray-500 dark:text-gray-400 truncate">{item.ownerName} · {formatDuration(item.duration)} · {item.bvid}</div>
+                  <div className="text-[11px] text-gray-400 dark:text-gray-500 truncate">{item.url}</div>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => openExternalUrl(item.url)}
+                  className="px-3 py-1.5 rounded-lg text-xs font-semibold text-[#88B5D3] hover:bg-[#88B5D3]/10"
+                >
+                  打开
+                </button>
+                <button
+                  onClick={() => removeVideoBookmark(item.id)}
+                  className="px-3 py-1.5 rounded-lg text-xs font-semibold text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10"
+                >
+                  删除
+                </button>
+              </div>
             </div>
-          )}
+          ))}
         </div>
+
+        {bookmarkToast && (
+          <div className="mt-3 inline-flex px-2.5 py-1 rounded-md text-xs bg-gray-900 text-white dark:bg-white dark:text-gray-900">
+            {bookmarkToast}
+          </div>
+        )}
       </section>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">

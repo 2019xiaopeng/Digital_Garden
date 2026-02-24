@@ -55,7 +55,7 @@ export function Sidebar() {
         <div className="flex items-center justify-between mb-10">
           <div className="flex items-center gap-3">
             <img 
-              src={avatarUrl} 
+              src="/pic/head.png"
               alt="Avatar" 
               className="w-10 h-10 rounded-full object-cover shadow-sm ring-2 ring-white dark:ring-gray-800"
               referrerPolicy="no-referrer"

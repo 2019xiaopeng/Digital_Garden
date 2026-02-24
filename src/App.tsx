@@ -15,6 +15,7 @@ import { Quiz } from "./pages/Quiz";
 import { Tasks } from "./pages/Tasks";
 import { Settings } from "./pages/Settings";
 import { isTauriAvailable } from "./lib/dataService";
+import { KnowledgeSelectionProvider } from "./context/KnowledgeSelectionContext";
 
 export default function App() {
   useEffect(() => {
@@ -33,19 +34,21 @@ export default function App() {
   }, []);
 
   return (
-    <BrowserRouter>
-      <Routes>
-        <Route path="/" element={<Layout />}>
-          <Route index element={<Dashboard />} />
-          <Route path="blog" element={<Blog />} />
-          <Route path="blog/:id" element={<BlogPost />} />
-          <Route path="notes" element={<Notes />} />
-          <Route path="resources" element={<Resources />} />
-          <Route path="quiz" element={<Quiz />} />
-          <Route path="tasks" element={<Tasks />} />
-          <Route path="settings" element={<Settings />} />
-        </Route>
-      </Routes>
-    </BrowserRouter>
+    <KnowledgeSelectionProvider>
+      <BrowserRouter>
+        <Routes>
+          <Route path="/" element={<Layout />}>
+            <Route index element={<Dashboard />} />
+            <Route path="blog" element={<Blog />} />
+            <Route path="blog/:id" element={<BlogPost />} />
+            <Route path="notes" element={<Notes />} />
+            <Route path="resources" element={<Resources />} />
+            <Route path="quiz" element={<Quiz />} />
+            <Route path="tasks" element={<Tasks />} />
+            <Route path="settings" element={<Settings />} />
+          </Route>
+        </Routes>
+      </BrowserRouter>
+    </KnowledgeSelectionProvider>
   );
 }

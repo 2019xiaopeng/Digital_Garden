@@ -6,14 +6,28 @@ import { isTauriAvailable } from "../lib/dataService";
 export function Settings() {
   const [settings, setSettings] = useState<AppSettings>(getSettings());
   const [saved, setSaved] = useState(false);
+  const [initialDocRoot, setInitialDocRoot] = useState(getSettings().docRoot);
 
   useEffect(() => {
-    setSettings(getSettings());
+    const loaded = getSettings();
+    setSettings(loaded);
+    setInitialDocRoot(loaded.docRoot);
   }, []);
 
-  const save = () => {
+  const save = async () => {
     updateSettings(settings);
     localStorage.setItem("eva.ai.apiKey", settings.aiApiKey);
+
+    if (isTauriAvailable() && settings.docRoot.trim() && settings.docRoot !== initialDocRoot) {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke("initialize_workspace_at", { rootPath: settings.docRoot.trim() });
+        setInitialDocRoot(settings.docRoot);
+      } catch (error) {
+        console.error("[Settings] Failed to initialize workspace at new docRoot:", error);
+      }
+    }
+
     setSaved(true);
     setTimeout(() => setSaved(false), 1200);
   };

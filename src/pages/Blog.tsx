@@ -5,6 +5,7 @@ import { cn } from "../lib/utils";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { MarkdownEditor } from "../components/MarkdownEditor";
 import { DailyLogService, TaskService, AiService, isTauriAvailable } from "../lib/dataService";
+import { buildVideoUrlWithTimestamp, getVideoUrlFromMarkdown, openExternalUrl, parseFrontmatter, replaceTimestampTagsWithLinks } from "../lib/videoBookmark";
 import type { LegacyPost } from "../lib/dataService";
 
 const POSTS_PER_PAGE = 10;
@@ -111,11 +112,12 @@ export function Blog() {
   }, [searchQuery, sortOrder, selectedTag]);
 
   const markdownToHtml = (md: string) => {
-    const escaped = md
+    const { body, frontmatter } = parseFrontmatter(md);
+    const escaped = body
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;")
       .replace(/>/g, "&gt;");
-    return escaped
+    const html = escaped
       .replace(/^###\s+(.+)$/gm, "<h3>$1</h3>")
       .replace(/^##\s+(.+)$/gm, "<h2>$1</h2>")
       .replace(/^#\s+(.+)$/gm, "<h1>$1</h1>")
@@ -126,6 +128,23 @@ export function Blog() {
       .replace(/(<li>.*<\/li>)/gs, "<ul>$1</ul>")
       .replace(/\n\n/g, "<br/><br/>")
       .replace(/\n/g, "<br/>");
+
+    return replaceTimestampTagsWithLinks(html, frontmatter.video || null);
+  };
+
+  const handleTimestampClick = async (e: React.MouseEvent<HTMLElement>) => {
+    const target = e.target as HTMLElement;
+    const tag = target.closest("[data-video-seconds]") as HTMLElement | null;
+    if (!tag) return;
+    e.preventDefault();
+
+    const videoUrl = (tag.closest("[data-video-url]") as HTMLElement | null)?.dataset.videoUrl;
+    if (!videoUrl) return;
+
+    const seconds = Number(tag.dataset.videoSeconds || "0");
+    if (!Number.isFinite(seconds) || seconds < 0) return;
+
+    await openExternalUrl(buildVideoUrlWithTimestamp(videoUrl, seconds));
   };
 
   const handleEdit = (post: LegacyPost) => {
@@ -422,7 +441,11 @@ export function Blog() {
               
               <p className={cn("text-gray-600 dark:text-gray-400 leading-relaxed text-sm mb-3", !expandedPostIds.has(post.id) && "line-clamp-3")}>
                 {expandedPostIds.has(post.id) ? (
-                  <span dangerouslySetInnerHTML={{ __html: markdownToHtml(post.excerpt) }} />
+                  <span
+                    data-video-url={getVideoUrlFromMarkdown(post.excerpt) || undefined}
+                    onClick={handleTimestampClick}
+                    dangerouslySetInnerHTML={{ __html: markdownToHtml(post.excerpt) }}
+                  />
                 ) : (
                   post.excerpt.replace(/[#*`\-\[\]]/g, '').slice(0, 200) + (post.excerpt.length > 200 ? '...' : '')
                 )}
@@ -599,6 +622,8 @@ export function Blog() {
                     </div>
                     {newPost.content ? (
                       <div
+                        data-video-url={getVideoUrlFromMarkdown(newPost.content) || undefined}
+                        onClick={handleTimestampClick}
                         className="text-sm leading-7"
                         dangerouslySetInnerHTML={{ __html: markdownToHtml(newPost.content) }}
                       />

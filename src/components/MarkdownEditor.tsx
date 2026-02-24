@@ -1,6 +1,7 @@
-import React, { useRef } from 'react';
+import React, { useRef, useState } from 'react';
 import { Bold, Italic, List, Link, Code, Image, Heading1, Heading2, Quote } from 'lucide-react';
 import { cn } from '../lib/utils';
+import { extractBilibiliVideoUrl, upsertVideoFrontmatter } from '../lib/videoBookmark';
 
 interface MarkdownEditorProps {
   value: string;
@@ -11,6 +12,7 @@ interface MarkdownEditorProps {
 
 export function MarkdownEditor({ value, onChange, className, placeholder }: MarkdownEditorProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const [toast, setToast] = useState<string | null>(null);
 
   const insertFormat = (prefix: string, suffix: string = '') => {
     const textarea = textareaRef.current;
@@ -44,7 +46,7 @@ export function MarkdownEditor({ value, onChange, className, placeholder }: Mark
   ];
 
   return (
-    <div className={cn("flex flex-col border border-gray-200 dark:border-gray-800 rounded-2xl overflow-hidden bg-white dark:bg-gray-950 transition-colors", className)}>
+    <div className={cn("relative flex flex-col border border-gray-200 dark:border-gray-800 rounded-2xl overflow-hidden bg-white dark:bg-gray-950 transition-colors", className)}>
       <div className="flex items-center gap-1 p-2 border-b border-gray-100 dark:border-gray-800 bg-gray-50 dark:bg-gray-900/50 overflow-x-auto">
         {toolbarItems.map((item, index) => (
           <button
@@ -61,6 +63,20 @@ export function MarkdownEditor({ value, onChange, className, placeholder }: Mark
         ref={textareaRef}
         value={value}
         onChange={(e) => onChange(e.target.value)}
+        onPaste={(e) => {
+          const pasted = e.clipboardData.getData('text');
+          const videoUrl = extractBilibiliVideoUrl(pasted || '');
+          if (!videoUrl) return;
+
+          setTimeout(() => {
+            const textarea = textareaRef.current;
+            if (!textarea) return;
+            const nextValue = upsertVideoFrontmatter(textarea.value, videoUrl);
+            onChange(nextValue);
+            setToast('已自动关联 B 站视频');
+            window.setTimeout(() => setToast(null), 1400);
+          }, 0);
+        }}
         placeholder={placeholder}
         className="flex-1 w-full p-4 bg-transparent border-none focus:outline-none resize-none font-mono text-sm leading-relaxed text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-600 min-h-[300px]"
         onKeyDown={(e) => {
@@ -75,6 +91,12 @@ export function MarkdownEditor({ value, onChange, className, placeholder }: Mark
           }
         }}
       />
+
+      {toast && (
+        <div className="absolute top-3 right-3 px-2.5 py-1 rounded-md text-xs font-medium bg-gray-900/85 text-white dark:bg-white/90 dark:text-gray-900 pointer-events-none">
+          {toast}
+        </div>
+      )}
     </div>
   );
 }

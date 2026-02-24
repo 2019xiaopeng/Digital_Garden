@@ -22,7 +22,7 @@ export const defaultSettings: AppSettings = {
   aiMinimaxKey: "",
   fontScale: 100,
   pomodoroBell: "beep",
-  avatarUrl: "https://images.unsplash.com/photo-1618331835717-801e976710b2?q=80&w=100&auto=format&fit=crop",
+  avatarUrl: "/pic/head.png",
   backgroundUrl: "",
   defaultPomodoroMinutes: 25,
   autoFullscreenPomodoro: false,
