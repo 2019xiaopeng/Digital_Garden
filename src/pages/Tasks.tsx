@@ -1,0 +1,943 @@
+import React, { useState, useMemo, useEffect, useRef } from "react";
+import { 
+  CheckCircle2, Circle, Clock, Calendar as CalendarIcon, 
+  ListTodo, GitCommit, AlignLeft, Plus, MoreHorizontal,
+  Tag, AlertCircle, ChevronLeft, ChevronRight, FileText,
+  X, Play, Pause, RotateCcw, Bell, Repeat, Maximize2, Minimize2, Edit2
+} from "lucide-react";
+import { cn } from "../lib/utils";
+
+type Task = {
+  id: string;
+  title: string;
+  description: string;
+  status: "todo" | "in-progress" | "done";
+  priority: "low" | "medium" | "high";
+  date: string; // YYYY-MM-DD
+  startTime: string; // HH:mm
+  duration: number; // hours
+  tags: string[];
+  repeat?: "none" | "daily" | "weekly";
+  repeatDays?: number[]; // 0-6 for weekly
+  timerType?: "none" | "pomodoro" | "countdown";
+  timerDuration?: number; // minutes
+};
+
+const getTodayStr = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
+const initialTasks: Task[] = [
+  
+];
+
+export function Tasks() {
+  const [activeTab, setActiveTab] = useState<"todo" | "calendar" | "timeline" | "gantt">("todo");
+  const [tasks, setTasks] = useState<Task[]>(initialTasks);
+  const [selectedDate, setSelectedDate] = useState<string>(getTodayStr());
+  
+  // Add Task Modal State
+  const [isAddingTask, setIsAddingTask] = useState(false);
+  const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
+  const [newTask, setNewTask] = useState<Partial<Task>>({
+    title: "", description: "", priority: "medium", startTime: "09:00", duration: 1, tags: [], repeat: "none", repeatDays: [], timerType: "none", timerDuration: 25
+  });
+  const [newTag, setNewTag] = useState("");
+  const [quickTaskTitle, setQuickTaskTitle] = useState("");
+  const [showAdvancedFields, setShowAdvancedFields] = useState(false);
+
+  const openEditModal = (task: Task) => {
+    setEditingTaskId(task.id);
+    setNewTask({ ...task });
+    setIsAddingTask(true);
+  };
+
+  // Gantt State
+  const [ganttUnit, setGanttUnit] = useState<"day" | "week">("day");
+
+  // Pomodoro State
+  const [activeTimerTask, setActiveTimerTask] = useState<Task | null>(null);
+  const [timeLeft, setTimeLeft] = useState(25 * 60);
+  const [isTimerRunning, setIsTimerRunning] = useState(false);
+  const [isPomodoroFullscreen, setIsPomodoroFullscreen] = useState(false);
+  const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  useEffect(() => {
+    // Create audio element for bell
+    audioRef.current = new Audio("https://actions.google.com/sounds/v1/alarms/beep_short.ogg");
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (isTimerRunning && timeLeft > 0) {
+      timerRef.current = setInterval(() => {
+        setTimeLeft(prev => {
+          if (prev <= 1) {
+            clearInterval(timerRef.current!);
+            setIsTimerRunning(false);
+            audioRef.current?.play().catch(e => console.log("Audio play failed:", e));
+            return 0;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+    } else if (!isTimerRunning && timerRef.current) {
+      clearInterval(timerRef.current);
+    }
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
+  }, [isTimerRunning, timeLeft]);
+
+  const startTimerForTask = (task: Task) => {
+    setActiveTimerTask(task);
+    setTimeLeft((task.timerDuration || 25) * 60);
+    setIsTimerRunning(false);
+  };
+
+  const toggleTimer = () => setIsTimerRunning(!isTimerRunning);
+  const resetTimer = () => {
+    setIsTimerRunning(false);
+    if (activeTimerTask) setTimeLeft((activeTimerTask.timerDuration || 25) * 60);
+  };
+
+  const formatTime = (seconds: number) => {
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+  };
+
+  const selectedDateTasks = useMemo(() => {
+    return tasks.filter(t => t.date === selectedDate).sort((a, b) => a.startTime.localeCompare(b.startTime));
+  }, [tasks, selectedDate]);
+
+  const handleAddTask = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newTask.title?.trim()) return;
+    
+    if (editingTaskId) {
+      setTasks(tasks.map(t => t.id === editingTaskId ? { ...t, ...newTask } as Task : t));
+    } else {
+      // Handle recurring tasks
+      const newTasks: Task[] = [];
+      const baseTask: Task = {
+        id: Date.now().toString(),
+        title: newTask.title,
+        description: newTask.description || "",
+        status: "todo",
+        priority: newTask.priority as any || "medium",
+        date: selectedDate,
+        startTime: newTask.startTime || "09:00",
+        duration: newTask.duration || 1,
+        tags: newTask.tags || [],
+        repeat: newTask.repeat,
+        repeatDays: newTask.repeatDays,
+        timerType: newTask.timerType,
+        timerDuration: newTask.timerDuration,
+      };
+
+      if (newTask.repeat === "none") {
+        newTasks.push(baseTask);
+      } else if (newTask.repeat === "daily") {
+        // Generate for next 7 days
+        for (let i = 0; i < 7; i++) {
+          const d = new Date(selectedDate);
+          d.setDate(d.getDate() + i);
+          newTasks.push({ ...baseTask, id: `${baseTask.id}-${i}`, date: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` });
+        }
+      } else if (newTask.repeat === "weekly" && newTask.repeatDays && newTask.repeatDays.length > 0) {
+        // Generate for next 4 weeks
+        for (let i = 0; i < 28; i++) {
+          const d = new Date(selectedDate);
+          d.setDate(d.getDate() + i);
+          if (newTask.repeatDays.includes(d.getDay())) {
+            newTasks.push({ ...baseTask, id: `${baseTask.id}-${i}`, date: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` });
+          }
+        }
+      } else {
+        newTasks.push(baseTask);
+      }
+      
+      setTasks([...tasks, ...newTasks]);
+    }
+    setIsAddingTask(false);
+    setEditingTaskId(null);
+    setNewTask({ title: "", description: "", priority: "medium", startTime: "09:00", duration: 1, tags: [], repeat: "none", repeatDays: [], timerType: "none", timerDuration: 25 });
+  };
+
+  const toggleTaskStatus = (id: string) => {
+    setTasks(tasks.map(t => {
+      if (t.id === id) {
+        return { ...t, status: t.status === "done" ? "todo" : "done" };
+      }
+      return t;
+    }));
+  };
+
+  const getPriorityColor = (priority: string) => {
+    switch(priority) {
+      case "high": return "text-red-600 bg-red-50 border-red-200 dark:text-red-300 dark:bg-red-500/10 dark:border-red-500/30";
+      case "medium": return "text-amber-600 bg-amber-50 border-amber-200 dark:text-amber-300 dark:bg-amber-500/10 dark:border-amber-500/30";
+      case "low": return "text-emerald-600 bg-emerald-50 border-emerald-200 dark:text-emerald-300 dark:bg-emerald-500/10 dark:border-emerald-500/30";
+      default: return "text-gray-600 bg-gray-50 border-gray-200 dark:text-gray-300 dark:bg-gray-800 dark:border-gray-700";
+    }
+  };
+
+  const changeDate = (days: number) => {
+    const d = new Date(selectedDate);
+    d.setDate(d.getDate() + days);
+    setSelectedDate(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`);
+  };
+
+  const toggleRepeatDay = (day: number) => {
+    const current = newTask.repeatDays || [];
+    if (current.includes(day)) {
+      setNewTask({ ...newTask, repeatDays: current.filter(d => d !== day) });
+    } else {
+      setNewTask({ ...newTask, repeatDays: [...current, day] });
+    }
+  };
+
+  const handleQuickAddTask = () => {
+    if (!quickTaskTitle.trim()) return;
+    setTasks(prev => [{
+      id: Date.now().toString(),
+      title: quickTaskTitle.trim(),
+      description: "",
+      status: "todo",
+      priority: "medium",
+      date: selectedDate,
+      startTime: "09:00",
+      duration: 1,
+      tags: [],
+      repeat: "none",
+      timerType: "none",
+      timerDuration: 25,
+    }, ...prev]);
+    setQuickTaskTitle("");
+  };
+
+  const postponeTaskOneDay = (id: string) => {
+    setTasks(prev => prev.map(task => {
+      if (task.id !== id) return task;
+      const d = new Date(task.date);
+      d.setDate(d.getDate() + 1);
+      return {
+        ...task,
+        date: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`,
+      };
+    }));
+  };
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const ctrlOrCmd = event.ctrlKey || event.metaKey;
+      if (!ctrlOrCmd) return;
+
+      if (event.key.toLowerCase() === "n") {
+        event.preventDefault();
+        setEditingTaskId(null);
+        setShowAdvancedFields(false);
+        setIsAddingTask(true);
+      }
+
+      if (event.key === "Enter" && isAddingTask) {
+        event.preventDefault();
+        const form = document.getElementById("task-form") as HTMLFormElement | null;
+        form?.requestSubmit();
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [isAddingTask]);
+
+  return (
+    <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-700 ease-out relative">
+      <header className="flex flex-col md:flex-row md:items-end justify-between gap-6">
+        <div>
+          <h1 className="text-3xl font-bold tracking-tight text-gray-900 dark:text-white sm:text-4xl">任务与计划</h1>
+          <p className="mt-3 text-lg text-gray-600 dark:text-gray-400 leading-relaxed">管理你的待办事项、日程安排和项目进度。</p>
+        </div>
+      </header>
+
+      {/* Tabs */}
+      <div className="flex gap-2 p-1 glass-soft rounded-2xl w-fit overflow-x-auto max-w-full">
+        <button
+          onClick={() => setActiveTab("todo")}
+          className={cn(
+            "flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold transition-all whitespace-nowrap",
+            activeTab === "todo" ? "bg-white/90 dark:bg-[#111b29]/90 text-gray-900 dark:text-white shadow-sm" : "text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-white"
+          )}
+        >
+          <ListTodo className="w-4 h-4" />
+          To-Do List
+        </button>
+        <button
+          onClick={() => setActiveTab("calendar")}
+          className={cn(
+            "flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold transition-all whitespace-nowrap",
+            activeTab === "calendar" ? "bg-white/90 dark:bg-[#111b29]/90 text-gray-900 dark:text-white shadow-sm" : "text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-white"
+          )}
+        >
+          <CalendarIcon className="w-4 h-4" />
+          日历视图
+        </button>
+        <button
+          onClick={() => setActiveTab("timeline")}
+          className={cn(
+            "flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold transition-all whitespace-nowrap",
+            activeTab === "timeline" ? "bg-white/90 dark:bg-[#111b29]/90 text-gray-900 dark:text-white shadow-sm" : "text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-white"
+          )}
+        >
+          <GitCommit className="w-4 h-4" />
+          时间轴
+        </button>
+        <button
+          onClick={() => setActiveTab("gantt")}
+          className={cn(
+            "flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold transition-all whitespace-nowrap",
+            activeTab === "gantt" ? "bg-white/90 dark:bg-[#111b29]/90 text-gray-900 dark:text-white shadow-sm" : "text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-white"
+          )}
+        >
+          <AlignLeft className="w-4 h-4" />
+          甘特图
+        </button>
+      </div>
+
+      {/* Content Area */}
+      <div className="glass-card rounded-3xl p-6 md:p-8 min-h-[500px]">
+        
+        {/* To-Do List View */}
+        {activeTab === "todo" && (
+          <div className="space-y-6">
+            <div className="flex items-center justify-between glass-soft p-4 rounded-2xl">
+              <button onClick={() => changeDate(-1)} className="p-2 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-xl transition-colors"><ChevronLeft className="w-5 h-5 text-gray-600 dark:text-gray-300" /></button>
+              <div className="flex flex-col items-center">
+                <h3 className="text-lg font-bold text-gray-900 dark:text-white">{selectedDate === getTodayStr() ? "今天" : selectedDate}</h3>
+                <p className="text-xs font-medium text-gray-500 dark:text-gray-400">{selectedDateTasks.length} 个任务</p>
+              </div>
+              <button onClick={() => changeDate(1)} className="p-2 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-xl transition-colors"><ChevronRight className="w-5 h-5 text-gray-600 dark:text-gray-300" /></button>
+            </div>
+
+            {!isAddingTask ? (
+              <div className="space-y-3">
+                <div className="flex flex-col sm:flex-row gap-3">
+                  <input
+                    value={quickTaskTitle}
+                    onChange={(e) => setQuickTaskTitle(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        handleQuickAddTask();
+                      }
+                    }}
+                    placeholder="快速添加任务（回车即创建）"
+                    className="flex-1 bg-white/90 dark:bg-[#0f1826]/80 border border-gray-200/80 dark:border-[#30435c] rounded-xl px-4 py-3 text-sm text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-[#88B5D3]/25 focus:border-[#88B5D3]"
+                  />
+                  <button
+                    onClick={handleQuickAddTask}
+                    className="px-5 py-3 rounded-xl bg-[#88B5D3] hover:bg-[#6f9fbe] text-white text-sm font-semibold transition-colors"
+                  >
+                    一键创建
+                  </button>
+                </div>
+                <button 
+                  onClick={() => setIsAddingTask(true)}
+                  className="w-full py-4 border-2 border-dashed border-gray-200 dark:border-gray-700 rounded-2xl text-gray-500 dark:text-gray-400 font-medium hover:border-[#88B5D3] dark:hover:border-[#88B5D3] hover:text-[#88B5D3] dark:hover:text-[#88B5D3] hover:bg-[#88B5D3]/8 transition-all flex items-center justify-center gap-2"
+                >
+                  <Plus className="w-5 h-5" /> 打开完整任务表单（Ctrl/Cmd + N）
+                </button>
+              </div>
+            ) : (
+              <form id="task-form" onSubmit={handleAddTask} className="glass-soft p-6 rounded-2xl space-y-4 animate-in fade-in zoom-in-95 duration-200">
+                <div className="flex justify-between items-center mb-2">
+                  <h4 className="font-semibold text-gray-900 dark:text-white">新建任务 ({selectedDate}) · Ctrl/Cmd + Enter 保存</h4>
+                  <button type="button" onClick={() => setIsAddingTask(false)} className="text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300"><X className="w-5 h-5" /></button>
+                </div>
+                
+                <input 
+                  type="text" 
+                  value={newTask.title}
+                  onChange={(e) => setNewTask({ ...newTask, title: e.target.value })}
+                  placeholder="任务标题..." 
+                  className="w-full bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-sm text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                  autoFocus
+                />
+                
+                <textarea 
+                  value={newTask.description}
+                  onChange={(e) => setNewTask({ ...newTask, description: e.target.value })}
+                  placeholder="可选备注（留空也可保存）" 
+                  className="w-full bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-3 text-sm text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 resize-none h-20"
+                />
+
+                <button
+                  type="button"
+                  onClick={() => setShowAdvancedFields(!showAdvancedFields)}
+                  className="text-xs font-semibold text-[#88B5D3] hover:text-[#6f9fbe] transition-colors"
+                >
+                  {showAdvancedFields ? "收起高级设置" : "展开高级设置（可选）"}
+                </button>
+
+                {showAdvancedFields && <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-500 dark:text-gray-400 mb-1.5">开始时间</label>
+                    <input type="time" value={newTask.startTime} onChange={(e) => setNewTask({...newTask, startTime: e.target.value})} className="w-full bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2 text-sm text-gray-900 dark:text-white focus:outline-none focus:border-indigo-500" />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-500 dark:text-gray-400 mb-1.5">预计耗时 (小时)</label>
+                    <input type="number" min="0.5" step="0.5" value={newTask.duration} onChange={(e) => setNewTask({...newTask, duration: parseFloat(e.target.value)})} className="w-full bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2 text-sm text-gray-900 dark:text-white focus:outline-none focus:border-indigo-500" />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-500 dark:text-gray-400 mb-1.5">重要程度</label>
+                    <select value={newTask.priority} onChange={(e) => setNewTask({...newTask, priority: e.target.value as any})} className="w-full bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2 text-sm text-gray-900 dark:text-white focus:outline-none focus:border-indigo-500">
+                      <option value="low">低</option>
+                      <option value="medium">中</option>
+                      <option value="high">高</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-500 dark:text-gray-400 mb-1.5">标签</label>
+                    <div className="flex gap-2">
+                      <input type="text" value={newTag} onChange={(e) => setNewTag(e.target.value)} onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          if (newTag.trim() && !newTask.tags?.includes(newTag.trim())) {
+                            setNewTask({...newTask, tags: [...(newTask.tags || []), newTag.trim()]});
+                            setNewTag("");
+                          }
+                        }
+                      }} placeholder="按回车添加" className="w-full bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2 text-sm text-gray-900 dark:text-white focus:outline-none focus:border-indigo-500" />
+                    </div>
+                  </div>
+                </div>}
+
+                {/* Advanced Options: Repeat & Timer */}
+                {showAdvancedFields && <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2 border-t border-gray-200">
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-500 dark:text-gray-400 mb-1.5">重复设置</label>
+                    <select value={newTask.repeat} onChange={(e) => setNewTask({...newTask, repeat: e.target.value as any})} className="w-full bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2 text-sm text-gray-900 dark:text-white focus:outline-none focus:border-indigo-500 mb-2">
+                      <option value="none">不重复</option>
+                      <option value="daily">每天</option>
+                      <option value="weekly">每周</option>
+                    </select>
+                    {newTask.repeat === "weekly" && (
+                      <div className="flex gap-1 mt-2">
+                        {['日', '一', '二', '三', '四', '五', '六'].map((day, i) => (
+                          <button
+                            key={i}
+                            type="button"
+                            onClick={() => toggleRepeatDay(i)}
+                            className={cn(
+                              "w-8 h-8 rounded-full text-xs font-medium transition-colors",
+                              newTask.repeatDays?.includes(i) ? "bg-indigo-600 text-white" : "bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800"
+                            )}
+                          >
+                            {day}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-500 dark:text-gray-400 mb-1.5">专注模式 (番茄钟)</label>
+                    <div className="flex gap-2">
+                      <select value={newTask.timerType} onChange={(e) => setNewTask({...newTask, timerType: e.target.value as any})} className="flex-1 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2 text-sm text-gray-900 dark:text-white focus:outline-none focus:border-indigo-500">
+                        <option value="none">无</option>
+                        <option value="pomodoro">番茄钟</option>
+                        <option value="countdown">倒计时</option>
+                      </select>
+                      {newTask.timerType !== "none" && (
+                        <input 
+                          type="number" 
+                          min="1" 
+                          value={newTask.timerDuration} 
+                          onChange={(e) => setNewTask({...newTask, timerDuration: parseInt(e.target.value)})} 
+                          placeholder="分钟"
+                          className="w-20 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2 text-sm text-gray-900 dark:text-white focus:outline-none focus:border-indigo-500" 
+                        />
+                      )}
+                    </div>
+                  </div>
+                </div>}
+
+                {newTask.tags && newTask.tags.length > 0 && (
+                  <div className="flex flex-wrap gap-2 pt-2">
+                    {newTask.tags.map(tag => (
+                      <span key={tag} className="flex items-center gap-1 text-xs text-indigo-600 dark:text-indigo-300 bg-indigo-50 dark:bg-indigo-500/10 px-2.5 py-1 rounded-lg">
+                        {tag}
+                        <button type="button" onClick={() => setNewTask({...newTask, tags: newTask.tags?.filter(t => t !== tag)})} className="hover:text-indigo-900 dark:hover:text-indigo-200"><X className="w-3 h-3" /></button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+
+                <div className="flex justify-end pt-4 border-t border-gray-200 dark:border-gray-800">
+                  <button type="submit" className="bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-2.5 rounded-xl text-sm font-semibold transition-all shadow-sm active:scale-95">
+                    保存任务
+                  </button>
+                </div>
+              </form>
+            )}
+
+            <div className="space-y-4 mt-8">
+              {selectedDateTasks.length === 0 ? (
+                <div className="text-center py-14 text-gray-500 dark:text-gray-400 glass-soft rounded-2xl">
+                  <ListTodo className="w-12 h-12 mx-auto mb-3 opacity-30 text-[#88B5D3]" />
+                  <p className="font-medium">当前暂无任务，开始你的同步率训练吧</p>
+                  <p className="text-xs mt-2">可用 Ctrl/Cmd + N 快速新建任务</p>
+                </div>
+              ) : (
+                selectedDateTasks.map(task => {
+                  const isOverdue = new Date(`${task.date}T${task.startTime}`).getTime() < new Date().getTime() && task.status !== "done";
+                  
+                  return (
+                    <div key={task.id} className={cn(
+                      "group flex flex-col p-5 rounded-2xl border transition-all duration-200 hover:shadow-md backdrop-blur-md",
+                      task.status === "done" ? "bg-white/55 dark:bg-[#111b28]/58 border-white/45 dark:border-[#2a3b52]" : "bg-white/70 dark:bg-[#111b28]/62 border-white/60 dark:border-[#30435c] hover:border-[#88B5D3]/50",
+                      isOverdue && task.status !== "done" && "border-red-200 dark:border-red-500/40 bg-red-50/30 dark:bg-red-500/10"
+                    )}>
+                      <div className="flex items-start gap-4">
+                        <button onClick={() => toggleTaskStatus(task.id)} className="flex-shrink-0 mt-0.5 text-gray-400 dark:text-gray-500 hover:text-indigo-600 dark:hover:text-indigo-300 transition-colors">
+                          {task.status === "done" ? <CheckCircle2 className="w-6 h-6 text-emerald-500" /> : <Circle className="w-6 h-6" />}
+                        </button>
+                        <div className="flex flex-col min-w-0 flex-1">
+                          <div className="flex justify-between items-start">
+                            <span className={cn(
+                              "text-base font-semibold transition-all",
+                              task.status === "done" ? "text-gray-400 dark:text-gray-500 line-through" : "text-gray-900 dark:text-white"
+                            )}>
+                              {task.title}
+                            </span>
+                            <div className="flex items-center gap-2">
+                              <button 
+                                onClick={() => openEditModal(task)}
+                                className="p-1.5 text-gray-400 dark:text-gray-500 hover:text-indigo-600 dark:hover:text-indigo-300 hover:bg-indigo-50 dark:hover:bg-indigo-500/10 rounded-lg transition-colors opacity-0 group-hover:opacity-100"
+                                title="编辑任务"
+                              >
+                                <Edit2 className="w-4 h-4" />
+                              </button>
+                              {isOverdue && task.status !== "done" && (
+                                <span className="text-[10px] font-bold text-red-600 dark:text-red-300 bg-red-100 dark:bg-red-500/10 px-2 py-0.5 rounded-md">已延期</span>
+                              )}
+                              <span className={cn("flex-shrink-0 flex items-center gap-1 text-[10px] font-bold uppercase tracking-widest px-2.5 py-1 rounded-lg border", getPriorityColor(task.priority))}>
+                                <AlertCircle className="w-3 h-3" />
+                                {task.priority}
+                              </span>
+                            </div>
+                          </div>
+                          
+                          {task.description && (
+                            <p className={cn("mt-2 text-sm leading-relaxed", task.status === "done" ? "text-gray-400 dark:text-gray-500" : "text-gray-600 dark:text-gray-300")}>
+                              {task.description}
+                            </p>
+                          )}
+
+                          <div className="flex flex-wrap items-center gap-3 mt-4 pt-4 border-t border-gray-100 dark:border-gray-800">
+                            <span className="flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400 font-medium bg-gray-100 dark:bg-gray-800 px-2.5 py-1 rounded-lg">
+                              <Clock className="w-3.5 h-3.5" />
+                              {task.startTime} ({task.duration}h)
+                            </span>
+                            {task.timerType !== "none" && task.status !== "done" && (
+                              <button 
+                                onClick={() => startTimerForTask(task)}
+                                className="flex items-center gap-1.5 text-xs text-indigo-600 dark:text-indigo-300 font-medium bg-indigo-50 dark:bg-indigo-500/10 hover:bg-indigo-100 dark:hover:bg-indigo-500/20 px-2.5 py-1 rounded-lg transition-colors"
+                              >
+                                <Play className="w-3.5 h-3.5" />
+                                {task.timerDuration}m
+                              </button>
+                            )}
+                            {task.tags.map(tag => (
+                              <span key={tag} className="flex items-center gap-1 text-xs text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 px-2.5 py-1 rounded-lg">
+                                <Tag className="w-3 h-3" />
+                                {tag}
+                              </span>
+                            ))}
+                            {task.status !== "done" && (
+                              <button
+                                onClick={() => postponeTaskOneDay(task.id)}
+                                className="text-xs font-medium text-[#88B5D3] hover:text-[#6f9fbe] bg-[#88B5D3]/8 hover:bg-[#88B5D3]/14 px-2.5 py-1 rounded-lg transition-colors"
+                              >
+                                一键顺延 +1 天
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Calendar View */}
+        {activeTab === "calendar" && (
+          <div className="space-y-6">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
+                {new Date(selectedDate).getFullYear()}年 {new Date(selectedDate).getMonth() + 1}月
+              </h3>
+              <div className="flex gap-2">
+                <button onClick={() => changeDate(-30)} className="px-3 py-1.5 text-sm font-medium text-gray-600 dark:text-gray-300 bg-gray-100 dark:bg-gray-800 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-700">上个月</button>
+                <button onClick={() => changeDate(30)} className="px-3 py-1.5 text-sm font-medium text-gray-600 dark:text-gray-300 bg-gray-100 dark:bg-gray-800 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-700">下个月</button>
+              </div>
+            </div>
+            <div className="grid grid-cols-7 gap-px bg-white/45 dark:bg-[#0f1724]/75 rounded-2xl overflow-hidden border border-white/60 dark:border-[#2b3d54] backdrop-blur-md rei-ring">
+              {['日', '一', '二', '三', '四', '五', '六'].map(day => (
+                <div key={day} className="bg-gray-50 dark:bg-gray-900 py-3 text-center text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-widest">
+                  {day}
+                </div>
+              ))}
+              {Array.from({ length: 35 }).map((_, i) => {
+                const d = new Date(selectedDate);
+                d.setDate(1); // Go to first of month
+                const startDay = d.getDay(); // Day of week of 1st
+                d.setDate(i - startDay + 1); // Calculate actual date for this cell
+                
+                const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+                const isCurrentMonth = d.getMonth() === new Date(selectedDate).getMonth();
+                const isToday = dateStr === getTodayStr();
+                const isSelected = dateStr === selectedDate;
+                const dayTasks = tasks.filter(t => t.date === dateStr).sort((a, b) => a.startTime.localeCompare(b.startTime));
+
+                return (
+                  <div 
+                    key={i} 
+                    onClick={() => {
+                      setSelectedDate(dateStr);
+                      setActiveTab("todo");
+                    }}
+                    className={cn(
+                      "bg-white/70 dark:bg-[#111b29]/75 min-h-[120px] p-2 transition-all cursor-pointer hover:bg-[#88B5D3]/12 dark:hover:bg-[#88B5D3]/14",
+                      !isCurrentMonth && "bg-gray-50/55 dark:bg-[#0d1624]/65 text-gray-400 dark:text-gray-600",
+                      isSelected && "ring-2 ring-inset ring-[#88B5D3] bg-[#88B5D3]/12 dark:bg-[#88B5D3]/16"
+                    )}
+                  >
+                    <div className="flex justify-between items-start mb-2">
+                      <span className={cn(
+                        "text-sm font-medium w-7 h-7 flex items-center justify-center rounded-full",
+                        isToday ? "bg-indigo-600 text-white" : isSelected ? "bg-indigo-100 dark:bg-indigo-500/20 text-indigo-700 dark:text-indigo-300" : isCurrentMonth ? "text-gray-900 dark:text-white" : "text-gray-400 dark:text-gray-600"
+                      )}>
+                        {d.getDate()}
+                      </span>
+                      {dayTasks.length > 0 && (
+                        <span className="text-[10px] font-bold text-gray-400 dark:text-gray-500">{dayTasks.length} 项</span>
+                      )}
+                    </div>
+                    <div className="space-y-1.5">
+                      {dayTasks.slice(0, 3).map(task => (
+                        <div key={task.id} className={cn(
+                          "text-[10px] px-2 py-1 rounded-md truncate font-medium flex items-center gap-1.5",
+                          task.status === "done" ? "bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-500 line-through" : "bg-indigo-50 dark:bg-indigo-500/10 text-indigo-700 dark:text-indigo-300 border border-indigo-100/50 dark:border-indigo-500/20"
+                        )} title={task.title}>
+                          <span className={cn("w-1.5 h-1.5 rounded-full flex-shrink-0", 
+                            task.priority === 'high' ? 'bg-red-500' : task.priority === 'medium' ? 'bg-amber-500' : 'bg-emerald-500'
+                          )} />
+                          {task.startTime} {task.title}
+                        </div>
+                      ))}
+                      {dayTasks.length > 3 && (
+                        <div className="text-[10px] text-gray-400 dark:text-gray-500 font-medium pl-1">
+                          + {dayTasks.length - 3} 更多
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Timeline View */}
+        {activeTab === "timeline" && (
+          <div className="space-y-8">
+            <div className="text-center mb-8">
+              <h3 className="text-xl font-bold text-gray-900 dark:text-white">{selectedDate === getTodayStr() ? "今天的时间轴" : selectedDate}</h3>
+              <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">按时间顺序排列的任务</p>
+            </div>
+            
+            <div className="max-w-3xl mx-auto">
+              {selectedDateTasks.length === 0 ? (
+                <div className="text-center text-gray-500 dark:text-gray-400 text-sm py-12">没有安排任务。</div>
+              ) : (
+                <div className="space-y-0">
+                  {selectedDateTasks.map((task, index) => (
+                    <div key={task.id} className="flex gap-4 md:gap-6 group">
+                      <div className="flex flex-col items-center">
+                        <div className={cn(
+                          "w-4 h-4 rounded-full border-[3px] border-white dark:border-gray-900 shadow-sm z-10 mt-1.5 transition-colors",
+                          task.status === "done" ? "bg-emerald-500" : task.status === "in-progress" ? "bg-amber-500" : "bg-indigo-500"
+                        )} />
+                        {index !== selectedDateTasks.length - 1 && (
+                          <div className="w-0.5 h-full bg-gray-200 dark:bg-gray-800 my-1 group-hover:bg-indigo-200 dark:group-hover:bg-indigo-900/50 transition-colors" />
+                        )}
+                      </div>
+                      <div className="flex-1 pb-8">
+                        <div className="bg-white dark:bg-gray-900 border border-gray-200/60 dark:border-gray-800 rounded-2xl p-5 shadow-sm hover:shadow-md transition-shadow">
+                          <div className="flex items-center gap-3 mb-3">
+                            <span className="text-xs font-bold text-gray-900 dark:text-white bg-gray-100 dark:bg-gray-800 px-3 py-1 rounded-lg flex items-center gap-1.5">
+                              <Clock className="w-3.5 h-3.5" />
+                              {task.startTime}
+                            </span>
+                            <span className="text-xs font-medium text-gray-500">
+                              持续 {task.duration} 小时
+                            </span>
+                            <span className={cn(
+                              "ml-auto text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-md border",
+                              task.status === "done" ? "text-emerald-700 bg-emerald-50 border-emerald-200 dark:bg-emerald-500/10 dark:border-emerald-500/20 dark:text-emerald-400" : 
+                              task.status === "in-progress" ? "text-amber-700 bg-amber-50 border-amber-200 dark:bg-amber-500/10 dark:border-amber-500/20 dark:text-amber-400" : 
+                              "text-indigo-700 bg-indigo-50 border-indigo-200 dark:bg-indigo-500/10 dark:border-indigo-500/20 dark:text-indigo-400"
+                            )}>
+                              {task.status.replace('-', ' ')}
+                            </span>
+                          </div>
+                          <h4 className={cn(
+                            "text-base font-semibold",
+                            task.status === "done" ? "text-gray-400 line-through" : "text-gray-900 dark:text-white"
+                          )}>
+                            {task.title}
+                          </h4>
+                          {task.description && (
+                            <p className="mt-2 text-sm text-gray-600 dark:text-gray-400 line-clamp-2">{task.description}</p>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Gantt Chart View */}
+        {activeTab === "gantt" && (
+          <div className="overflow-x-auto pb-4 gantt-scroll rounded-2xl bg-white/40 dark:bg-[#0e1622]/70 p-3 border border-white/55 dark:border-[#2a3b52] backdrop-blur-md">
+            <div className={cn("min-w-[800px]", ganttUnit === "day" && "min-w-[1200px]")}>
+              <div className="flex items-center justify-between mb-6 sticky left-0">
+                <div>
+                  <h3 className="text-lg font-bold text-gray-900 dark:text-white">项目甘特图</h3>
+                  <p className="text-sm text-gray-500">
+                    {ganttUnit === "day" ? `查看 ${selectedDate} 的详细排期` : "查看未来 7 天的任务排期"}
+                  </p>
+                </div>
+                <div className="flex bg-gray-100 dark:bg-gray-800 p-1 rounded-lg">
+                  <button 
+                    onClick={() => setGanttUnit("day")}
+                    className={cn("px-3 py-1.5 text-xs font-semibold rounded-md transition-colors", ganttUnit === "day" ? "bg-white dark:bg-gray-700 shadow-sm text-gray-900 dark:text-white" : "text-gray-500 dark:text-gray-400")}
+                  >
+                    日视图 (小时)
+                  </button>
+                  <button 
+                    onClick={() => setGanttUnit("week")}
+                    className={cn("px-3 py-1.5 text-xs font-semibold rounded-md transition-colors", ganttUnit === "week" ? "bg-white dark:bg-gray-700 shadow-sm text-gray-900 dark:text-white" : "text-gray-500 dark:text-gray-400")}
+                  >
+                    周视图 (天)
+                  </button>
+                </div>
+              </div>
+
+              {tasks.length === 0 ? (
+                <div className="text-center py-20 text-gray-500 dark:text-gray-400">
+                  <AlignLeft className="w-12 h-12 mx-auto mb-3 text-[#88B5D3]/60" />
+                  <p className="font-medium">当前暂无任务，甘特图会在你创建任务后自动生成</p>
+                </div>
+              ) : ganttUnit === "day" ? (
+                // Day View (0-24 hours)
+                <>
+                  <div className="flex border-b border-gray-200 dark:border-gray-800 mb-4 pb-2">
+                    <div className="w-64 flex-shrink-0 font-semibold text-sm text-gray-500 uppercase tracking-widest sticky left-0 bg-white dark:bg-gray-950 z-20">任务</div>
+                    <div className="flex-1 flex">
+                      {Array.from({ length: 24 }).map((_, i) => (
+                        <div key={i} className="flex-1 text-center text-[10px] font-medium text-gray-400 border-l border-gray-100 dark:border-gray-800 first:border-l-0">
+                          {i}:00
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="space-y-4 relative">
+                    {/* Current Time Line (Mocked for visual) */}
+                    <div className="absolute top-0 bottom-0 w-px bg-red-400/90 shadow-[0_0_10px_rgba(248,113,113,0.7)] z-10" style={{ left: `calc(16rem + ${(new Date().getHours() / 24) * 100}%)` }} />
+                    
+                    {selectedDateTasks.map(task => {
+                      const [hours, minutes] = task.startTime.split(':').map(Number);
+                      const startOffset = (hours + minutes / 60) / 24;
+                      const durationRatio = task.duration / 24;
+                      
+                      return (
+                        <div key={task.id} className="flex items-center group">
+                          <div className="w-64 flex-shrink-0 pr-4 sticky left-0 bg-white/90 dark:bg-[#0f1826]/95 z-20 py-1">
+                            <div className="text-sm font-medium text-gray-900 dark:text-white truncate" title={task.title}>{task.title}</div>
+                            <div className="text-[10px] text-gray-500 flex items-center gap-1 mt-0.5">
+                              <span className={cn("w-1.5 h-1.5 rounded-full", task.status === 'done' ? 'bg-emerald-500' : 'bg-amber-500')} />
+                              {task.startTime} ({task.duration}h)
+                            </div>
+                          </div>
+                          <div className="flex-1 relative h-10 bg-white/55 dark:bg-[#111b29]/55 rounded-xl border border-white/65 dark:border-[#2c3f58] overflow-hidden">
+                            <div className="absolute inset-0 flex">
+                              {Array.from({ length: 24 }).map((_, i) => (
+                                <div key={i} className="flex-1 border-l border-gray-200/50 dark:border-gray-800/50 first:border-l-0 h-full" />
+                              ))}
+                            </div>
+                            <div 
+                              className={cn(
+                                "absolute top-1.5 bottom-1.5 rounded-lg shadow-sm flex items-center px-3 text-xs font-bold text-white transition-all group-hover:brightness-110 cursor-pointer overflow-hidden",
+                                task.status === "done" ? "bg-emerald-500" : task.status === "in-progress" ? "bg-amber-500" : "bg-indigo-500"
+                              )}
+                              style={{ 
+                                left: `${startOffset * 100}%`, 
+                                width: `${durationRatio * 100}%`,
+                                minWidth: '40px'
+                              }}
+                            >
+                              <span className="truncate w-full">{task.title}</span>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
+              ) : (
+                // Week View (7 Days)
+                <>
+                  <div className="flex border-b border-gray-200 dark:border-gray-800 mb-4 pb-2">
+                    <div className="w-64 flex-shrink-0 font-semibold text-sm text-gray-500 uppercase tracking-widest sticky left-0 bg-white dark:bg-gray-950 z-20">任务</div>
+                    <div className="flex-1 flex">
+                      {Array.from({ length: 7 }).map((_, i) => {
+                        const d = new Date(selectedDate);
+                        d.setDate(d.getDate() + i);
+                        return (
+                          <div key={i} className="flex-1 text-center text-xs font-medium text-gray-400 border-l border-gray-100 dark:border-gray-800 first:border-l-0">
+                            {d.getMonth() + 1}/{d.getDate()}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  <div className="space-y-4">
+                    {tasks.filter(t => {
+                      const baseDate = new Date(selectedDate).getTime();
+                      const taskDate = new Date(t.date).getTime();
+                      const diff = (taskDate - baseDate) / (1000 * 60 * 60 * 24);
+                      return diff >= 0 && diff < 7;
+                    }).sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()).map(task => {
+                      const baseDate = new Date(selectedDate).getTime();
+                      const taskDate = new Date(task.date).getTime();
+                      const offsetDays = (taskDate - baseDate) / (1000 * 60 * 60 * 24);
+                      
+                      return (
+                        <div key={task.id} className="flex items-center group">
+                          <div className="w-64 flex-shrink-0 pr-4 sticky left-0 bg-white/90 dark:bg-[#0f1826]/95 z-20 py-1">
+                            <div className="text-sm font-medium text-gray-900 dark:text-white truncate" title={task.title}>{task.title}</div>
+                            <div className="text-[10px] text-gray-500 flex items-center gap-1 mt-0.5">
+                              <span className={cn("w-1.5 h-1.5 rounded-full", task.status === 'done' ? 'bg-emerald-500' : 'bg-amber-500')} />
+                              {task.date}
+                            </div>
+                          </div>
+                          <div className="flex-1 relative h-10 bg-white/55 dark:bg-[#111b29]/55 rounded-xl border border-white/65 dark:border-[#2c3f58] overflow-hidden">
+                            <div className="absolute inset-0 flex">
+                              {Array.from({ length: 7 }).map((_, i) => (
+                                <div key={i} className="flex-1 border-l border-gray-200/50 dark:border-gray-800/50 first:border-l-0 h-full" />
+                              ))}
+                            </div>
+                            <div 
+                              className={cn(
+                                "absolute top-1.5 bottom-1.5 rounded-lg shadow-sm flex items-center px-3 text-xs font-bold text-white transition-all group-hover:brightness-110 cursor-pointer overflow-hidden",
+                                task.status === "done" ? "bg-emerald-500" : task.status === "in-progress" ? "bg-amber-500" : "bg-indigo-500"
+                              )}
+                              style={{ 
+                                left: `${(offsetDays / 7) * 100}%`, 
+                                width: `${(1 / 7) * 100}%`, // Assume 1 day for week view
+                                minWidth: '40px'
+                              }}
+                            >
+                              <span className="truncate w-full">{task.title}</span>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+
+      </div>
+
+      {/* Floating Pomodoro Timer Widget */}
+      {activeTimerTask && (
+        <div className={cn(
+          "z-50 bg-white dark:bg-gray-900 shadow-2xl transition-all duration-500",
+          isPomodoroFullscreen 
+            ? "fixed inset-0 flex flex-col items-center justify-center p-8" 
+            : "fixed bottom-6 right-6 rounded-2xl border border-gray-200/60 dark:border-gray-800 p-5 w-72 animate-in slide-in-from-bottom-8"
+        )}>
+          <div className={cn(
+            "flex justify-between items-start w-full",
+            isPomodoroFullscreen ? "absolute top-8 left-8 right-8" : "mb-4"
+          )}>
+            <div>
+              <h4 className={cn("font-bold text-gray-900 dark:text-white truncate", isPomodoroFullscreen ? "text-2xl max-w-2xl" : "text-sm w-48")}>
+                {activeTimerTask.title}
+              </h4>
+              <p className={cn("text-gray-500 dark:text-gray-400 mt-0.5", isPomodoroFullscreen ? "text-lg" : "text-xs")}>
+                {activeTimerTask.timerType === 'pomodoro' ? '番茄钟' : '倒计时'}
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <button onClick={() => setIsPomodoroFullscreen(!isPomodoroFullscreen)} className="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors">
+                {isPomodoroFullscreen ? <Minimize2 className="w-5 h-5" /> : <Maximize2 className="w-4 h-4" />}
+              </button>
+              <button onClick={() => { setActiveTimerTask(null); setIsPomodoroFullscreen(false); }} className="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+          </div>
+          
+          <div className={cn("text-center", isPomodoroFullscreen ? "mb-16" : "mb-6")}>
+            <div className={cn(
+              "font-mono font-bold tracking-tighter transition-all",
+              timeLeft === 0 ? "text-red-500 animate-pulse" : "text-gray-900 dark:text-white",
+              isPomodoroFullscreen ? "text-[12rem] leading-none" : "text-5xl"
+            )}>
+              {formatTime(timeLeft)}
+            </div>
+          </div>
+
+          <div className="flex items-center justify-center gap-6">
+            <button 
+              onClick={toggleTimer}
+              className={cn(
+                "rounded-full flex items-center justify-center text-white shadow-md transition-transform active:scale-95",
+                isTimerRunning ? "bg-amber-500 hover:bg-amber-600" : "bg-indigo-600 hover:bg-indigo-700",
+                isPomodoroFullscreen ? "w-24 h-24" : "w-12 h-12"
+              )}
+            >
+              {isTimerRunning ? <Pause className={cn(isPomodoroFullscreen ? "w-10 h-10" : "w-5 h-5")} /> : <Play className={cn("ml-1", isPomodoroFullscreen ? "w-10 h-10" : "w-5 h-5")} />}
+            </button>
+            <button 
+              onClick={resetTimer}
+              className={cn(
+                "rounded-full flex items-center justify-center bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors",
+                isPomodoroFullscreen ? "w-16 h-16" : "w-10 h-10"
+              )}
+            >
+              <RotateCcw className={cn(isPomodoroFullscreen ? "w-6 h-6" : "w-4 h-4")} />
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
