@@ -23,6 +23,8 @@ type Task = {
   timerDuration?: number; // minutes
 };
 
+const TASKS_STORAGE_KEY = "qcb.tasks.v1";
+
 const getTodayStr = () => {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -34,7 +36,17 @@ const initialTasks: Task[] = [
 
 export function Tasks() {
   const [activeTab, setActiveTab] = useState<"todo" | "calendar" | "timeline" | "gantt">("todo");
-  const [tasks, setTasks] = useState<Task[]>(initialTasks);
+  const [tasks, setTasks] = useState<Task[]>(() => {
+    if (typeof window === "undefined") return initialTasks;
+    try {
+      const raw = localStorage.getItem(TASKS_STORAGE_KEY);
+      if (!raw) return initialTasks;
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed as Task[] : initialTasks;
+    } catch {
+      return initialTasks;
+    }
+  });
   const [selectedDate, setSelectedDate] = useState<string>(getTodayStr());
   
   // Add Task Modal State
@@ -255,6 +267,10 @@ export function Tasks() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [isAddingTask]);
+
+  useEffect(() => {
+    localStorage.setItem(TASKS_STORAGE_KEY, JSON.stringify(tasks));
+  }, [tasks]);
 
   return (
     <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-700 ease-out relative">
