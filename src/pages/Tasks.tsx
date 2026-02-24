@@ -1,53 +1,49 @@
-import React, { useState, useMemo, useEffect, useRef } from "react";
+import React, { useState, useMemo, useEffect, useRef, useCallback } from "react";
 import { 
   CheckCircle2, Circle, Clock, Calendar as CalendarIcon, 
   ListTodo, GitCommit, AlignLeft, Plus, MoreHorizontal,
   Tag, AlertCircle, ChevronLeft, ChevronRight, FileText,
-  X, Play, Pause, RotateCcw, Bell, Repeat, Maximize2, Minimize2, Edit2
+  X, Play, Pause, RotateCcw, Bell, Repeat, Maximize2, Minimize2, Edit2,
+  Upload, Zap, Sparkles, Loader2
 } from "lucide-react";
 import { cn } from "../lib/utils";
+import { TaskService, MarkdownImportService, AiService, isTauriAvailable } from "../lib/dataService";
+import type { LegacyTask, ImportedTask } from "../lib/dataService";
 
-type Task = {
-  id: string;
-  title: string;
-  description: string;
-  status: "todo" | "in-progress" | "done";
-  priority: "low" | "medium" | "high";
-  date: string; // YYYY-MM-DD
-  startTime: string; // HH:mm
-  duration: number; // hours
-  tags: string[];
-  repeat?: "none" | "daily" | "weekly";
-  repeatDays?: number[]; // 0-6 for weekly
-  timerType?: "none" | "pomodoro" | "countdown";
-  timerDuration?: number; // minutes
-};
-
-const TASKS_STORAGE_KEY = "qcb.tasks.v1";
+type Task = LegacyTask;
 
 const getTodayStr = () => {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 };
 
-const initialTasks: Task[] = [
-  
-];
-
 export function Tasks() {
   const [activeTab, setActiveTab] = useState<"todo" | "calendar" | "timeline" | "gantt">("todo");
-  const [tasks, setTasks] = useState<Task[]>(() => {
-    if (typeof window === "undefined") return initialTasks;
-    try {
-      const raw = localStorage.getItem(TASKS_STORAGE_KEY);
-      if (!raw) return initialTasks;
-      const parsed = JSON.parse(raw);
-      return Array.isArray(parsed) ? parsed as Task[] : initialTasks;
-    } catch {
-      return initialTasks;
-    }
-  });
+  const [tasks, setTasks] = useState<Task[]>([]);
   const [selectedDate, setSelectedDate] = useState<string>(getTodayStr());
+  const [dataLoaded, setDataLoaded] = useState(false);
+
+  // MD Import State
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [importMdContent, setImportMdContent] = useState("");
+  const [importPreview, setImportPreview] = useState<ImportedTask[]>([]);
+  const [importLoading, setImportLoading] = useState(false);
+  const [importResult, setImportResult] = useState<string | null>(null);
+
+  // AI Inbox State
+  const [showAiInbox, setShowAiInbox] = useState(false);
+  const [aiInput, setAiInput] = useState("");
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiParsedTasks, setAiParsedTasks] = useState<ImportedTask[]>([]);
+  const [aiApiKey, setAiApiKey] = useState(() => localStorage.getItem("eva.ai.apiKey") || "");
+
+  // Load tasks from dataService on mount
+  useEffect(() => {
+    TaskService.getAll().then((loaded) => {
+      setTasks(loaded);
+      setDataLoaded(true);
+    });
+  }, []);
   
   // Add Task Modal State
   const [isAddingTask, setIsAddingTask] = useState(false);
@@ -268,9 +264,80 @@ export function Tasks() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [isAddingTask]);
 
+  // Persist tasks via dataService whenever they change (after initial load)
+  const isFirstRender = useRef(true);
   useEffect(() => {
-    localStorage.setItem(TASKS_STORAGE_KEY, JSON.stringify(tasks));
-  }, [tasks]);
+    if (isFirstRender.current) { isFirstRender.current = false; return; }
+    if (!dataLoaded) return;
+    // We sync individual operations via TaskService in handlers,
+    // but also persist full array for localStorage fallback
+    if (!isTauriAvailable()) {
+      localStorage.setItem("qcb.tasks.v1", JSON.stringify(tasks));
+    }
+  }, [tasks, dataLoaded]);
+
+  // ── MD Import Handlers ──
+  const handleImportFileSelect = async () => {
+    if (isTauriAvailable()) {
+      try {
+        const { open } = await import("@tauri-apps/plugin-dialog");
+        const filePath = await open({ multiple: false, filters: [{ name: "Markdown", extensions: ["md", "markdown", "txt"] }] });
+        if (filePath && typeof filePath === "string") {
+          setImportLoading(true);
+          const report = await MarkdownImportService.parseFile(filePath);
+          setImportPreview(report.tasks);
+          setImportLoading(false);
+        }
+      } catch (e) {
+        console.error("File picker failed:", e);
+        setImportLoading(false);
+      }
+    }
+  };
+
+  const handleImportParse = async () => {
+    if (!importMdContent.trim()) return;
+    setImportLoading(true);
+    const report = await MarkdownImportService.parseContent(importMdContent);
+    setImportPreview(report.tasks);
+    setImportLoading(false);
+  };
+
+  const handleImportConfirm = async () => {
+    if (importPreview.length === 0) return;
+    setImportLoading(true);
+    const count = await MarkdownImportService.importTasks(importPreview);
+    // Reload tasks
+    const updated = await TaskService.getAll();
+    setTasks(updated);
+    setImportResult(`成功导入 ${count} 个任务`);
+    setImportLoading(false);
+    setTimeout(() => { setShowImportModal(false); setImportPreview([]); setImportMdContent(""); setImportResult(null); }, 2000);
+  };
+
+  // ── AI Inbox Handlers ──
+  const handleAiParse = async () => {
+    if (!aiInput.trim() || !aiApiKey.trim()) return;
+    localStorage.setItem("eva.ai.apiKey", aiApiKey);
+    setAiLoading(true);
+    try {
+      const parsed = await AiService.parseNaturalLanguageTasks(aiInput, aiApiKey);
+      setAiParsedTasks(parsed);
+    } catch (e) {
+      console.error("AI parse failed:", e);
+    }
+    setAiLoading(false);
+  };
+
+  const handleAiConfirm = async () => {
+    if (aiParsedTasks.length === 0) return;
+    const count = await MarkdownImportService.importTasks(aiParsedTasks);
+    const updated = await TaskService.getAll();
+    setTasks(updated);
+    setShowAiInbox(false);
+    setAiInput("");
+    setAiParsedTasks([]);
+  };
 
   return (
     <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-700 ease-out relative">
@@ -278,6 +345,20 @@ export function Tasks() {
         <div>
           <h1 className="text-3xl font-bold tracking-tight text-gray-900 dark:text-white sm:text-4xl">任务与计划</h1>
           <p className="mt-3 text-lg text-gray-600 dark:text-gray-400 leading-relaxed">管理你的待办事项、日程安排和项目进度。</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowAiInbox(true)}
+            className="flex items-center gap-2 px-4 py-2.5 rounded-2xl text-sm font-semibold bg-gradient-to-r from-purple-500/10 to-[#88B5D3]/10 border border-purple-300/30 dark:border-purple-500/20 text-purple-600 dark:text-purple-300 hover:from-purple-500/20 hover:to-[#88B5D3]/20 transition-all"
+          >
+            <Sparkles className="w-4 h-4" /> 闪电灵感
+          </button>
+          <button
+            onClick={() => setShowImportModal(true)}
+            className="flex items-center gap-2 px-4 py-2.5 rounded-2xl text-sm font-semibold bg-white/90 dark:bg-[#111b29]/85 border border-[#88B5D3]/35 hover:bg-[#88B5D3]/10 text-[#88B5D3] transition-all"
+          >
+            <Upload className="w-4 h-4" /> 导入 MD 计划
+          </button>
         </div>
       </header>
 
@@ -954,6 +1035,128 @@ export function Tasks() {
           </div>
         </div>
       )}
-    </div>
-  );
-}
+
+      {/* ════════ MD Import Modal ════════ */}
+      {showImportModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+          <div className="bg-white dark:bg-[#0f1826] rounded-3xl shadow-2xl w-full max-w-2xl max-h-[85vh] flex flex-col border border-gray-200/50 dark:border-[#2a3b52] animate-in zoom-in-95">
+            <div className="flex items-center justify-between p-6 border-b border-gray-200 dark:border-gray-800">
+              <h3 className="text-lg font-bold text-gray-900 dark:text-white flex items-center gap-2">
+                <Upload className="w-5 h-5 text-[#88B5D3]" /> 导入 Markdown 计划
+              </h3>
+              <button onClick={() => { setShowImportModal(false); setImportPreview([]); setImportMdContent(""); }} className="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-6 space-y-4">
+              {isTauriAvailable() && (
+                <button onClick={handleImportFileSelect} className="w-full py-4 border-2 border-dashed border-[#88B5D3]/40 rounded-2xl text-[#88B5D3] font-medium hover:bg-[#88B5D3]/5 transition-all flex items-center justify-center gap-2">
+                  <FileText className="w-5 h-5" /> 从文件选择 .md
+                </button>
+              )}
+              <div>
+                <label className="text-xs font-semibold text-gray-500 dark:text-gray-400 mb-1.5 block">或直接粘贴 Markdown 内容：</label>
+                <textarea
+                  value={importMdContent}
+                  onChange={(e) => setImportMdContent(e.target.value)}
+                  placeholder={"# 2025-06-01\\n- [ ] 复习高等数学第一章 @2025-06-01 #math #high\\n- [ ] 背英语单词 50个 #english #low\\n- [x] 完成政治选择题 #politics"}
+                  className="w-full h-40 bg-gray-50 dark:bg-[#111b29] border border-gray-200 dark:border-[#30435c] rounded-xl p-4 text-sm font-mono text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-600 resize-none focus:outline-none focus:ring-2 focus:ring-[#88B5D3]/25"
+                />
+                <button onClick={handleImportParse} disabled={importLoading || !importMdContent.trim()} className="mt-2 px-4 py-2 bg-[#88B5D3] hover:bg-[#6f9fbe] text-white text-sm font-semibold rounded-xl disabled:opacity-50 transition-colors">
+                  {importLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : "解析预览"}
+                </button>
+              </div>
+              {importPreview.length > 0 && (
+                <div className="space-y-2">
+                  <h4 className="text-sm font-semibold text-gray-700 dark:text-gray-300">解析结果 ({importPreview.length} 个任务)</h4>
+                  <div className="max-h-48 overflow-y-auto space-y-1.5">
+                    {importPreview.map((t, i) => (
+                      <div key={i} className="flex items-center gap-3 px-3 py-2 rounded-xl bg-gray-50 dark:bg-[#111b29] text-sm">
+                        <span className={cn("w-2 h-2 rounded-full", t.priority === "high" ? "bg-red-500" : t.priority === "low" ? "bg-emerald-500" : "bg-amber-500")} />
+                        <span className="flex-1 text-gray-900 dark:text-white truncate">{t.title}</span>
+                        <span className="text-xs text-gray-500">{t.date}</span>
+                        {t.tags.map(tag => <span key={tag} className="text-[10px] bg-[#88B5D3]/10 text-[#88B5D3] px-1.5 py-0.5 rounded">#{tag}</span>)}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {importResult && <div className="text-sm font-semibold text-emerald-500 text-center py-2">{importResult}</div>}
+            </div>
+            {importPreview.length > 0 && !importResult && (
+              <div className="p-6 border-t border-gray-200 dark:border-gray-800">
+                <button onClick={handleImportConfirm} disabled={importLoading} className="w-full py-3 bg-emerald-500 hover:bg-emerald-600 text-white font-semibold rounded-xl transition-colors disabled:opacity-50">
+                  {importLoading ? "导入中..." : `确认导入 ${importPreview.length} 个任务`}
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ════════ AI 闪电灵感 Inbox ════════ */}
+      {showAiInbox && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+          <div className="bg-white dark:bg-[#0f1826] rounded-3xl shadow-2xl w-full max-w-2xl max-h-[85vh] flex flex-col border border-gray-200/50 dark:border-[#2a3b52] animate-in zoom-in-95">
+            <div className="flex items-center justify-between p-6 border-b border-gray-200 dark:border-gray-800">
+              <h3 className="text-lg font-bold text-gray-900 dark:text-white flex items-center gap-2">
+                <Sparkles className="w-5 h-5 text-purple-500" /> 闪电灵感 Inbox
+              </h3>
+              <button onClick={() => { setShowAiInbox(false); setAiParsedTasks([]); }} className="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-6 space-y-4">
+              <p className="text-sm text-gray-500 dark:text-gray-400">
+                输入自然语言描述你的计划，AI 会自动解析为结构化任务。
+              </p>
+              {!aiApiKey && (
+                <div className="space-y-1">
+                  <label className="text-xs font-semibold text-gray-500">DeepSeek API Key</label>
+                  <input
+                    type="password"
+                    value={aiApiKey}
+                    onChange={(e) => setAiApiKey(e.target.value)}
+                    placeholder="sk-..."
+                    className="w-full bg-gray-50 dark:bg-[#111b29] border border-gray-200 dark:border-[#30435c] rounded-xl px-4 py-2.5 text-sm text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-purple-500/25"
+                  />
+                </div>
+              )}
+              <div>
+                <textarea
+                  value={aiInput}
+                  onChange={(e) => setAiInput(e.target.value)}
+                  placeholder="例如：明天上午复习高数极限部分，下周一开始每天背50个单词，后天交操作系统实验报告很急..."
+                  className="w-full h-32 bg-gray-50 dark:bg-[#111b29] border border-gray-200 dark:border-[#30435c] rounded-xl p-4 text-sm text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-600 resize-none focus:outline-none focus:ring-2 focus:ring-purple-500/25"
+                />
+                <button onClick={handleAiParse} disabled={aiLoading || !aiInput.trim() || !aiApiKey.trim()} className="mt-2 px-4 py-2 bg-purple-500 hover:bg-purple-600 text-white text-sm font-semibold rounded-xl disabled:opacity-50 transition-colors flex items-center gap-2">
+                  {aiLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
+                  {aiLoading ? "AI 解析中..." : "AI 解析"}
+                </button>
+              </div>
+              {aiParsedTasks.length > 0 && (
+                <div className="space-y-2">
+                  <h4 className="text-sm font-semibold text-gray-700 dark:text-gray-300">AI 解析结果 ({aiParsedTasks.length} 个任务)</h4>
+                  <div className="max-h-48 overflow-y-auto space-y-1.5">
+                    {aiParsedTasks.map((t, i) => (
+                      <div key={i} className="flex items-center gap-3 px-3 py-2 rounded-xl bg-gray-50 dark:bg-[#111b29] text-sm">
+                        <span className={cn("w-2 h-2 rounded-full", t.priority === "high" ? "bg-red-500" : t.priority === "low" ? "bg-emerald-500" : "bg-amber-500")} />
+                        <span className="flex-1 text-gray-900 dark:text-white truncate">{t.title}</span>
+                        <span className="text-xs text-gray-500">{t.date}</span>
+                        {t.tags.map(tag => <span key={tag} className="text-[10px] bg-purple-500/10 text-purple-500 px-1.5 py-0.5 rounded">#{tag}</span>)}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+            {aiParsedTasks.length > 0 && (
+              <div className="p-6 border-t border-gray-200 dark:border-gray-800">
+                <button onClick={handleAiConfirm} className="w-full py-3 bg-purple-500 hover:bg-purple-600 text-white font-semibold rounded-xl transition-colors">
+                  确认创建 {aiParsedTasks.length} 个任务
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}

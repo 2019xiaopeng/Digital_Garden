@@ -1,26 +1,16 @@
-import { Calendar, Clock, ArrowRight, Search, Filter, Plus, X, Tag as TagIcon, ChevronLeft, ChevronRight, Eye, Edit3, Save, Smile, Frown, Meh, Zap } from "lucide-react";
+import { Calendar, Clock, ArrowRight, Search, Filter, Plus, X, Tag as TagIcon, ChevronLeft, ChevronRight, Eye, Edit3, Save, Smile, Frown, Meh, Zap, Loader2, Sparkles } from "lucide-react";
 import { useState, useMemo, useEffect } from "react";
 import { Link } from "react-router-dom";
 import { cn } from "../lib/utils";
 import { MarkdownEditor } from "../components/MarkdownEditor";
-
-// Initial posts
-const initialPosts: Array<{
-  id: string;
-  title: string;
-  excerpt: string;
-  date: string;
-  readTime: string;
-  category: string;
-  tags: string[];
-  mood: string;
-  syncRate: number;
-}> = [];
+import { DailyLogService, TaskService, AiService, isTauriAvailable } from "../lib/dataService";
+import type { LegacyPost } from "../lib/dataService";
 
 const POSTS_PER_PAGE = 10;
 
 export function Blog() {
-  const [posts, setPosts] = useState(initialPosts);
+  const [posts, setPosts] = useState<LegacyPost[]>([]);
+  const [dataLoaded, setDataLoaded] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [sortOrder, setSortOrder] = useState<"desc" | "asc">("desc");
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
@@ -38,6 +28,17 @@ export function Blog() {
   });
   
   const [currentPage, setCurrentPage] = useState(1);
+  
+  // AI Review State
+  const [aiReviewLoading, setAiReviewLoading] = useState(false);
+
+  // Load posts from dataService
+  useEffect(() => {
+    DailyLogService.getAll().then((loaded) => {
+      setPosts(loaded);
+      setDataLoaded(true);
+    });
+  }, []);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -103,20 +104,21 @@ export function Blog() {
     setIsWriting(true);
   };
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (editingPostId) {
-      setPosts(posts.map(p => p.id === editingPostId ? {
-        ...p,
+      const updated: LegacyPost = {
+        ...posts.find(p => p.id === editingPostId)!,
         title: newPost.title,
-        excerpt: newPost.content, // Mock content
+        excerpt: newPost.content,
         tags: newPost.tags.split(',').map(t => t.trim()).filter(Boolean),
         mood: newPost.mood,
         syncRate: newPost.syncRate
-      } : p));
+      };
+      await DailyLogService.update(updated);
+      setPosts(posts.map(p => p.id === editingPostId ? updated : p));
     } else {
-      const newId = `post-${Date.now()}`;
-      setPosts([{
-        id: newId,
+      const post: LegacyPost = {
+        id: `post-${Date.now()}`,
         title: newPost.title,
         excerpt: newPost.content,
         date: new Date().toISOString().split('T')[0],
@@ -125,11 +127,69 @@ export function Blog() {
         tags: newPost.tags.split(',').map(t => t.trim()).filter(Boolean),
         mood: newPost.mood,
         syncRate: newPost.syncRate
-      }, ...posts]);
+      };
+      await DailyLogService.create(post);
+      setPosts([post, ...posts]);
     }
     setIsWriting(false);
     setEditingPostId(null);
     setNewPost({ title: "", content: "", tags: "", mood: "neutral", syncRate: 80 });
+  };
+
+  // AI 一键复盘
+  const handleAiReview = async () => {
+    const apiKey = localStorage.getItem("eva.ai.apiKey") || "";
+    if (!apiKey) {
+      alert("请先在任务页的闪电灵感中设置 API Key");
+      return;
+    }
+    setAiReviewLoading(true);
+    try {
+      const allTasks = await TaskService.getAll();
+      const today = new Date().toISOString().split('T')[0];
+      const completedToday = allTasks.filter(t => t.date === today && t.status === "done");
+      
+      // Get focus hours from attendance (approximate)
+      let focusHours = 0;
+      try {
+        const raw = localStorage.getItem("qcb.attendance.v1");
+        if (raw) {
+          const map = JSON.parse(raw);
+          focusHours = (map[today]?.totalFocusSeconds || 0) / 3600;
+        }
+      } catch {}
+
+      if (completedToday.length === 0) {
+        // Still generate but with basic info
+        const review = await DailyLogService.generateDailyReview([], focusHours);
+        setPosts([review, ...posts]);
+      } else {
+        // Use AI for richer review
+        const aiContent = await AiService.generateReview(completedToday, focusHours, apiKey);
+        const post: LegacyPost = {
+          id: `ai-review-${Date.now()}`,
+          title: `留痕 ${today}`,
+          excerpt: aiContent,
+          date: today,
+          readTime: "1 min read",
+          category: "Auto",
+          tags: ["auto-review", "ai"],
+          mood: "focused",
+          syncRate: Math.min(100, Math.round((completedToday.length / Math.max(1, completedToday.length + 2)) * 100)),
+        };
+        await DailyLogService.create(post);
+        setPosts([post, ...posts]);
+      }
+    } catch (e) {
+      console.error("AI review failed:", e);
+      // Fallback: generate without AI
+      const allTasks = await TaskService.getAll();
+      const today = new Date().toISOString().split('T')[0];
+      const completedToday = allTasks.filter(t => t.date === today && t.status === "done");
+      const review = await DailyLogService.generateDailyReview(completedToday, 0);
+      setPosts([review, ...posts]);
+    }
+    setAiReviewLoading(false);
   };
 
   const getMoodIcon = (mood: string) => {
@@ -152,9 +212,17 @@ export function Blog() {
         </div>
         <div className="flex items-center gap-2">
           <button
+            onClick={handleAiReview}
+            disabled={aiReviewLoading}
+            className="flex items-center gap-2 bg-gradient-to-r from-purple-500/10 to-[#88B5D3]/10 border border-purple-300/30 dark:border-purple-500/20 hover:from-purple-500/20 hover:to-[#88B5D3]/20 text-purple-600 dark:text-purple-300 px-4 py-2.5 rounded-2xl text-sm font-semibold transition-all disabled:opacity-50"
+          >
+            {aiReviewLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+            一键 AI 复盘
+          </button>
+          <button
             onClick={() => {
               const today = new Date().toISOString().split('T')[0];
-              setPosts([{
+              const post: LegacyPost = {
                 id: `post-${Date.now()}`,
                 title: `留痕 ${today}`,
                 excerpt: "今日同步率记录：",
@@ -164,7 +232,9 @@ export function Blog() {
                 tags: [],
                 mood: "focused",
                 syncRate: 80,
-              }, ...posts]);
+              };
+              DailyLogService.create(post);
+              setPosts([post, ...posts]);
             }}
             className="bg-white/90 dark:bg-[#111b29]/85 border border-[#88B5D3]/35 hover:bg-[#88B5D3]/10 text-[#88B5D3] px-4 py-2.5 rounded-2xl text-sm font-semibold transition-all"
           >
