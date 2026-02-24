@@ -158,7 +158,7 @@ export function Notes() {
         const relativePath = parentRelDir ? `${parentRelDir}/${folderName}` : folderName;
         await invoke("create_notes_folder", { relativePath });
       } catch (err) {
-        console.warn("Failed to create folder on disk:", err);
+        console.error("[Notes] Failed to create folder on disk:", err);
       }
     }
   };
@@ -191,72 +191,67 @@ export function Notes() {
         const list = Array.isArray(picked) ? picked : picked ? [picked] : [];
         if (list.length === 0) return;
         const relativeDir = getRelativeDir(treeData, targetFolderId);
-        
-        setTreeData(prev => {
-          let updated = prev;
-          list.forEach((srcPath) => {
-            const name = String(srcPath).split(/[\\/]/).pop() || "文件";
-            const newFile: TreeNode = {
-              id: `uploaded-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-              name,
-              type: "file",
-              path: String(srcPath),
-            };
-            updated = addNodeToFolder(updated, targetFolderId, newFile);
-          });
-          return updated;
-        });
 
-        // Copy files in background
+        // Copy files first, then update tree with destination path
         for (const srcPath of list) {
           try {
             const destPath = await invoke("copy_file_to_notes", { sourcePath: String(srcPath), relativeDir });
-            // Update path in tree
             setTreeData(prev => {
               const name = String(srcPath).split(/[\\/]/).pop() || "";
-              return updateNodePath(prev, name, String(destPath));
+              const newFile: TreeNode = {
+                id: `uploaded-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                name,
+                type: "file",
+                path: String(destPath),
+              };
+              return addNodeToFolder(prev, targetFolderId, newFile);
             });
           } catch (err) {
-            console.warn("Failed to copy file:", err);
+            console.error(`[Notes] Failed to copy file ${String(srcPath)}:`, err);
           }
         }
         return;
       } catch (err) {
-        console.warn("Tauri file pick failed:", err);
+        console.error("[Notes] Tauri file pick failed:", err);
       }
     }
 
     // Web fallback: read file content via FileReader
     if (!e) return;
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
-    
-    setTreeData(prev => {
-      let updated = prev;
-      Array.from(files).forEach((file: File) => {
-        const newFile: TreeNode = {
-          id: `uploaded-${Date.now()}-${file.name}-${Math.random().toString(36).slice(2, 8)}`,
-          name: file.name,
-          type: "file",
-        };
-        updated = addNodeToFolder(updated, targetFolderId, newFile);
+    try {
+      const files = e.target.files;
+      if (!files || files.length === 0) return;
+
+      setTreeData(prev => {
+        let updated = prev;
+        Array.from(files).forEach((file: File) => {
+          const newFile: TreeNode = {
+            id: `uploaded-${Date.now()}-${file.name}-${Math.random().toString(36).slice(2, 8)}`,
+            name: file.name,
+            type: "file",
+          };
+          updated = addNodeToFolder(updated, targetFolderId, newFile);
+        });
+        return updated;
       });
-      return updated;
-    });
 
-    // Store file content in localStorage for web mode
-    for (const file of Array.from(files)) {
-      const reader = new FileReader();
-      reader.onload = () => {
-        localStorage.setItem(`eva:file:${file.name}`, reader.result as string);
-      };
-      if (file.name.endsWith(".md") || file.name.endsWith(".txt")) {
-        reader.readAsText(file);
+      // Store file content in localStorage for web mode
+      for (const file of Array.from(files)) {
+        const reader = new FileReader();
+        reader.onload = () => {
+          localStorage.setItem(`eva:file:${file.name}`, reader.result as string);
+        };
+        if (file.name.endsWith(".md") || file.name.endsWith(".txt")) {
+          reader.readAsText(file);
+        }
       }
-    }
-
-    if (fileInputRef.current) {
-      fileInputRef.current.value = '';
+    } catch (err) {
+      console.error("[Notes] Web file upload failed:", err);
+    } finally {
+      e.target.value = "";
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
     }
   };
 
@@ -277,22 +272,30 @@ export function Notes() {
           setTreeData(prev => addNodeToFolder(prev, targetFolderId, newFolder));
         }
         return;
-      } catch {}
+      } catch (err) {
+        console.error("[Notes] Tauri folder pick failed:", err);
+      }
     }
     if (!e) return;
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
-    setTreeData(prev => {
-      let updated = prev;
-      Array.from(files).forEach((file: File) => {
-        const relativePath = (file as any).webkitRelativePath || file.name;
-        const parts = relativePath.split("/").filter(Boolean);
-        updated = addFilePathToTree(updated, parts);
+    try {
+      const files = e.target.files;
+      if (!files || files.length === 0) return;
+      setTreeData(prev => {
+        let updated = prev;
+        Array.from(files).forEach((file: File) => {
+          const relativePath = (file as any).webkitRelativePath || file.name;
+          const parts = relativePath.split("/").filter(Boolean);
+          updated = addFilePathToTree(updated, parts);
+        });
+        return updated;
       });
-      return updated;
-    });
-    if (directoryInputRef.current) {
-      directoryInputRef.current.value = '';
+    } catch (err) {
+      console.error("[Notes] Web folder upload failed:", err);
+    } finally {
+      e.target.value = "";
+      if (directoryInputRef.current) {
+        directoryInputRef.current.value = "";
+      }
     }
   };
 
@@ -334,7 +337,7 @@ export function Notes() {
           await invoke("delete_notes_item", { relativePath: pathParts.join("/") });
         }
       } catch (err) {
-        console.warn("Failed to delete from disk:", err);
+        console.error("[Notes] Failed to delete from disk:", err);
       }
     }
     setTreeData(prev => removeNode(prev, selectedNode.id));
@@ -409,7 +412,7 @@ export function Notes() {
           await invoke("move_notes_item", { fromRelative: fromPath, toRelative: toPath });
         }
       } catch (err) {
-        console.warn("Failed to move on disk:", err);
+        console.error("[Notes] Failed to move on disk:", err);
       }
     }
 
@@ -436,7 +439,7 @@ export function Notes() {
           await invoke("move_notes_item", { fromRelative: fromPath, toRelative: name });
         }
       } catch (err) {
-        console.warn("Failed to move to root on disk:", err);
+        console.error("[Notes] Failed to move to root on disk:", err);
       }
     }
 
@@ -1022,7 +1025,7 @@ export function Notes() {
                   if (fileContent) {
                     return (
                       <div className="bg-white dark:bg-gray-900 w-full max-w-3xl mx-auto min-h-full shadow-sm border-x border-gray-200 dark:border-gray-800 p-8 md:p-12">
-                        <article className="prose prose-gray dark:prose-invert max-w-none prose-headings:text-gray-900 dark:prose-headings:text-white prose-a:text-[#88B5D3] prose-code:bg-gray-100 dark:prose-code:bg-gray-800 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded-md prose-pre:bg-gray-900 dark:prose-pre:bg-gray-950 prose-pre:border prose-pre:border-gray-200 dark:prose-pre:border-gray-800">
+                        <article className="notes-markdown prose prose-gray dark:prose-invert max-w-none prose-headings:text-gray-900 dark:prose-headings:text-white prose-a:text-[#88B5D3]">
                           <ReactMarkdown remarkPlugins={[remarkGfm]}>{fileContent}</ReactMarkdown>
                         </article>
                       </div>

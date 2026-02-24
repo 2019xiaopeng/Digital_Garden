@@ -83,4 +83,17 @@ html, body, #root {
   .dark .gantt-scroll {
     scrollbar-color: rgba(136, 181, 211, 0.35) rgba(17, 27, 41, 0.7);
   }
+
+  .notes-markdown pre {
+    @apply bg-gray-900 text-blue-100 rounded-md p-4 border border-[#88B5D3]/25 overflow-x-auto;
+    background-color: #1A1B26;
+  }
+
+  .notes-markdown pre code {
+    @apply bg-transparent text-blue-100 p-0 rounded-none;
+  }
+
+  .notes-markdown :not(pre) > code {
+    @apply bg-gray-800 text-blue-100 px-1.5 py-0.5 rounded-md;
+  }
 }

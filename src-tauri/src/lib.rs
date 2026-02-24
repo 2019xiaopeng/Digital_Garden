@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::{Manager, State};
+use tokio::fs;
 use tokio::sync::Mutex;
 
 // ═══════════════════════════════════════════════════════════
@@ -702,7 +703,8 @@ async fn ai_proxy(request: AiProxyRequest) -> Result<AiProxyResponse, String> {
 
 #[tauri::command]
 async fn read_file_content(path: String) -> Result<String, String> {
-    std::fs::read_to_string(&path)
+    fs::read_to_string(&path)
+        .await
         .map_err(|e| format!("Failed to read file {}: {}", path, e))
 }
 
@@ -710,27 +712,54 @@ async fn read_file_content(path: String) -> Result<String, String> {
 // Knowledge base file operations
 // ═══════════════════════════════════════════════════════════
 
+fn workspace_root_dir() -> String {
+    format!("{}/Documents/EVA_Knowledge_Base", dirs_next_home())
+}
+
+async fn ensure_workspace_dirs() -> Result<String, String> {
+    let root = workspace_root_dir();
+    let required = [
+        root.clone(),
+        format!("{}/Database", root),
+        format!("{}/Logs", root),
+        format!("{}/Notes", root),
+        format!("{}/Resources", root),
+    ];
+
+    for dir in required {
+        fs::create_dir_all(&dir)
+            .await
+            .map_err(|e| format!("Failed to create workspace dir {}: {}", dir, e))?;
+    }
+
+    Ok(root)
+}
+
+#[tauri::command]
+async fn initialize_workspace() -> Result<String, String> {
+    ensure_workspace_dirs().await
+}
+
 /// Get the Notes directory path, creating it if needed
 #[tauri::command]
 async fn get_notes_dir() -> Result<String, String> {
-    let home = dirs_next_home();
-    let notes_dir = format!("{}/Documents/EVA_Knowledge_Base/Notes", home);
-    std::fs::create_dir_all(&notes_dir)
-        .map_err(|e| format!("Failed to create Notes dir: {}", e))?;
+    let root = ensure_workspace_dirs().await?;
+    let notes_dir = format!("{}/Notes", root);
     Ok(notes_dir)
 }
 
 /// Copy a file into the Notes directory (preserving name), return the dest path
 #[tauri::command]
 async fn copy_file_to_notes(source_path: String, relative_dir: String) -> Result<String, String> {
-    let home = dirs_next_home();
-    let base = format!("{}/Documents/EVA_Knowledge_Base/Notes", home);
+    let root = ensure_workspace_dirs().await?;
+    let base = format!("{}/Notes", root);
     let target_dir = if relative_dir.is_empty() {
         base.clone()
     } else {
         format!("{}/{}", base, relative_dir)
     };
-    std::fs::create_dir_all(&target_dir)
+    fs::create_dir_all(&target_dir)
+        .await
         .map_err(|e| format!("Failed to create directory {}: {}", target_dir, e))?;
 
     let file_name = std::path::Path::new(&source_path)
@@ -738,7 +767,8 @@ async fn copy_file_to_notes(source_path: String, relative_dir: String) -> Result
         .and_then(|n| n.to_str())
         .unwrap_or("unknown");
     let dest = format!("{}/{}", target_dir, file_name);
-    std::fs::copy(&source_path, &dest)
+    fs::copy(&source_path, &dest)
+        .await
         .map_err(|e| format!("Failed to copy {} -> {}: {}", source_path, dest, e))?;
     Ok(dest)
 }
@@ -746,13 +776,15 @@ async fn copy_file_to_notes(source_path: String, relative_dir: String) -> Result
 /// Write text content to a file in the Notes directory
 #[tauri::command]
 async fn write_notes_file(relative_path: String, content: String) -> Result<String, String> {
-    let home = dirs_next_home();
-    let full_path = format!("{}/Documents/EVA_Knowledge_Base/Notes/{}", home, relative_path);
+    let root = ensure_workspace_dirs().await?;
+    let full_path = format!("{}/Notes/{}", root, relative_path);
     if let Some(parent) = std::path::Path::new(&full_path).parent() {
-        std::fs::create_dir_all(parent)
+        fs::create_dir_all(parent)
+            .await
             .map_err(|e| format!("Failed to create dir: {}", e))?;
     }
-    std::fs::write(&full_path, &content)
+    fs::write(&full_path, &content)
+        .await
         .map_err(|e| format!("Failed to write {}: {}", full_path, e))?;
     Ok(full_path)
 }
@@ -760,9 +792,10 @@ async fn write_notes_file(relative_path: String, content: String) -> Result<Stri
 /// Create a folder in the Notes directory
 #[tauri::command]
 async fn create_notes_folder(relative_path: String) -> Result<String, String> {
-    let home = dirs_next_home();
-    let full_path = format!("{}/Documents/EVA_Knowledge_Base/Notes/{}", home, relative_path);
-    std::fs::create_dir_all(&full_path)
+    let root = ensure_workspace_dirs().await?;
+    let full_path = format!("{}/Notes/{}", root, relative_path);
+    fs::create_dir_all(&full_path)
+        .await
         .map_err(|e| format!("Failed to create folder {}: {}", full_path, e))?;
     Ok(full_path)
 }
@@ -770,14 +803,16 @@ async fn create_notes_folder(relative_path: String) -> Result<String, String> {
 /// Delete a file or folder from Notes directory
 #[tauri::command]
 async fn delete_notes_item(relative_path: String) -> Result<(), String> {
-    let home = dirs_next_home();
-    let full_path = format!("{}/Documents/EVA_Knowledge_Base/Notes/{}", home, relative_path);
+    let root = ensure_workspace_dirs().await?;
+    let full_path = format!("{}/Notes/{}", root, relative_path);
     let path = std::path::Path::new(&full_path);
-    if path.is_dir() {
-        std::fs::remove_dir_all(path)
+    if fs::metadata(path).await.map(|m| m.is_dir()).unwrap_or(false) {
+        fs::remove_dir_all(path)
+            .await
             .map_err(|e| format!("Failed to delete folder: {}", e))?;
-    } else if path.is_file() {
-        std::fs::remove_file(path)
+    } else if fs::metadata(path).await.map(|m| m.is_file()).unwrap_or(false) {
+        fs::remove_file(path)
+            .await
             .map_err(|e| format!("Failed to delete file: {}", e))?;
     }
     Ok(())
@@ -786,16 +821,18 @@ async fn delete_notes_item(relative_path: String) -> Result<(), String> {
 /// Move (rename) a file or folder within Notes directory
 #[tauri::command]
 async fn move_notes_item(from_relative: String, to_relative: String) -> Result<(), String> {
-    let home = dirs_next_home();
-    let base = format!("{}/Documents/EVA_Knowledge_Base/Notes", home);
+    let root = ensure_workspace_dirs().await?;
+    let base = format!("{}/Notes", root);
     let src = format!("{}/{}", base, from_relative);
     let dest = format!("{}/{}", base, to_relative);
     // Ensure destination parent directory exists
     if let Some(parent) = std::path::Path::new(&dest).parent() {
-        std::fs::create_dir_all(parent)
+        fs::create_dir_all(parent)
+            .await
             .map_err(|e| format!("Failed to create dest dir: {}", e))?;
     }
-    std::fs::rename(&src, &dest)
+    fs::rename(&src, &dest)
+        .await
         .map_err(|e| format!("Failed to move {} -> {}: {}", src, dest, e))?;
     Ok(())
 }
@@ -822,8 +859,18 @@ pub fn run() {
             // Initialize SQLite database
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                let home = dirs_next_home();
-                let db_dir = format!("{}/Documents/EVA_Knowledge_Base/Database", home);
+                let workspace_root = match ensure_workspace_dirs().await {
+                    Ok(root) => {
+                        log::info!("Workspace initialized at: {}", root);
+                        root
+                    }
+                    Err(e) => {
+                        log::error!("Failed to initialize workspace dirs: {}", e);
+                        return;
+                    }
+                };
+
+                let db_dir = format!("{}/Database", workspace_root);
                 let db_path = format!("{}/eva.db", db_dir);
                 
                 match init_db(&db_path).await {
@@ -855,6 +902,7 @@ pub fn run() {
             upsert_focus_session,
             parse_markdown_plan,
             ai_proxy,
+            initialize_workspace,
             read_file_content,
             get_notes_dir,
             copy_file_to_notes,
