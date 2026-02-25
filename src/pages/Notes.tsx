@@ -33,13 +33,34 @@ type NotesFsNode = {
   is_dir: boolean;
   children: NotesFsNode[];
 };
+const DEFAULT_CHAT_TITLE = "新对话";
 
 const initialTree: TreeNode[] = [
   
 ];
 
-type ChatMessage = { role: 'user' | 'model'; text: string };
-type ChatSession = { id: string; title: string; messages: ChatMessage[] };
+type ChatMessage = { id: string; role: 'user' | 'assistant'; text: string; createdAt: string };
+type ChatSession = {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type DbAiSession = {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+};
+
+type DbAiMessage = {
+  id: string;
+  session_id: string;
+  role: string;
+  content: string;
+  created_at: string;
+};
 
 export function Notes() {
   const [treeData, setTreeData] = useState<TreeNode[]>(initialTree);
@@ -51,16 +72,19 @@ export function Notes() {
   const [viewingFile, setViewingFile] = useState<TreeNode | null>(null);
   
   // Resizable pane state
-  const [leftWidth, setLeftWidth] = useState(260);
+  const [leftWidth, setLeftWidth] = useState(240);
   const isDragging = useRef(false);
 
   // AI Chat State
   const [chatInput, setChatInput] = useState("");
   const [selectedModel, setSelectedModel] = useState<string>(() => localStorage.getItem("eva.ai.model") || "deepseek-ai/DeepSeek-V3.2");
   const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
+  const [chatMessagesBySession, setChatMessagesBySession] = useState<Record<string, ChatMessage[]>>({});
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [isAiLoading, setIsAiLoading] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const [chatSessionToRenameId, setChatSessionToRenameId] = useState<string | null>(null);
+  const [chatSessionToDeleteId, setChatSessionToDeleteId] = useState<string | null>(null);
   const [promptMode, setPromptMode] = useState<null | "create-folder" | "rename" | "move">(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
@@ -76,7 +100,9 @@ export function Notes() {
   const { selected_knowledge_files, setSelectedKnowledgeFiles } = useKnowledgeSelection();
 
   const activeSession = chatSessions.find(session => session.id === activeSessionId) || null;
-  const chatHistory = activeSession?.messages || [];
+  const renameTargetSession = chatSessions.find(session => session.id === chatSessionToRenameId) || null;
+  const deleteTargetSession = chatSessions.find(session => session.id === chatSessionToDeleteId) || null;
+  const chatHistory = activeSessionId ? (chatMessagesBySession[activeSessionId] || []) : [];
 
   const showUploadToast = (type: "success" | "error", message: string) => {
     setUploadToast({ type, message });
@@ -763,11 +789,7 @@ export function Notes() {
 
   const handleMouseMove = (e: MouseEvent) => {
     if (!isDragging.current) return;
-    // Calculate new width based on mouse position relative to the container
-    // Assuming the container has some left padding/margin, we might need to adjust.
-    // For simplicity, let's just use clientX directly if it's full width, or offset it.
-    // A rough estimate:
-    const newWidth = Math.max(200, Math.min(e.clientX - 280, 800)); 
+    const newWidth = Math.max(180, Math.min(e.clientX - 300, 520));
     setLeftWidth(newWidth);
   };
 
@@ -777,28 +799,152 @@ export function Notes() {
     document.removeEventListener("mouseup", handleMouseUp);
   };
 
-  const createSession = (firstMessage?: string) => {
-    const id = `chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const session: ChatSession = {
-      id,
-      title: firstMessage?.slice(0, 18) || "新对话",
-      messages: firstMessage ? [{ role: 'user', text: firstMessage }] : [],
-    };
-    setChatSessions(prev => [session, ...prev]);
-    setActiveSessionId(id);
-    return session;
-  };
+  const mapDbSession = (row: DbAiSession): ChatSession => ({
+    id: row.id,
+    title: row.title || DEFAULT_CHAT_TITLE,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  });
 
-  const updateSessionMessages = (sessionId: string, updater: (messages: ChatMessage[]) => ChatMessage[]) => {
-    setChatSessions(prev => prev.map(session => {
-      if (session.id !== sessionId) return session;
-      const nextMessages = updater(session.messages);
-      const nextTitle = session.title === "新对话" && nextMessages[0]?.role === 'user'
-        ? nextMessages[0].text.slice(0, 18)
-        : session.title;
-      return { ...session, title: nextTitle, messages: nextMessages };
+  const mapDbMessage = (row: DbAiMessage): ChatMessage => ({
+    id: row.id,
+    role: row.role === "user" ? "user" : "assistant",
+    text: row.content,
+    createdAt: row.created_at,
+  });
+
+  const refreshAiSessions = useCallback(async (preferredSessionId?: string | null) => {
+    if (!isTauriAvailable()) {
+      setChatSessions([]);
+      setActiveSessionId(null);
+      return [] as ChatSession[];
+    }
+
+    const { invoke } = await import("@tauri-apps/api/core");
+    const rows = await invoke<DbAiSession[]>("get_ai_sessions");
+    const mapped = rows.map(mapDbSession);
+    setChatSessions(mapped);
+
+    setActiveSessionId((prev) => {
+      const candidate = preferredSessionId ?? prev;
+      if (candidate && mapped.some((session) => session.id === candidate)) {
+        return candidate;
+      }
+      return mapped[0]?.id || null;
+    });
+
+    return mapped;
+  }, []);
+
+  const loadAiMessages = useCallback(async (sessionId: string) => {
+    if (!isTauriAvailable()) {
+      setChatMessagesBySession((prev) => ({ ...prev, [sessionId]: prev[sessionId] || [] }));
+      return;
+    }
+
+    const { invoke } = await import("@tauri-apps/api/core");
+    const rows = await invoke<DbAiMessage[]>("get_ai_messages", { sessionId });
+    setChatMessagesBySession((prev) => ({
+      ...prev,
+      [sessionId]: rows.map(mapDbMessage),
+    }));
+  }, []);
+
+  const appendMessageLocal = (sessionId: string, message: ChatMessage) => {
+    setChatMessagesBySession((prev) => ({
+      ...prev,
+      [sessionId]: [...(prev[sessionId] || []), message],
     }));
   };
+
+  const replaceLastAssistantMessageText = (sessionId: string, updater: (current: string) => string) => {
+    setChatMessagesBySession((prev) => {
+      const list = [...(prev[sessionId] || [])];
+      for (let i = list.length - 1; i >= 0; i -= 1) {
+        if (list[i].role === "assistant") {
+          list[i] = { ...list[i], text: updater(list[i].text) };
+          break;
+        }
+      }
+      return { ...prev, [sessionId]: list };
+    });
+  };
+
+  const createSession = async (firstMessage?: string): Promise<ChatSession | null> => {
+    if (!isTauriAvailable()) {
+      const now = new Date().toISOString();
+      const localSession: ChatSession = {
+        id: `memory-session-${Date.now()}`,
+        title: firstMessage?.slice(0, 24) || DEFAULT_CHAT_TITLE,
+        createdAt: now,
+        updatedAt: now,
+      };
+      setChatSessions((prev) => [localSession, ...prev]);
+      setActiveSessionId(localSession.id);
+      return localSession;
+    }
+
+    const { invoke } = await import("@tauri-apps/api/core");
+    const sessionId = await invoke<string>("create_ai_session", {
+      title: (firstMessage || "").trim().slice(0, 24) || DEFAULT_CHAT_TITLE,
+    });
+    const sessions = await refreshAiSessions(sessionId);
+    setChatMessagesBySession((prev) => ({ ...prev, [sessionId]: prev[sessionId] || [] }));
+    return sessions.find((session) => session.id === sessionId) || null;
+  };
+
+  const renameChatSession = async (sessionId: string, nextTitle: string) => {
+    const trimmed = nextTitle.trim().slice(0, 40);
+    if (!trimmed) return;
+
+    if (!isTauriAvailable()) {
+      setChatSessions((prev) =>
+        prev.map((session) => (session.id === sessionId ? { ...session, title: trimmed } : session))
+      );
+      return;
+    }
+
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("update_ai_session_title", { sessionId, title: trimmed });
+    await refreshAiSessions(sessionId);
+  };
+
+  const deleteChatSession = async (sessionId: string) => {
+    if (!isTauriAvailable()) {
+      setChatSessions((prev) => prev.filter((session) => session.id !== sessionId));
+      setChatMessagesBySession((prev) => {
+        const next = { ...prev };
+        delete next[sessionId];
+        return next;
+      });
+      setActiveSessionId((prev) => (prev === sessionId ? null : prev));
+      return;
+    }
+
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("delete_ai_session", { sessionId });
+    setChatMessagesBySession((prev) => {
+      const next = { ...prev };
+      delete next[sessionId];
+      return next;
+    });
+    await refreshAiSessions();
+  };
+
+  useEffect(() => {
+    refreshAiSessions().catch((err) => {
+      console.error("[Notes] Failed to load AI sessions:", err);
+      showUploadToast("error", `加载会话失败：${err?.message || String(err)}`);
+    });
+  }, [refreshAiSessions]);
+
+  useEffect(() => {
+    if (!activeSessionId) return;
+    loadAiMessages(activeSessionId).catch((err) => {
+      console.error("[Notes] Failed to load AI messages:", err);
+      showUploadToast("error", `加载消息失败：${err?.message || String(err)}`);
+    });
+  }, [activeSessionId, loadAiMessages]);
 
   const getModelLabel = (model: string) => {
     const short = model.split("/").pop() || model;
@@ -839,9 +985,33 @@ export function Notes() {
     const userMsg = chatInput;
     setChatInput("");
 
-    const currentSession = activeSession || createSession(userMsg);
-    if (activeSession) {
-      updateSessionMessages(activeSession.id, messages => [...messages, { role: 'user', text: userMsg }]);
+    const currentSession = activeSession || await createSession(userMsg);
+    if (!currentSession) {
+      showUploadToast("error", "创建会话失败，请重试");
+      return;
+    }
+
+    const nowIso = new Date().toISOString();
+    const tempUserId = `temp-user-${Date.now()}`;
+    appendMessageLocal(currentSession.id, {
+      id: tempUserId,
+      role: "user",
+      text: userMsg,
+      createdAt: nowIso,
+    });
+
+    if (isTauriAvailable()) {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke<string>("add_ai_message", {
+          sessionId: currentSession.id,
+          role: "user",
+          content: userMsg,
+        });
+      } catch (err: any) {
+        console.error("[Notes] Failed to persist user ai message:", err);
+        showUploadToast("error", `保存用户消息失败：${err?.message || String(err)}`);
+      }
     }
 
     setIsAiLoading(true);
@@ -852,7 +1022,13 @@ export function Notes() {
 
       localStorage.setItem("eva.ai.model", selectedModel);
 
-      updateSessionMessages(currentSession.id, messages => [...messages, { role: 'model', text: "" }]);
+      const tempAssistantId = `temp-assistant-${Date.now()}`;
+      appendMessageLocal(currentSession.id, {
+        id: tempAssistantId,
+        role: "assistant",
+        text: "",
+        createdAt: new Date().toISOString(),
+      });
 
       let streamed = "";
       for await (const chunk of chatCompletion({
@@ -871,39 +1047,42 @@ export function Notes() {
         maxTokens: 1024,
       })) {
         streamed += chunk;
-        updateSessionMessages(currentSession.id, messages => {
-          const next = [...messages];
-          const idx = next.length - 1;
-          if (idx >= 0 && next[idx].role === "model") {
-            next[idx] = { ...next[idx], text: next[idx].text + chunk };
-          }
-          return next;
-        });
+        replaceLastAssistantMessageText(currentSession.id, (current) => current + chunk);
       }
 
       if (!streamed.trim()) {
         const modelLabel = getModelLabel(selectedModel);
-        updateSessionMessages(currentSession.id, messages => {
-          const next = [...messages];
-          const idx = next.length - 1;
-          if (idx >= 0 && next[idx].role === "model") {
-            next[idx] = { ...next[idx], text: `【${modelLabel}】本次未返回有效内容。` };
-          }
-          return next;
+        streamed = `【${modelLabel}】本次未返回有效内容。`;
+        replaceLastAssistantMessageText(currentSession.id, () => streamed);
+      }
+
+      if (isTauriAvailable()) {
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke<string>("add_ai_message", {
+          sessionId: currentSession.id,
+          role: "assistant",
+          content: streamed,
         });
+        await Promise.all([loadAiMessages(currentSession.id), refreshAiSessions(currentSession.id)]);
       }
     } catch (error: any) {
       console.error("AI Error:", error);
-      updateSessionMessages(currentSession.id, messages => {
-        const next = [...messages];
-        const idx = next.length - 1;
-        const message = `调用 ${getModelLabel(selectedModel)} 失败: ${error.message || "Failed to get response."}`;
-        if (idx >= 0 && next[idx].role === "model" && next[idx].text === "") {
-          next[idx] = { ...next[idx], text: message };
-          return next;
+      const message = `调用 ${getModelLabel(selectedModel)} 失败: ${error.message || "Failed to get response."}`;
+      replaceLastAssistantMessageText(currentSession.id, (current) => (current.trim() ? current : message));
+
+      if (isTauriAvailable()) {
+        try {
+          const { invoke } = await import("@tauri-apps/api/core");
+          await invoke<string>("add_ai_message", {
+            sessionId: currentSession.id,
+            role: "assistant",
+            content: message,
+          });
+          await Promise.all([loadAiMessages(currentSession.id), refreshAiSessions(currentSession.id)]);
+        } catch (persistErr: any) {
+          console.error("[Notes] Failed to persist assistant error message:", persistErr);
         }
-        return [...messages, { role: "model", text: message }];
-      });
+      }
     } finally {
       setIsAiLoading(false);
     }
@@ -1213,28 +1392,54 @@ export function Notes() {
         />
 
         {/* Right Area - AI Chat */}
-        <div className="flex-1 flex bg-white/40 dark:bg-[#0f1826]/58 min-w-[560px] backdrop-blur-md">
-          <aside className="w-80 border-r border-white/45 dark:border-[#2a3b52] p-3 space-y-3 hidden lg:block">
+        <div className="flex-1 flex bg-white/40 dark:bg-[#0f1826]/58 min-w-[760px] backdrop-blur-md">
+          <aside className="w-56 xl:w-64 border-r border-white/45 dark:border-[#2a3b52] p-3 space-y-3 hidden lg:block">
             <button
               onClick={() => createSession()}
               className="w-full flex items-center justify-center gap-2 text-sm font-semibold text-[#88B5D3] bg-[#88B5D3]/10 hover:bg-[#88B5D3]/16 px-3 py-2 rounded-xl transition-colors"
             >
               <MessageSquarePlus className="w-4 h-4" /> 新建对话
             </button>
+            <div className="text-[11px] text-gray-500 dark:text-gray-400 px-1">历史对话</div>
             <div className="space-y-1 max-h-[calc(100vh-16rem)] overflow-y-auto pr-1">
               {chatSessions.length === 0 ? (
                 <p className="text-xs text-gray-500 dark:text-gray-400 p-2">暂无历史对话</p>
               ) : chatSessions.map((session) => (
-                <button
+                <div
                   key={session.id}
-                  onClick={() => setActiveSessionId(session.id)}
                   className={cn(
-                    "w-full text-left px-3 py-2 rounded-lg text-xs transition-colors truncate",
+                    "group w-full flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-xs transition-colors",
                     activeSessionId === session.id ? "bg-[#88B5D3]/14 text-[#88B5D3]" : "text-gray-600 dark:text-gray-400 hover:bg-gray-100/70 dark:hover:bg-[#162233]"
                   )}
                 >
-                  {session.title}
-                </button>
+                  <button
+                    onClick={() => setActiveSessionId(session.id)}
+                    className="flex-1 min-w-0 text-left truncate px-1"
+                    title={session.title}
+                  >
+                    {session.title}
+                  </button>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setChatSessionToRenameId(session.id);
+                    }}
+                    className="opacity-0 group-hover:opacity-100 p-1 rounded-md hover:bg-[#88B5D3]/15 transition"
+                    title="重命名"
+                  >
+                    <Edit2 className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setChatSessionToDeleteId(session.id);
+                    }}
+                    className="opacity-0 group-hover:opacity-100 p-1 rounded-md text-red-500 hover:bg-red-500/10 transition"
+                    title="删除"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
               ))}
             </div>
           </aside>
@@ -1372,6 +1577,42 @@ export function Notes() {
           handleMoveSelected(value);
           setPromptMode(null);
         }}
+      />
+      <ThemedPromptDialog
+        open={!!renameTargetSession}
+        title="请输入会话标题"
+        placeholder="例如：操作系统进程通信复习"
+        initialValue={renameTargetSession?.title || ""}
+        confirmText="保存"
+        onCancel={() => setChatSessionToRenameId(null)}
+        onConfirm={async (value) => {
+          if (renameTargetSession) {
+            try {
+              await renameChatSession(renameTargetSession.id, value);
+            } catch (err: any) {
+              showUploadToast("error", `会话重命名失败：${err?.message || String(err)}`);
+            }
+          }
+          setChatSessionToRenameId(null);
+        }}
+      />
+      <ConfirmDialog
+        open={!!deleteTargetSession}
+        title={`确定删除会话「${deleteTargetSession?.title || ""}」？`}
+        description="删除后将无法恢复该会话的全部历史消息。"
+        confirmText="删除"
+        variant="danger"
+        onConfirm={async () => {
+          if (deleteTargetSession) {
+            try {
+              await deleteChatSession(deleteTargetSession.id);
+            } catch (err: any) {
+              showUploadToast("error", `删除会话失败：${err?.message || String(err)}`);
+            }
+          }
+          setChatSessionToDeleteId(null);
+        }}
+        onCancel={() => setChatSessionToDeleteId(null)}
       />
 
       {/* Document Viewer Modal */}

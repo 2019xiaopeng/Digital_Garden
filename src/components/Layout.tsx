@@ -3,8 +3,12 @@ import { Sidebar } from "./Sidebar";
 import { GlobalClock } from "./GlobalClock";
 import { useEffect } from "react";
 import { getSettings } from "../lib/settings";
+import { useLocation } from "react-router-dom";
 
 export function Layout() {
+  const location = useLocation();
+  const isNotesPage = location.pathname.startsWith("/notes");
+
   useEffect(() => {
     const apply = () => {
       const settings = getSettings();
@@ -40,7 +44,7 @@ export function Layout() {
         <GlobalClock />
         <Sidebar />
         <main className="md:ml-64 min-h-screen pb-20 md:pb-0">
-          <div className="max-w-5xl mx-auto p-6 md:p-10 lg:p-12">
+          <div className={`${isNotesPage ? "max-w-[96rem]" : "max-w-5xl"} mx-auto p-6 md:p-10 lg:p-12`}>
             <Outlet />
           </div>
         </main>
