@@ -390,7 +390,7 @@ export const DailyLogService = {
       throw new Error("Daily logs require Tauri desktop runtime");
     }
     const log: DailyLog = {
-      id: post.date,
+      id: "",
       date: post.date,
       title: post.title,
       content: post.excerpt,
@@ -401,8 +401,15 @@ export const DailyLogService = {
       created_at: nowIso(),
       updated_at: nowIso(),
     };
-    await invoke("create_daily_log", { log });
-    return { ...post, id: post.date };
+    const saved = (await invoke("create_daily_log", { log })) as DailyLog;
+    return {
+      ...post,
+      id: saved.id,
+      date: saved.date,
+      title: saved.title,
+      excerpt: saved.content,
+      category: saved.auto_generated ? "Auto" : post.category,
+    };
   },
 
   async update(post: LegacyPost): Promise<LegacyPost> {
@@ -411,7 +418,7 @@ export const DailyLogService = {
       throw new Error("Daily logs require Tauri desktop runtime");
     }
     const log: DailyLog = {
-      id: post.date,
+      id: post.id,
       date: post.date,
       title: post.title,
       content: post.excerpt,
@@ -422,8 +429,14 @@ export const DailyLogService = {
       created_at: nowIso(),
       updated_at: nowIso(),
     };
-    await invoke("update_daily_log", { log });
-    return { ...post, id: post.date };
+    const saved = (await invoke("update_daily_log", { log })) as DailyLog;
+    return {
+      ...post,
+      id: saved.id,
+      date: saved.date,
+      title: saved.title,
+      excerpt: saved.content,
+    };
   },
 
   async delete(id: string): Promise<void> {

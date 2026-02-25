@@ -100,6 +100,28 @@ export function Notes() {
     };
   }, []);
 
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const tag = target?.tagName?.toLowerCase();
+      const isTyping = tag === "input" || tag === "textarea" || target?.isContentEditable;
+      if (isTyping) return;
+
+      if (event.key === "Delete" && selectedNodeIds.length > 0) {
+        event.preventDefault();
+        setShowDeleteConfirm(true);
+      }
+
+      if (event.key === "F2" && selectedNodeIds.length === 1) {
+        event.preventDefault();
+        handleRenameNode();
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [selectedNodeIds]);
+
   // Load file content when viewing a file
   useEffect(() => {
     if (!viewingFile) {
@@ -208,10 +230,20 @@ export function Notes() {
       return;
     }
 
-    setSelectedNodeIds([node.id]);
+    const alreadySelected = selectedNodeIds.includes(node.id);
+    if (!alreadySelected) {
+      setSelectedNodeIds([node.id]);
+      setSelectionAnchorId(node.id);
+    }
     setActiveNodeId(node.id);
-    setSelectionAnchorId(node.id);
     setContextMenu({ x: e.clientX, y: e.clientY, nodeId: node.id });
+  };
+
+  const clearSelection = () => {
+    setSelectedNodeIds([]);
+    setActiveNodeId(null);
+    setSelectionAnchorId(null);
+    setContextMenu(null);
   };
 
   const handleCreateFolder = async (folderName?: string) => {
@@ -303,27 +335,6 @@ export function Notes() {
     } catch (err: any) {
       console.error("[Notes] copy_files_to_notes failed:", err);
       showUploadToast("error", `上传失败：${err?.message || String(err)}`);
-    }
-  };
-
-  const handleFolderUpload = async () => {
-    try {
-      const picked = await open({ directory: true, multiple: false });
-      if (picked && typeof picked === "string") {
-        const folderName = picked.split(/[\\/]/).pop() || "新目录";
-        const newFolder: TreeNode = {
-          id: `folder-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-          name: folderName,
-          type: "folder",
-          children: [],
-        };
-        const targetFolderId = selectedNode?.type === "folder" ? selectedNode.id : null;
-        setTreeData(prev => addNodeToFolder(prev, targetFolderId, newFolder));
-        showUploadToast("success", "已导入文件夹节点");
-      }
-    } catch (err: any) {
-      console.error("[Notes] Tauri folder pick failed:", err);
-      showUploadToast("error", `选择文件夹失败：${err?.message || String(err)}`);
     }
   };
 
@@ -994,6 +1005,7 @@ export function Notes() {
         const target = e.target as HTMLElement;
         if (!target.closest('[data-node-row="true"]')) {
           setContextMenu(null);
+          clearSelection();
         }
       }}
     >
@@ -1029,13 +1041,6 @@ export function Notes() {
                 <Upload className="w-4 h-4" />
               </button>
               <button 
-                className="p-1.5 text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-800 rounded-lg transition-colors"
-                onClick={handleFolderUpload}
-                title="上传文件夹"
-              >
-                <Folder className="w-4 h-4" />
-              </button>
-              <button 
                 onClick={() => handleCreateFolder()}
                 className="p-1.5 text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-800 rounded-lg transition-colors" 
                 title="新建文件夹"
@@ -1054,17 +1059,6 @@ export function Notes() {
                 <Edit2 className="w-4 h-4" />
               </button>
               <button 
-                onClick={() => handleMoveSelected()}
-                disabled={selectedNodeIds.length === 0}
-                className={cn(
-                  "p-1.5 rounded-lg transition-colors",
-                  selectedNodeIds.length > 0 ? "text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-800" : "text-gray-300 dark:text-gray-700 cursor-not-allowed"
-                )}
-                title="批量归档"
-              >
-                <Folder className="w-4 h-4" />
-              </button>
-              <button 
                 onClick={handleDeleteNode}
                 disabled={selectedNodeIds.length === 0}
                 className={cn(
@@ -1081,6 +1075,11 @@ export function Notes() {
             className="flex-1 overflow-y-auto p-2"
             onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; }}
             onDrop={handleDropOnRoot}
+            onMouseDown={(e) => {
+              if (e.target === e.currentTarget) {
+                clearSelection();
+              }
+            }}
           >
             {treeData.length === 0 ? (
               <div className="h-full min-h-48 flex flex-col items-center justify-center text-center px-4 text-gray-500 dark:text-gray-400">
@@ -1408,24 +1407,20 @@ export function Notes() {
             <button
               className="w-full text-left px-3 py-2 text-sm rounded-lg text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10"
               onClick={() => {
-                setSelectedNodeIds([node.id]);
-                setActiveNodeId(node.id);
                 setShowDeleteConfirm(true);
                 setContextMenu(null);
               }}
             >
-              删除
+              删除{selectedNodeIds.length > 1 ? `（${selectedNodeIds.length} 项）` : ""}
             </button>
             <button
               className="w-full text-left px-3 py-2 text-sm rounded-lg text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-[#1a2a40]"
               onClick={() => {
-                setSelectedNodeIds([node.id]);
-                setActiveNodeId(node.id);
                 setPromptMode("move");
                 setContextMenu(null);
               }}
             >
-              移动到...
+              移动到...{selectedNodeIds.length > 1 ? `（${selectedNodeIds.length} 项）` : ""}
             </button>
           </div>
         );

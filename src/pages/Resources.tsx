@@ -182,8 +182,8 @@ export function Resources() {
         createdAt: new Date().toISOString(),
       };
     } catch (error) {
-      console.error("[Resources] Rust metadata proxy failed:", error);
-      return null;
+      console.error("[Resources] Rust metadata proxy failed detail:", error);
+      throw error;
     }
   };
 
@@ -201,7 +201,15 @@ export function Resources() {
       return;
     }
 
-    const metadata = await fetchBilibiliMetadata(bvid);
+    let metadata: VideoBookmark | null = null;
+    try {
+      metadata = await fetchBilibiliMetadata(bvid);
+    } catch (error: any) {
+      const message = error?.message || String(error);
+      setBookmarkToast(`元数据获取失败：${message}`);
+      setTimeout(() => setBookmarkToast(null), 2200);
+    }
+
     const bookmark: VideoBookmark = metadata || {
       id: `video-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       bvid,

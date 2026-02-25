@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Save, Bell, Type, UserCircle2, Sparkles, Timer, Gauge, FolderOpen, Image, Key } from "lucide-react";
 import { bellUrl, getSettings, updateSettings, type AppSettings } from "../lib/settings";
 import { isTauriAvailable } from "../lib/dataService";
+import { open as shellOpen } from "@tauri-apps/plugin-shell";
 
 export function Settings() {
   const [settings, setSettings] = useState<AppSettings>(getSettings());
@@ -47,6 +48,17 @@ export function Settings() {
       }
     } catch (e) {
       console.warn("Directory picker failed:", e);
+    }
+  };
+
+  const openLocalDataDir = async () => {
+    if (!isTauriAvailable()) return;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const root = await invoke<string>("get_workspace_root");
+      await shellOpen(root);
+    } catch (error) {
+      console.error("[Settings] Failed to open local workspace root:", error);
     }
   };
 
@@ -156,6 +168,14 @@ export function Settings() {
             )}
           </div>
         </div>
+        {isTauriAvailable() && (
+          <button
+            onClick={openLocalDataDir}
+            className="px-4 py-2 rounded-xl border border-emerald-300/40 text-emerald-600 dark:text-emerald-300 hover:bg-emerald-500/10 text-sm font-semibold transition-colors"
+          >
+            打开本地数据目录
+          </button>
+        )}
         <div className="text-sm text-gray-500 dark:text-gray-400 space-y-1 bg-gray-50 dark:bg-gray-900/40 rounded-xl p-4">
           <p className="font-medium text-gray-700 dark:text-gray-300 mb-1">目录规划</p>
           <p>留痕 MD → <code className="text-xs bg-gray-200 dark:bg-gray-800 px-1.5 py-0.5 rounded">{settings.docRoot}/Logs/</code></p>

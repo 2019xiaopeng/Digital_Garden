@@ -99,7 +99,10 @@ export function Blog() {
       .sort((a, b) => {
         const dateA = new Date(a.date).getTime();
         const dateB = new Date(b.date).getTime();
-        return sortOrder === "desc" ? dateB - dateA : dateA - dateB;
+        if (dateA !== dateB) {
+          return sortOrder === "desc" ? dateB - dateA : dateA - dateB;
+        }
+        return sortOrder === "desc" ? b.id.localeCompare(a.id) : a.id.localeCompare(b.id);
       });
   }, [posts, searchQuery, sortOrder, selectedTag]);
 

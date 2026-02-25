@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::path::{Component, Path, PathBuf};
+use chrono::{Local, Utc};
 use tauri::{Manager, State};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -344,7 +345,45 @@ fn parse_frontmatter_value<'a>(lines: &'a [String], key: &str) -> Option<&'a str
         .find_map(|line| line.strip_prefix(&format!("{}:", key)).map(|v| v.trim()))
 }
 
-fn parse_daily_log_markdown(raw: &str, fallback_date: &str) -> DailyLog {
+fn sanitize_title_for_filename(title: &str) -> String {
+    title
+        .chars()
+        .map(|ch| {
+            if ch.is_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .chars()
+        .take(24)
+        .collect()
+}
+
+fn normalize_log_date(input: &str) -> String {
+    let trimmed = input.trim();
+    if trimmed.len() >= 10 {
+        let prefix = &trimmed[0..10];
+        if prefix.chars().nth(4) == Some('-') && prefix.chars().nth(7) == Some('-') {
+            return prefix.to_string();
+        }
+    }
+    Local::now().format("%Y-%m-%d").to_string()
+}
+
+fn build_log_stem(date: &str, title: &str) -> String {
+    let time_part = Local::now().format("%H-%M-%S").to_string();
+    let slug = sanitize_title_for_filename(title);
+    if slug.is_empty() {
+        format!("{}_{}", date, time_part)
+    } else {
+        format!("{}_{}_{}", date, time_part, slug)
+    }
+}
+
+fn parse_daily_log_markdown(raw: &str, fallback_stem: &str) -> DailyLog {
     let mut frontmatter: Vec<String> = Vec::new();
     let mut body = raw.to_string();
 
@@ -357,12 +396,13 @@ fn parse_daily_log_markdown(raw: &str, fallback_date: &str) -> DailyLog {
         }
     }
 
+    let fallback_date = normalize_log_date(fallback_stem);
     let id = parse_frontmatter_value(&frontmatter, "id")
         .map(|v| v.to_string())
-        .unwrap_or_else(|| fallback_date.to_string());
+        .unwrap_or_else(|| fallback_stem.to_string());
     let date = parse_frontmatter_value(&frontmatter, "date")
         .map(|v| v.to_string())
-        .unwrap_or_else(|| fallback_date.to_string());
+        .unwrap_or_else(|| fallback_date.clone());
     let title = parse_frontmatter_value(&frontmatter, "title")
         .map(|v| v.to_string())
         .unwrap_or_else(|| format!("留痕 {}", fallback_date));
@@ -415,20 +455,42 @@ fn daily_log_to_markdown(log: &DailyLog) -> String {
     )
 }
 
-fn date_file_name(date: &str) -> String {
-    let safe = date.trim().replace('/', "-").replace('\\', "-");
-    format!("{}.md", safe)
-}
-
 fn now_iso() -> String {
-    let now = std::time::SystemTime::now();
-    chrono_utc_iso(now)
+    Utc::now().to_rfc3339()
 }
 
-fn chrono_utc_iso(now: std::time::SystemTime) -> String {
-    let since_epoch = now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-    let secs = since_epoch.as_secs();
-    format!("{}", secs)
+async fn resolve_log_path_by_id(logs_dir: &Path, id: &str) -> Result<Option<PathBuf>, String> {
+    let direct = logs_dir.join(format!("{}.md", id));
+    if fs::metadata(&direct).await.is_ok() {
+        return Ok(Some(direct));
+    }
+
+    let mut entries = fs::read_dir(logs_dir)
+        .await
+        .map_err(|e| format!("Failed to read logs dir {}: {}", logs_dir.to_string_lossy(), e))?;
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|e| format!("Failed to iterate logs dir: {}", e))?
+    {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let fallback_stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        let raw = fs::read_to_string(&path)
+            .await
+            .map_err(|e| format!("Failed to read log file {}: {}", path.to_string_lossy(), e))?;
+        let parsed = parse_daily_log_markdown(&raw, &fallback_stem);
+        if parsed.id == id {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
 }
 
 #[tauri::command]
@@ -454,7 +516,7 @@ async fn get_daily_logs(app: tauri::AppHandle) -> Result<Vec<DailyLog>, String> 
             continue;
         }
 
-        let fallback_date = path
+        let fallback_stem = path
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("")
@@ -462,10 +524,10 @@ async fn get_daily_logs(app: tauri::AppHandle) -> Result<Vec<DailyLog>, String> 
         let raw = fs::read_to_string(&path)
             .await
             .map_err(|e| format!("Failed to read log file {}: {}", path.to_string_lossy(), e))?;
-        logs.push(parse_daily_log_markdown(&raw, &fallback_date));
+        logs.push(parse_daily_log_markdown(&raw, &fallback_stem));
     }
 
-    logs.sort_by(|a, b| b.date.cmp(&a.date));
+    logs.sort_by(|a, b| b.id.cmp(&a.id));
     Ok(logs)
 }
 
@@ -477,21 +539,24 @@ async fn create_daily_log(app: tauri::AppHandle, mut log: DailyLog) -> Result<Da
         .await
         .map_err(|e| format!("Failed to ensure logs dir {}: {}", logs_dir.to_string_lossy(), e))?;
 
-    if log.date.trim().is_empty() {
-        return Err("Daily log date is required".to_string());
+    let normalized_date = normalize_log_date(&log.date);
+    log.date = normalized_date.clone();
+
+    let mut stem = build_log_stem(&normalized_date, &log.title);
+    let mut file_path = logs_dir.join(format!("{}.md", stem));
+    let mut suffix = 1usize;
+    while fs::metadata(&file_path).await.is_ok() {
+        stem = format!("{}-{}", build_log_stem(&normalized_date, &log.title), suffix);
+        file_path = logs_dir.join(format!("{}.md", stem));
+        suffix += 1;
     }
 
-    if log.id.trim().is_empty() {
-        log.id = log.date.clone();
-    }
+    log.id = stem;
     if log.created_at.trim().is_empty() {
         log.created_at = now_iso();
     }
-    if log.updated_at.trim().is_empty() {
-        log.updated_at = now_iso();
-    }
+    log.updated_at = now_iso();
 
-    let file_path = logs_dir.join(date_file_name(&log.date));
     let markdown = daily_log_to_markdown(&log);
     fs::write(&file_path, markdown)
         .await
@@ -502,17 +567,46 @@ async fn create_daily_log(app: tauri::AppHandle, mut log: DailyLog) -> Result<Da
 
 #[tauri::command]
 async fn update_daily_log(app: tauri::AppHandle, mut log: DailyLog) -> Result<DailyLog, String> {
-    if log.date.trim().is_empty() {
-        return Err("Daily log date is required".to_string());
-    }
     if log.id.trim().is_empty() {
-        log.id = log.date.clone();
-    }
-    if log.updated_at.trim().is_empty() {
-        log.updated_at = now_iso();
+        return Err("Daily log id is required for update".to_string());
     }
 
-    create_daily_log(app, log).await
+    let root = PathBuf::from(ensure_workspace_dirs(&app).await?);
+    let logs_dir = root.join("Logs");
+    fs::create_dir_all(&logs_dir)
+        .await
+        .map_err(|e| format!("Failed to ensure logs dir {}: {}", logs_dir.to_string_lossy(), e))?;
+
+    let existing_path = resolve_log_path_by_id(&logs_dir, &log.id)
+        .await?
+        .ok_or_else(|| format!("Daily log not found for id {}", log.id))?;
+
+    let existing_raw = fs::read_to_string(&existing_path)
+        .await
+        .map_err(|e| format!("Failed to read existing log file {}: {}", existing_path.to_string_lossy(), e))?;
+    let fallback_stem = existing_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+    let existing_log = parse_daily_log_markdown(&existing_raw, &fallback_stem);
+
+    if log.date.trim().is_empty() {
+        log.date = existing_log.date;
+    } else {
+        log.date = normalize_log_date(&log.date);
+    }
+    if log.created_at.trim().is_empty() {
+        log.created_at = existing_log.created_at;
+    }
+    log.updated_at = now_iso();
+
+    let markdown = daily_log_to_markdown(&log);
+    fs::write(&existing_path, markdown)
+        .await
+        .map_err(|e| format!("Failed to update log file {}: {}", existing_path.to_string_lossy(), e))?;
+
+    Ok(log)
 }
 
 #[tauri::command]
@@ -523,41 +617,10 @@ async fn delete_daily_log(app: tauri::AppHandle, id: String) -> Result<(), Strin
         .await
         .map_err(|e| format!("Failed to ensure logs dir {}: {}", logs_dir.to_string_lossy(), e))?;
 
-    let direct_path = logs_dir.join(date_file_name(&id));
-    if fs::metadata(&direct_path).await.is_ok() {
-        fs::remove_file(&direct_path)
+    if let Some(path) = resolve_log_path_by_id(&logs_dir, &id).await? {
+        fs::remove_file(&path)
             .await
-            .map_err(|e| format!("Failed to delete log file {}: {}", direct_path.to_string_lossy(), e))?;
-        return Ok(());
-    }
-
-    let mut entries = fs::read_dir(&logs_dir)
-        .await
-        .map_err(|e| format!("Failed to read logs dir {}: {}", logs_dir.to_string_lossy(), e))?;
-    while let Some(entry) = entries
-        .next_entry()
-        .await
-        .map_err(|e| format!("Failed to iterate logs dir: {}", e))?
-    {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("md") {
-            continue;
-        }
-        let fallback_date = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_string();
-        let raw = fs::read_to_string(&path)
-            .await
-            .map_err(|e| format!("Failed to read log file {}: {}", path.to_string_lossy(), e))?;
-        let parsed = parse_daily_log_markdown(&raw, &fallback_date);
-        if parsed.id == id {
-            fs::remove_file(&path)
-                .await
-                .map_err(|e| format!("Failed to delete log file {}: {}", path.to_string_lossy(), e))?;
-            return Ok(());
-        }
+            .map_err(|e| format!("Failed to delete log file {}: {}", path.to_string_lossy(), e))?;
     }
 
     Ok(())
@@ -893,8 +956,10 @@ async fn ai_proxy(request: AiProxyRequest) -> Result<AiProxyResponse, String> {
 
 #[tauri::command]
 async fn fetch_bilibili_metadata(bvid: String) -> Result<BilibiliMetadata, String> {
+    println!("[Bilibili] fetch start raw_bvid={}", bvid);
     let clean_bvid = bvid.trim().to_uppercase();
     if !clean_bvid.starts_with("BV") {
+        println!("[Bilibili] invalid bvid after normalize={}", clean_bvid);
         return Err("Invalid bvid: must start with BV".to_string());
     }
 
@@ -902,9 +967,10 @@ async fn fetch_bilibili_metadata(bvid: String) -> Result<BilibiliMetadata, Strin
         "https://api.bilibili.com/x/web-interface/view?bvid={}",
         clean_bvid
     );
+    println!("[Bilibili] request url={}", url);
 
     let client = reqwest::Client::new();
-    let response = client
+    let response = match client
         .get(&url)
         .header(
             reqwest::header::USER_AGENT,
@@ -913,14 +979,28 @@ async fn fetch_bilibili_metadata(bvid: String) -> Result<BilibiliMetadata, Strin
         .header(reqwest::header::REFERER, "https://www.bilibili.com")
         .header(reqwest::header::ACCEPT, "application/json,text/plain,*/*")
         .send()
-        .await
-        .map_err(|e| format!("Failed to request bilibili api: {}", e))?;
+        .await {
+        Ok(resp) => {
+            println!("[Bilibili] send success status={}", resp.status());
+            resp
+        }
+        Err(err) => {
+            println!("[Bilibili] send error detail={:?}", err);
+            return Err(format!("Bilibili request send error: {:?}", err));
+        }
+    };
 
     let status = response.status();
-    let body = response
-        .text()
-        .await
-        .map_err(|e| format!("Failed to read bilibili response body: {}", e))?;
+    let body = match response.text().await {
+        Ok(text) => {
+            println!("[Bilibili] read body bytes={}", text.len());
+            text
+        }
+        Err(err) => {
+            println!("[Bilibili] read body error detail={:?}", err);
+            return Err(format!("Bilibili response body read error: {:?}", err));
+        }
+    };
 
     if !status.is_success() {
         log::error!("[Bilibili] HTTP {} bvid={} body={}", status, clean_bvid, body);
@@ -928,8 +1008,16 @@ async fn fetch_bilibili_metadata(bvid: String) -> Result<BilibiliMetadata, Strin
         return Err(format!("Bilibili HTTP {} body: {}", status, body));
     }
 
-    let payload = serde_json::from_str::<BilibiliApiResponse>(&body)
-        .map_err(|e| format!("Failed to parse bilibili response: {} | raw body: {}", e, body))?;
+    let payload = match serde_json::from_str::<BilibiliApiResponse>(&body) {
+        Ok(json) => {
+            println!("[Bilibili] parse json ok code={} message={}", json.code, json.message);
+            json
+        }
+        Err(err) => {
+            println!("[Bilibili] parse json error detail={:?}", err);
+            return Err(format!("Bilibili response parse error: {:?} | raw body: {}", err, body));
+        }
+    };
 
     if payload.code != 0 {
         log::error!(
@@ -955,6 +1043,14 @@ async fn fetch_bilibili_metadata(bvid: String) -> Result<BilibiliMetadata, Strin
     let data = payload
         .data
         .ok_or_else(|| "Bilibili API returned empty data".to_string())?;
+
+    println!(
+        "[Bilibili] success bvid={} title={} owner={} duration={}",
+        data.bvid,
+        data.title,
+        data.owner.name,
+        data.duration
+    );
 
     Ok(BilibiliMetadata {
         bvid: data.bvid,
@@ -1360,6 +1456,7 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_shell::init())
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
