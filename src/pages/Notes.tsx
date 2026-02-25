@@ -10,8 +10,13 @@ import { isTauriAvailable } from "../lib/dataService";
 import { open } from "@tauri-apps/plugin-dialog";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
+import rehypeHighlight from "rehype-highlight";
 import { useKnowledgeSelection } from "../context/KnowledgeSelectionContext";
 import { chatCompletion } from "../utils/aiClient";
+import "katex/dist/katex.min.css";
+import "highlight.js/styles/github-dark.css";
 
 // --- Types ---
 type TreeNode = {
@@ -46,7 +51,7 @@ export function Notes() {
   const [viewingFile, setViewingFile] = useState<TreeNode | null>(null);
   
   // Resizable pane state
-  const [leftWidth, setLeftWidth] = useState(300);
+  const [leftWidth, setLeftWidth] = useState(260);
   const isDragging = useRef(false);
 
   // AI Chat State
@@ -1208,8 +1213,8 @@ export function Notes() {
         />
 
         {/* Right Area - AI Chat */}
-        <div className="flex-1 flex bg-white/40 dark:bg-[#0f1826]/58 min-w-0 backdrop-blur-md">
-          <aside className="w-64 border-r border-white/45 dark:border-[#2a3b52] p-3 space-y-3 hidden lg:block">
+        <div className="flex-1 flex bg-white/40 dark:bg-[#0f1826]/58 min-w-[560px] backdrop-blur-md">
+          <aside className="w-80 border-r border-white/45 dark:border-[#2a3b52] p-3 space-y-3 hidden lg:block">
             <button
               onClick={() => createSession()}
               className="w-full flex items-center justify-center gap-2 text-sm font-semibold text-[#88B5D3] bg-[#88B5D3]/10 hover:bg-[#88B5D3]/16 px-3 py-2 rounded-xl transition-colors"
@@ -1261,7 +1266,7 @@ export function Notes() {
                   <p className="text-xs mt-1">已支持 SiliconFlow 流式返回（DeepSeek 系列）</p>
                 </div>
               ) : chatHistory.map((msg, idx) => (
-                <div key={idx} className={cn("flex gap-4", msg.role === 'user' ? "flex-row-reverse" : "")}>
+                <div key={idx} className={cn("flex gap-4", msg.role === 'user' ? "flex-row-reverse" : "")}> 
                   <div className={cn(
                     "w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0",
                     msg.role === 'user' ? "bg-gray-100 dark:bg-gray-800" : "bg-[#88B5D3]/10 dark:bg-[#88B5D3]/20 text-[#88B5D3]"
@@ -1269,10 +1274,21 @@ export function Notes() {
                     {msg.role === 'user' ? <User className="w-4 h-4 text-gray-600 dark:text-gray-400" /> : <Bot className="w-4 h-4" />}
                   </div>
                   <div className={cn(
-                    "px-4 py-3 rounded-2xl max-w-[80%] text-sm leading-relaxed",
+                    "px-4 py-3 rounded-2xl max-w-[90%] text-sm leading-relaxed overflow-x-auto",
                     msg.role === 'user' ? "bg-gray-100/90 dark:bg-[#19283b] text-gray-900 dark:text-white rounded-tr-sm" : "bg-[#88B5D3]/7 dark:bg-[#88B5D3]/12 text-gray-800 dark:text-gray-200 rounded-tl-sm border border-[#88B5D3]/20"
                   )}>
-                    {msg.text}
+                    {msg.role === "user" ? (
+                      <div className="whitespace-pre-wrap break-words">{msg.text}</div>
+                    ) : (
+                      <div className="prose prose-sm dark:prose-invert max-w-none prose-pre:rounded-xl prose-pre:border prose-pre:border-[#88B5D3]/20 prose-code:before:content-none prose-code:after:content-none">
+                        <ReactMarkdown
+                          remarkPlugins={[remarkGfm, remarkMath]}
+                          rehypePlugins={[rehypeKatex, rehypeHighlight]}
+                        >
+                          {msg.text}
+                        </ReactMarkdown>
+                      </div>
+                    )}
                   </div>
                 </div>
               ))}

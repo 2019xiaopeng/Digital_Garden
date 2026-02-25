@@ -6,7 +6,11 @@
 
 ## 0. 文档说明
 
-本 PRD 是对 v1 版本的全面升级。基于项目当前真实代码审计（33 个 Tauri 命令、8 个页面路由、4 张 SQLite 表），明确区分 **已完成 / 已设桩但未完成 / 全新规划** 三类功能，形成可执行的开发路线图。
+本 PRD 是对 v1 版本的全面升级。基于项目当前真实代码审计（35 个 Tauri 命令、8 个页面路由、5 张 SQLite 表），明确区分 **已完成 / 已设桩但未完成 / 全新规划** 三类功能，形成可执行的开发路线图。
+
+**最新进展（2026-02-25 补充）**：
+- Notes AI 对话区已升级为 Markdown 流式渲染，支持 LaTeX 公式与代码高亮
+- Quiz Phase 2 后端基座已启动：`questions` 表与 `create_question/get_questions` 命令已落地
 
 **功能来源分类标记**：
 - 🟢 **已完成** — 代码与 UI 均已就位，日常可用
@@ -65,7 +69,7 @@
 │  ┌──────────┐ ┌──────────┐ ┌──────────────────┐    │
 │  │ 文件系统 │ │  SQLite  │ │ AI 代理 (3家LLM) │    │
 │  │ Logs/    │ │ eva.db   │ │ DeepSeek / Kimi  │    │
-│  │ Notes/   │ │ 4 tables │ │ / MiniMax        │    │
+│  │ Notes/   │ │ 5 tables │ │ / MiniMax        │    │
 │  │ Resources│ │          │ │                   │    │
 │  └──────────┘ └──────────┘ └──────────────────┘    │
 └─────────────────────────────────────────────────────┘
@@ -75,7 +79,7 @@
 
 | 存储层 | 内容 |
 |--------|------|
-| **SQLite** (`eva.db`) | `tasks`、`focus_sessions`、`video_bookmarks`、`resources` |
+| **SQLite** (`eva.db`) | `tasks`、`focus_sessions`、`video_bookmarks`、`resources`、`questions` |
 | **文件系统** | `Logs/*.md`（日志）、`Notes/`（知识库）、`Resources/`（资源） |
 | **localStorage** | 设置、树缓存、草稿编辑器、AI Key 兼容读取 |
 
@@ -376,6 +380,7 @@ fn get_workspace_size() -> u64 { ... }           // 递归计算文件系统大�
 - ✅ Settings 已支持 API Key 持久化与模型选择（默认 `deepseek-ai/DeepSeek-V3.2`）
 - ✅ 新增前端统一客户端 `src/utils/aiClient.ts`，支持 SiliconFlow 流式返回
 - ✅ 知识库 AI 对话已接入流式打字机渲染（最小连通测试：输入"你好"可返回）
+- ✅ 已兼容旧模型缓存值（如 `deepseek-v3`）并自动映射为 `deepseek-ai/DeepSeek-V3.2`
 - 🟡 意图模式、题目生成、周复盘等高级能力仍待补齐
 
 **当前已有 AI 能力**（保留不变）：

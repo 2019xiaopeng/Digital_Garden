@@ -84,3 +84,25 @@
 - 知识库 AI 面板已接入 `chatCompletion` 流式函数
 - 输入「你好」可看到流式打字机效果并得到 DeepSeek 回复
 - 模型下拉切换已与本地缓存联动
+
+### 7) SiliconFlow 模型名兼容修复
+- 修复历史缓存模型名 `deepseek-v3` 导致的 400 报错（Model does not exist）
+- `aiClient` 新增模型别名归一化：旧值会自动映射到 `deepseek-ai/DeepSeek-V3.2`
+- 启动请求时会自愈写回 `eva.ai.model`，避免后续重复触发同类错误
+
+### 8) Notes：AI 对话渲染升级（LaTeX + 代码高亮）
+- AI 对话区宽度扩展，聊天内容区可视空间更大
+- 新增 Markdown 渲染增强：
+  - 数学公式支持：`remark-math` + `rehype-katex`
+  - 代码高亮支持：`rehype-highlight` + `highlight.js`
+- AI 回复从纯文本展示升级为 Markdown 流式展示，便于阅读公式与代码片段
+
+### 9) Phase 2 启动：Quiz 题库数据库基座
+- SQLite 新增 `questions` 表（题目主体、选项、答案、解析、来源、难度、复习统计字段）
+- 新增索引：
+  - `idx_questions_subject`
+  - `idx_questions_next_review`
+- 新增 Tauri 命令：
+  - `create_question`
+  - `get_questions`
+- 已注册到 `invoke_handler`，为 Quiz 页面重构与 AI 生成入库打通后端基础

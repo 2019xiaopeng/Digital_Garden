@@ -15,6 +15,12 @@ export type ChatCompletionOptions = {
 
 const SILICONFLOW_ENDPOINT = "https://api.siliconflow.cn/v1/chat/completions";
 const DEFAULT_MODEL = "deepseek-ai/DeepSeek-V3.2";
+const MODEL_ALIASES: Record<string, string> = {
+  "deepseek-v3": "deepseek-ai/DeepSeek-V3.2",
+  "deepseek-v3.2": "deepseek-ai/DeepSeek-V3.2",
+  "deepseek-chat": "deepseek-ai/DeepSeek-V3.2",
+  "deepseek-r1": "deepseek-ai/DeepSeek-R1",
+};
 
 function resolveApiKey(): string {
   const settings = getSettings();
@@ -28,9 +34,27 @@ function resolveApiKey(): string {
   return legacy2 || "";
 }
 
+function normalizeModelName(input?: string): string {
+  const raw = (input || "").trim();
+  if (!raw) return DEFAULT_MODEL;
+
+  const alias = MODEL_ALIASES[raw.toLowerCase()];
+  if (alias) return alias;
+
+  return raw;
+}
+
 function resolveModel(model?: string): string {
-  if (model?.trim()) return model.trim();
-  return localStorage.getItem("eva.ai.model")?.trim() || DEFAULT_MODEL;
+  const explicit = normalizeModelName(model);
+  if (model?.trim()) return explicit;
+
+  const fromStorage = normalizeModelName(localStorage.getItem("eva.ai.model") || "");
+
+  if (!localStorage.getItem("eva.ai.model") || localStorage.getItem("eva.ai.model") !== fromStorage) {
+    localStorage.setItem("eva.ai.model", fromStorage);
+  }
+
+  return fromStorage || DEFAULT_MODEL;
 }
 
 export async function* chatCompletion(options: ChatCompletionOptions): AsyncGenerator<string, void, unknown> {

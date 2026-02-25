@@ -92,6 +92,24 @@ pub struct VideoBookmark {
     pub created_at: String,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
+pub struct Question {
+    pub id: String,
+    pub subject: String,
+    pub r#type: String,
+    pub stem: String,
+    pub options: Option<String>,
+    pub answer: String,
+    pub explanation: String,
+    pub source_files: String,
+    pub difficulty: i32,
+    pub created_at: String,
+    pub next_review: Option<String>,
+    pub review_count: i32,
+    pub correct_count: i32,
+    pub ease_factor: f64,
+}
+
 #[derive(Debug, Deserialize)]
 struct BilibiliApiOwner {
     name: String,
@@ -222,6 +240,28 @@ async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, String> {
     .await
     .map_err(|e| format!("Failed to create resources table: {}", e))?;
 
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS questions (
+            id TEXT PRIMARY KEY,
+            subject TEXT NOT NULL,
+            type TEXT NOT NULL DEFAULT 'choice',
+            stem TEXT NOT NULL,
+            options TEXT,
+            answer TEXT NOT NULL,
+            explanation TEXT DEFAULT '',
+            source_files TEXT DEFAULT '[]',
+            difficulty INTEGER DEFAULT 2,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            next_review DATETIME,
+            review_count INTEGER DEFAULT 0,
+            correct_count INTEGER DEFAULT 0,
+            ease_factor REAL DEFAULT 2.5
+        )",
+    )
+    .execute(&pool)
+    .await
+    .map_err(|e| format!("Failed to create questions table: {}", e))?;
+
     // Create index for date-based queries
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_tasks_date ON tasks(date)")
         .execute(&pool)
@@ -236,6 +276,14 @@ async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, String> {
         .await
         .ok();
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_resources_subject ON resources(subject)")
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_questions_subject ON questions(subject)")
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_questions_next_review ON questions(next_review)")
         .execute(&pool)
         .await
         .ok();
@@ -891,6 +939,51 @@ async fn delete_resource(
         .map_err(|e| format!("Failed to delete resource: {}", e))?;
     Ok(())
 }
+
+    // ═══════════════════════════════════════════════════════════
+    // Quiz Question Commands (SQLite)
+    // ═══════════════════════════════════════════════════════════
+
+    #[tauri::command]
+    async fn get_questions(db: State<'_, Arc<Mutex<AppDb>>>) -> Result<Vec<Question>, String> {
+        let db = db.lock().await;
+        let rows = sqlx::query_as::<_, Question>(
+            "SELECT id, subject, type, stem, options, answer, explanation, source_files, difficulty, created_at, next_review, review_count, correct_count, ease_factor FROM questions ORDER BY created_at DESC",
+        )
+        .fetch_all(&db.db)
+        .await
+        .map_err(|e| format!("Failed to fetch questions: {}", e))?;
+        Ok(rows)
+    }
+
+    #[tauri::command]
+    async fn create_question(
+        question: Question,
+        db: State<'_, Arc<Mutex<AppDb>>>,
+    ) -> Result<Question, String> {
+        let db = db.lock().await;
+        sqlx::query(
+            "INSERT OR REPLACE INTO questions (id, subject, type, stem, options, answer, explanation, source_files, difficulty, created_at, next_review, review_count, correct_count, ease_factor) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&question.id)
+        .bind(&question.subject)
+        .bind(&question.r#type)
+        .bind(&question.stem)
+        .bind(&question.options)
+        .bind(&question.answer)
+        .bind(&question.explanation)
+        .bind(&question.source_files)
+        .bind(question.difficulty)
+        .bind(&question.created_at)
+        .bind(&question.next_review)
+        .bind(question.review_count)
+        .bind(question.correct_count)
+        .bind(question.ease_factor)
+        .execute(&db.db)
+        .await
+        .map_err(|e| format!("Failed to create question: {}", e))?;
+        Ok(question)
+    }
 
 /// Recursively copy an entire folder into Resources/ and return all copied file entries.
 #[tauri::command]
@@ -2199,6 +2292,8 @@ pub fn run() {
             get_resources,
             add_resource,
             delete_resource,
+            get_questions,
+            create_question,
             write_notes_file,
             create_notes_folder,
             delete_notes_item,
