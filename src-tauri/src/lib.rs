@@ -844,8 +844,46 @@ async fn add_resource(
 }
 
 #[tauri::command]
-async fn delete_resource(id: String, db: State<'_, Arc<Mutex<AppDb>>>) -> Result<(), String> {
+async fn delete_resource(
+    app: tauri::AppHandle,
+    id: String,
+    db: State<'_, Arc<Mutex<AppDb>>>,
+) -> Result<(), String> {
+    let root = PathBuf::from(ensure_workspace_dirs(&app).await?);
+    let resources_base = root.join("Resources");
+
     let db = db.lock().await;
+    let path_row = sqlx::query_scalar::<_, String>("SELECT path FROM resources WHERE id = ?")
+        .bind(&id)
+        .fetch_optional(&db.db)
+        .await
+        .map_err(|e| format!("Failed to query resource path: {}", e))?;
+
+    if let Some(relative_path) = path_row {
+        let sanitized = sanitize_relative_path(&relative_path)?;
+        let full_path = resources_base.join(sanitized);
+
+        if let Ok(metadata) = fs::metadata(&full_path).await {
+            if metadata.is_file() {
+                fs::remove_file(&full_path).await.map_err(|e| {
+                    format!(
+                        "Failed to delete resource file {}: {}",
+                        full_path.to_string_lossy(),
+                        e
+                    )
+                })?;
+            } else if metadata.is_dir() {
+                fs::remove_dir_all(&full_path).await.map_err(|e| {
+                    format!(
+                        "Failed to delete resource directory {}: {}",
+                        full_path.to_string_lossy(),
+                        e
+                    )
+                })?;
+            }
+        }
+    }
+
     sqlx::query("DELETE FROM resources WHERE id = ?")
         .bind(id)
         .execute(&db.db)

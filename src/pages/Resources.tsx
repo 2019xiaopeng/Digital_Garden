@@ -4,6 +4,7 @@ import { useNavigate } from "react-router-dom";
 import { cn } from "../lib/utils";
 import { isTauriAvailable } from "../lib/dataService";
 import { extractBilibiliVideoUrl, openExternalUrl } from "../lib/videoBookmark";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { openPath } from "@tauri-apps/plugin-opener";
@@ -71,8 +72,15 @@ export function Resources() {
   const [searchQuery, setSearchQuery] = useState("");
   const [bilibiliInput, setBilibiliInput] = useState("");
   const [bookmarkToast, setBookmarkToast] = useState<string | null>(null);
+  const [resourceToast, setResourceToast] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const [pendingDeleteResource, setPendingDeleteResource] = useState<ResourceItem | null>(null);
   const [videoBookmarks, setVideoBookmarks] = useState<VideoBookmark[]>([]);
   const navigate = useNavigate();
+
+  const showResourceToast = useCallback((type: "success" | "error", message: string) => {
+    setResourceToast({ type, message });
+    window.setTimeout(() => setResourceToast(null), 1800);
+  }, []);
 
   // Load resources + video bookmarks from SQLite on mount
   React.useEffect(() => {
@@ -106,15 +114,24 @@ export function Resources() {
     );
   };
 
-  const handleDeleteResource = useCallback(async (id: string) => {
-    try {
-      await invoke("delete_resource", { id });
-      setResources(prev => prev.filter(r => r.id !== id));
-      setSelectedIds(prev => prev.filter(x => x !== id));
-    } catch (error) {
-      console.error("[Resources] delete resource failed:", error);
-    }
+  const requestDeleteResource = useCallback((resource: ResourceItem) => {
+    setPendingDeleteResource(resource);
   }, []);
+
+  const confirmDeleteResource = useCallback(async () => {
+    if (!pendingDeleteResource) return;
+    try {
+      await invoke("delete_resource", { id: pendingDeleteResource.id });
+      setResources(prev => prev.filter(r => r.id !== pendingDeleteResource.id));
+      setSelectedIds(prev => prev.filter(x => x !== pendingDeleteResource.id));
+      showResourceToast("success", "删除成功");
+    } catch (error: any) {
+      console.error("[Resources] delete resource failed:", error);
+      showResourceToast("error", `删除失败：${error?.message || String(error)}`);
+    } finally {
+      setPendingDeleteResource(null);
+    }
+  }, [pendingDeleteResource, showResourceToast]);
 
   const handleOpenResource = useCallback(async (resource: ResourceItem) => {
     try {
@@ -495,7 +512,7 @@ export function Resources() {
                     <Download className="w-5 h-5" />
                   </button>
                   <button 
-                    onClick={(e) => { e.stopPropagation(); handleDeleteResource(file.id); }}
+                    onClick={(e) => { e.stopPropagation(); requestDeleteResource(file); }}
                     title="删除此资源"
                     className="w-10 h-10 bg-red-50 dark:bg-red-500/10 text-red-500 dark:text-red-400 rounded-xl flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all duration-300 hover:bg-red-600 hover:text-white shadow-sm hover:scale-105 active:scale-95"
                   >
@@ -545,6 +562,31 @@ export function Resources() {
           );
         })}
       </div>
+
+      <ConfirmDialog
+        open={!!pendingDeleteResource}
+        title={pendingDeleteResource ? `确定删除「${pendingDeleteResource.name}」？` : "确定删除？"}
+        description="删除后将无法恢复。"
+        confirmText="删除"
+        variant="danger"
+        onConfirm={confirmDeleteResource}
+        onCancel={() => setPendingDeleteResource(null)}
+      />
+
+      {resourceToast && (
+        <div className="absolute bottom-4 right-4 z-50">
+          <div
+            className={cn(
+              "px-3 py-2 rounded-lg text-xs shadow-lg border",
+              resourceToast.type === "success"
+                ? "bg-emerald-500/95 text-white border-emerald-400"
+                : "bg-red-500/95 text-white border-red-400"
+            )}
+          >
+            {resourceToast.message}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -75,7 +75,7 @@
 
 | 存储层 | 内容 |
 |--------|------|
-| **SQLite** (`eva.db`) | `tasks`、`focus_sessions`、`video_bookmarks`、`daily_logs`(空表) |
+| **SQLite** (`eva.db`) | `tasks`、`focus_sessions`、`video_bookmarks`、`resources` |
 | **文件系统** | `Logs/*.md`（日志）、`Notes/`（知识库）、`Resources/`（资源） |
 | **localStorage** | 设置、树缓存、草稿编辑器、AI Key 兼容读取 |
 
@@ -173,10 +173,10 @@
 | 外部打开视频 | opener 插件打开浏览器 | 🟢 |
 | 学科筛选标签 | 按 subject 过滤 | 🟢 |
 | 文件上传 | dialog 选文件 → `copy_files_to_resources` | 🟢 |
-| **资源列表持久化** | **`initialResources = []`，刷新即清空** | 🟡 |
-| **搜索框** | **UI 已渲染，无 onChange / 过滤实现** | 🟡 |
-| **下载按钮** | **`/* download logic */` 空回调** | 🟡 |
-| **文件夹上传** | **不递归读取文件夹内容，仅添加单条目** | 🟡 |
+| **资源列表持久化** | **已接入 SQLite `resources` 表，页面刷新后可恢复** | 🟢 |
+| **搜索框** | **已绑定 onChange，支持按资源名/科目过滤** | 🟢 |
+| **下载按钮** | **已接入 `openPath`，可在系统默认应用打开文件** | 🟢 |
+| **文件夹上传** | **已支持目录递归拷贝 + 批量入库** | 🟢 |
 | **生成试卷** | **仅 `navigate('/quiz?generated=true')`，无实际生成** | 🟡 |
 
 ---
@@ -218,7 +218,7 @@
 
 ### 3.8 后端 Tauri 命令层 🟢
 
-**状态：33 个命令全部实现，错误处理完备**
+**状态：核心命令已实现，错误处理完备（含 Resources 持久化与递归上传命令）**
 
 | 分组 | 命令数 | 说明 |
 |------|--------|------|
@@ -230,7 +230,7 @@
 | 工作区 | 3 | initialize + initialize_at + get_root |
 | 文件读取 | 3 | read_file_content + get_*_dir |
 | 知识库操作 | 8 | copy/batch_copy/delete/batch_delete/move/batch_move/write/create_folder |
-| 资源操作 | 1 | batch_copy_to_resources |
+| 资源操作 | 5 | get/add/delete + batch_copy_files + batch_copy_folder |
 | MD 导入 | 1 | parse_markdown_plan |
 
 **已有空壳**：`main.rs` → `start_lan_server()` 空函数体 + TODO 注释，从未调用。
@@ -501,9 +501,9 @@ get_due_questions(date)                  // 获取今日待复习题
 
 ---
 
-### 4.6 🟡 资源站持久化与搜索补全
+### 4.6 🟢（部分）资源站持久化与搜索补全
 
-**现状**：文件资源列表 `initialResources = []`，刷新即清空；搜索框和下载按钮是死 UI。
+**当前状态（2026-02-25）**：资源持久化、搜索、下载打开、文件夹递归上传均已实现；“生成试卷”能力仍待联动 Quiz 题库。
 
 **修复方案**：
 
@@ -565,11 +565,11 @@ search_notes_content(keyword) -> SearchHit[]   // 全文搜索
 
 ---
 
-### 4.9 🟡 `daily_logs` 空表清理
+### 4.9 🟢 `daily_logs` 空表清理
 
 **现状**：`lib.rs` 行 175 创建了 `daily_logs` SQLite 表，但所有日志 CRUD 操作都走 `Logs/*.md` 文件系统。这张表从未被插入或查询。
 
-**决策**：**删除建表语句**。日志的 YAML frontmatter + Markdown 文件方案已足够好，无需冗余表。
+**结果（2026-02-25）**：已删除建表语句与相关索引。日志继续沿用 YAML frontmatter + Markdown 文件方案。
 
 ---
 
@@ -827,10 +827,10 @@ Phase 6: 测试 + 打包发布    (Week 10)
 | 3 | 缓存清理 | 🔵 用户需求 | §4.3 |
 | 4 | AI 生成功能增强 | 🔵 用户需求 | §4.4 |
 | 5 | 练功房升级 | 🟡 已设桩未完成 | §4.5 |
-| 6 | 资源站持久化与搜索 | 🟡 已设桩未完成 | §4.6 |
+| 6 | 资源站持久化与搜索 | 🟢 已实现（生成试卷待补） | §4.6 |
 | 7 | 知识库搜索与树同步 | 🟡 已设桩未完成 | §4.7 |
 | 8 | 设置占位标签补全 | 🟡 已设桩未完成 | §4.8 |
-| 9 | `daily_logs` 空表清理 | 🟡 已设桩未完成 | §4.9 |
+| 9 | `daily_logs` 空表清理 | 🟢 已实现 | §4.9 |
 | 10 | 每日复盘仪表盘 | 🟣 新增规划 | §4.10 |
 | 11 | 智能碎片时间助手 | 🟣 新增规划 | §4.11 |
 | 12 | 考研科目目标体系 | 🟣 新增规划 | §4.12 |
