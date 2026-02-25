@@ -23,7 +23,7 @@ import {
 } from "lucide-react";
 import { bellUrl, getSettings, updateSettings, type AppSettings } from "../lib/settings";
 import { isTauriAvailable } from "../lib/dataService";
-import { open as shellOpen } from "@tauri-apps/plugin-shell";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
 
 type TabKey =
@@ -79,6 +79,7 @@ export function Settings() {
   const [aiModel, setAiModel] = useState(() => localStorage.getItem("eva.ai.model") || "deepseek-v3");
   const [autoStartEnabled, setAutoStartEnabled] = useState(false);
   const [autoStartLoading, setAutoStartLoading] = useState(true);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   useEffect(() => {
     const loaded = getSettings();
@@ -133,6 +134,7 @@ export function Settings() {
   const toggleAutoStart = async () => {
     if (!isTauriAvailable() || autoStartLoading) return;
     setAutoStartLoading(true);
+    setActionError(null);
     try {
       if (autoStartEnabled) {
         await disable();
@@ -143,6 +145,7 @@ export function Settings() {
       }
     } catch (error) {
       console.error("[Settings] Failed to toggle autostart:", error);
+      setActionError(`开机自启动设置失败：${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setAutoStartLoading(false);
     }
@@ -170,12 +173,14 @@ export function Settings() {
 
   const openLocalDataDir = async () => {
     if (!isTauriAvailable()) return;
+    setActionError(null);
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       const root = await invoke<string>("get_workspace_root");
-      await shellOpen(root);
+      await revealItemInDir(root);
     } catch (error) {
       console.error("[Settings] Failed to open local workspace root:", error);
+      setActionError(`打开根目录失败：${error instanceof Error ? error.message : String(error)}`);
     }
   };
 
@@ -459,6 +464,7 @@ export function Settings() {
         </div>
       </section>
 
+      {actionError && <div className="fixed bottom-24 right-8 max-w-sm px-4 py-2 rounded-xl bg-rose-500 text-white text-sm font-semibold shadow-lg animate-in fade-in duration-300">{actionError}</div>}
       {saved && <div className="fixed bottom-8 right-8 px-4 py-2 rounded-xl bg-emerald-500 text-white text-sm font-semibold shadow-lg animate-in fade-in slide-in-from-bottom-4 duration-300">设置已保存</div>}
     </div>
   );
