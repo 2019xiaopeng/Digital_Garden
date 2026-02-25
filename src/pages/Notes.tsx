@@ -999,7 +999,7 @@ export function Notes() {
 
   return (
     <div
-      className="h-[calc(100vh-2rem)] flex flex-col animate-in fade-in slide-in-from-bottom-4 duration-700 ease-out"
+      className="h-[calc(100vh-7rem)] flex flex-col animate-in fade-in slide-in-from-bottom-4 duration-700 ease-out"
       onContextMenu={(e) => {
         e.preventDefault();
         const target = e.target as HTMLElement;
@@ -1009,10 +1009,10 @@ export function Notes() {
         }
       }}
     >
-      <header className="flex items-center justify-between mb-6 flex-shrink-0">
+      <header className="flex items-center justify-between mb-3 flex-shrink-0">
         <div>
-          <h1 className="text-3xl font-bold tracking-tight text-gray-900 dark:text-white">知识库</h1>
-          <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">管理你的文档、笔记与资料，并使用 AI 辅助阅读。</p>
+          <h1 className="text-3xl font-bold tracking-tight text-gray-900 dark:text-white sm:text-4xl">知识库</h1>
+          <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">管理你的文档、笔记与资料，并使用 AI 辅助阅读。</p>
         </div>
       </header>
 
