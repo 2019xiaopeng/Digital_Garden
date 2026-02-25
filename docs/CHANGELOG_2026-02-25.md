@@ -46,3 +46,27 @@
 
 ### 说明
 - 本日志已按发布准备做精简，历史细节改由 Git 提交记录追溯。
+
+---
+
+## Phase 3 最终冲刺（文档确认）
+
+### 新增产品判断
+- iPad/手机在局域网中的核心定位是“任务打卡 + 番茄钟副屏控制台”与“知识资料跨端阅读”，不是重度刷题主战场。
+
+### 本轮确认的收口目标（待开发）
+- 首页（Dashboard/Home）完成双模降级，移除 Web 端残留原生 `invoke` 依赖，避免白屏。
+- Axum 增补跨端阅读接口：
+  - `GET /api/notes/tree`
+  - `GET /api/notes/file?path=...`
+  - `GET /api/resources`
+- `apiBridge.ts` 扩展统一桥接：
+  - `fetchDashboardStats()`（如首页需要）
+  - `fetchNotesTree()`
+  - `fetchNoteContent(relativePath)`
+  - `fetchResources()`
+- Dashboard / Notes / Resources 页面统一走桥接层，不再直接依赖 `@tauri-apps/api/core`。
+- Web 端防御性降级：隐藏或禁用文件管理动作（新建/重命名/删除/上传/本地打开），点击提示“局域网模式下仅支持跨端阅读，请在桌面端进行文件管理”。
+
+### 交付约束
+- 本次提交仅更新 PRD 与 CHANGELOG，不包含代码实现。

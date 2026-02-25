@@ -17,6 +17,7 @@
 - Tasks 已完成 Tauri/HTTP 双模桥接：`fetchTasks/addTask/modifyTask/removeTask`
 - Axum 已新增 Tasks REST：`GET/POST /api/tasks`、`PUT/DELETE /api/tasks/{id}`
 - Tasks 番茄钟在 Web 端已具备 Fullscreen API 优雅降级（不支持时自动回退页面内全屏）
+- Phase 3 最终冲刺范围已确认：优先修复 Dashboard 在 Web 端残留 `invoke` 导致的白屏，并完成 Notes/Resources 跨端阅读闭环（本轮为文档确认）
 
 **功能来源分类标记**：
 - 🟢 **已完成** — 代码与 UI 均已就位，日常可用
@@ -255,6 +256,12 @@
 | MD 导入 | 1 | parse_markdown_plan |
 
 **局域网服务现状**：已从空壳升级为可运行 Axum 服务，包含 `/api/ping`、`/api/quiz/all`、`/api/quiz/due` 与静态页面托管。
+
+**Phase 3 最终冲刺（待实现）**：
+- 首页（Dashboard/Home）完成双模降级，Web 端不再直接依赖原生 `invoke`。
+- Axum 增补阅读接口：`/api/notes/tree`、`/api/notes/file`、`/api/resources`。
+- `apiBridge.ts` 扩展 Dashboard/Notes/Resources 统一桥接方法。
+- Notes/Resources 在 Web 端默认“只读模式”，文件管理能力禁用并提供明确提示。
 
 ---
 
@@ -780,6 +787,8 @@ Phase 6: 测试 + 打包发布    (Week 10)
 | 扩展 RESTful API（Tasks 增删改查 + Notes/Resources 文件树与文本读取） | P1 | 2d | §4.1 |
 | 扩展 `apiBridge.ts`（Tauri invoke ↔ fetch 双模调用覆盖 Tasks/Notes/Resources） | P1 | 1.5d | §4.1 |
 | 番茄钟 Web 纯浏览器可运行（独立计时或与桌面端状态同步） | P1 | 1.5d | §4.1 |
+| Dashboard 双模降级（移除 Web 端残留 invoke 白屏风险） | P1 | 1d | §4.1 |
+| Notes/Resources Web 只读防御性降级（禁用文件管理动作 + 提示文案） | P1 | 1d | §4.1 |
 | 设置 sync 标签页：开关 + IP 展示 + 二维码 + PIN 码 | P1 | 1.5d | §4.1 |
 | 侧边栏 LAN 状态指示器 | P3 | 0.5d | §4.1 |
 | Tailscale 状态检测命令 | P2 | 1d | §4.2 |
@@ -788,6 +797,8 @@ Phase 6: 测试 + 打包发布    (Week 10)
 
 **验收标准**：
 - ✅ iPad Safari 输入 `http://192.168.x.x:9527` 可进行任务勾选、查看番茄钟状态并阅读笔记/资源
+- ✅ Dashboard 在纯 Web 环境无白屏，核心统计可用或有明确占位降级
+- ✅ Notes/Resources 在 Web 环境为稳定只读模式，文件管理按钮禁用且提示清晰
 - ✅ 设置页显示局域网地址 + 二维码
 - ✅ Tailscale 在线时显示 MagicDNS 地址
 
