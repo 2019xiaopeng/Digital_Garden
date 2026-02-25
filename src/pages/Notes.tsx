@@ -6,12 +6,13 @@ import {
 import { cn } from "../lib/utils";
 import { ThemedPromptDialog } from "../components/ThemedPromptDialog";
 import { ConfirmDialog } from "../components/ConfirmDialog";
-import { isTauriAvailable, AiService } from "../lib/dataService";
+import { isTauriAvailable } from "../lib/dataService";
 import { open } from "@tauri-apps/plugin-dialog";
-import { getSettings } from "../lib/settings";
+import { getSettings, updateSettings } from "../lib/settings";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useKnowledgeSelection } from "../context/KnowledgeSelectionContext";
+import { chatCompletion, getAiRuntimeConfig } from "../utils/aiClient";
 
 // --- Types ---
 type TreeNode = {
@@ -51,7 +52,7 @@ export function Notes() {
 
   // AI Chat State
   const [chatInput, setChatInput] = useState("");
-  const [selectedModel, setSelectedModel] = useState<"deepseek" | "kimi" | "minimax">("deepseek");
+  const [selectedModel, setSelectedModel] = useState(() => getSettings().aiModel || "deepseek-ai/DeepSeek-V3.2");
   const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [isAiLoading, setIsAiLoading] = useState(false);
@@ -795,12 +796,6 @@ export function Notes() {
     }));
   };
 
-  const getModelLabel = (model: "deepseek" | "kimi" | "minimax") => {
-    if (model === "deepseek") return "DeepSeek";
-    if (model === "kimi") return "Kimi";
-    return "MiniMax";
-  };
-
   const buildSelectedFilesContext = async (): Promise<string> => {
     if (selected_knowledge_files.length === 0) return "";
 
@@ -828,51 +823,6 @@ export function Notes() {
     return `\n\n以下是用户当前选中的知识库文件内容片段，请优先结合这些上下文回答：\n${chunks.join("\n\n---\n\n")}`;
   };
 
-  const getAiReply = async (userMsg: string) => {
-    const settings = getSettings();
-    const modelLabel = getModelLabel(selectedModel);
-    const selectedContext = await buildSelectedFilesContext();
-    const context = viewingFile ? `当前文件：${viewingFile.name}。` : "当前未选中文件。";
-
-    // Determine API config based on selected model
-    let apiUrl: string;
-    let apiKey: string;
-    let model: string;
-
-    if (selectedModel === "kimi") {
-      apiUrl = "https://api.moonshot.cn/v1/chat/completions";
-      apiKey = settings.aiKimiKey || "";
-      model = "moonshot-v1-8k";
-    } else if (selectedModel === "minimax") {
-      apiUrl = "https://api.minimax.chat/v1/text/chatcompletion_v2";
-      apiKey = settings.aiMinimaxKey || "";
-      model = "MiniMax-Text-01";
-    } else {
-      apiUrl = "https://api.deepseek.com/v1/chat/completions";
-      apiKey = settings.aiApiKey || "";
-      model = "deepseek-chat";
-    }
-
-    if (!apiKey) {
-      return `【${modelLabel}】已收到你的问题：${userMsg}\n\n当前未配置 ${modelLabel} 的 API Key，请前往"设置"页面填写。已进入离线回执模式。`;
-    }
-
-    try {
-      const response = await AiService.callApi({
-        api_url: apiUrl,
-        api_key: apiKey,
-        model,
-        system_prompt: `你是EVA系统的知识库AI助手，简洁清晰地回答问题。${context}${selectedContext}`,
-        user_message: userMsg,
-        temperature: 0.7,
-        max_tokens: 1024,
-      });
-      return response.content || "No response.";
-    } catch (error: any) {
-      return `调用 ${modelLabel} API 失败: ${error.message || "未知错误"}`;
-    }
-  };
-
   const handleAiSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!chatInput.trim() || isAiLoading) return;
@@ -885,14 +835,60 @@ export function Notes() {
       updateSessionMessages(activeSession.id, messages => [...messages, { role: 'user', text: userMsg }]);
     }
 
+    updateSessionMessages(currentSession.id, messages => [...messages, { role: 'model', text: "" }]);
+
     setIsAiLoading(true);
 
     try {
-      const aiText = await getAiReply(userMsg);
-      updateSessionMessages(currentSession.id, messages => [...messages, { role: 'model', text: aiText }]);
+      const selectedContext = await buildSelectedFilesContext();
+      const context = viewingFile ? `当前文件：${viewingFile.name}。` : "当前未选中文件。";
+      const runtime = getAiRuntimeConfig();
+      const modelToUse = selectedModel || runtime.model || "deepseek-ai/DeepSeek-V3.2";
+
+      const previousMessages = activeSession?.messages || [];
+      const transcript = [...previousMessages, { role: "user" as const, text: userMsg }]
+        .filter(m => m.text?.trim())
+        .map(m => ({
+          role: m.role === "model" ? "assistant" as const : "user" as const,
+          content: m.text,
+        }));
+
+      await chatCompletion({
+        model: modelToUse,
+        temperature: 0.7,
+        maxTokens: 1024,
+        messages: [
+          {
+            role: "system",
+            content: `你是EVA系统的知识库AI助手，简洁清晰地回答问题。${context}${selectedContext}`,
+          },
+          ...transcript,
+        ],
+        onDelta: (_delta, fullText) => {
+          updateSessionMessages(currentSession.id, (messages) => {
+            const next = [...messages];
+            for (let i = next.length - 1; i >= 0; i--) {
+              if (next[i].role === "model") {
+                next[i] = { ...next[i], text: fullText };
+                return next;
+              }
+            }
+            return [...next, { role: "model", text: fullText }];
+          });
+        },
+      });
     } catch (error: any) {
       console.error("AI Error:", error);
-      updateSessionMessages(currentSession.id, messages => [...messages, { role: 'model', text: `Error: ${error.message || "Failed to get response."}` }]);
+      updateSessionMessages(currentSession.id, (messages) => {
+        const next = [...messages];
+        for (let i = next.length - 1; i >= 0; i--) {
+          if (next[i].role === "model") {
+            next[i] = { ...next[i], text: `Error: ${error.message || "Failed to get response."}` };
+            return next;
+          }
+        }
+        return [...next, { role: "model", text: `Error: ${error.message || "Failed to get response."}` }];
+      });
     } finally {
       setIsAiLoading(false);
     }
@@ -1234,12 +1230,17 @@ export function Notes() {
               <h3 className="font-semibold text-gray-900 dark:text-white">知识库 AI 助手</h3>
               <select
                 value={selectedModel}
-                onChange={(e) => setSelectedModel(e.target.value as "deepseek" | "kimi" | "minimax")}
+                onChange={(e) => {
+                  const next = e.target.value;
+                  setSelectedModel(next);
+                  updateSettings({ aiModel: next });
+                  localStorage.setItem("eva.ai.model", next);
+                }}
                 className="ml-2 text-xs font-medium bg-white/90 dark:bg-[#0f1826] border border-[#88B5D3]/30 rounded-lg px-2 py-1 text-gray-700 dark:text-gray-200 focus:outline-none"
               >
-                <option value="deepseek">DeepSeek</option>
-                <option value="kimi">Kimi</option>
-                <option value="minimax">MiniMax</option>
+                <option value="deepseek-ai/DeepSeek-V3.2">deepseek-ai/DeepSeek-V3.2</option>
+                <option value="deepseek-ai/DeepSeek-R1">deepseek-ai/DeepSeek-R1</option>
+                <option value="deepseek-ai/DeepSeek-V3">deepseek-ai/DeepSeek-V3</option>
               </select>
               {viewingFile && (
                 <span className="ml-auto text-xs bg-white/85 dark:bg-[#0f1826] border border-[#88B5D3]/20 text-[#88B5D3] px-2 py-1 rounded-md flex items-center gap-1">
@@ -1253,7 +1254,7 @@ export function Notes() {
                 <div className="h-full min-h-56 flex flex-col items-center justify-center text-center text-gray-500 dark:text-gray-400">
                   <Bot className="w-11 h-11 mb-3 text-[#88B5D3]/70" />
                   <p className="font-medium">当前暂无历史对话，开始提问吧</p>
-                  <p className="text-xs mt-1">已支持模型切换：DeepSeek / Kimi / MiniMax</p>
+                  <p className="text-xs mt-1">已接入 SiliconFlow 流式输出，输入“你好”可测试连通性</p>
                 </div>
               ) : chatHistory.map((msg, idx) => (
                 <div key={idx} className={cn("flex gap-4", msg.role === 'user' ? "flex-row-reverse" : "")}>

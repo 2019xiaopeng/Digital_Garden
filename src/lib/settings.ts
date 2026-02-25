@@ -4,6 +4,7 @@ export interface AppSettings {
   aiApiKey: string;
   aiKimiKey: string;
   aiMinimaxKey: string;
+  aiModel: string;
   fontScale: number;
   pomodoroBell: BellType;
   avatarUrl: string;
@@ -20,6 +21,7 @@ export const defaultSettings: AppSettings = {
   aiApiKey: "",
   aiKimiKey: "",
   aiMinimaxKey: "",
+  aiModel: "deepseek-ai/DeepSeek-V3.2",
   fontScale: 100,
   pomodoroBell: "beep",
   avatarUrl: "/pic/head.png",

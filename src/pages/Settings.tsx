@@ -78,7 +78,6 @@ export function Settings() {
   const [saved, setSaved] = useState(false);
   const [initialDocRoot, setInitialDocRoot] = useState(getSettings().docRoot);
   const [showKeys, setShowKeys] = useState<Record<string, boolean>>({});
-  const [aiModel, setAiModel] = useState(() => localStorage.getItem("eva.ai.model") || "deepseek-v3");
   const [autoStartEnabled, setAutoStartEnabled] = useState(false);
   const [autoStartLoading, setAutoStartLoading] = useState(true);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -145,7 +144,7 @@ export function Settings() {
   const save = async () => {
     updateSettings(settings);
     localStorage.setItem("eva.ai.apiKey", settings.aiApiKey);
-    localStorage.setItem("eva.ai.model", aiModel);
+    localStorage.setItem("eva.ai.model", settings.aiModel || "deepseek-ai/DeepSeek-V3.2");
 
     if (settings.docRoot.trim() && settings.docRoot !== initialDocRoot) {
       try {
@@ -324,9 +323,14 @@ export function Settings() {
         </div>
         <div className="glass-card rounded-2xl p-5">
           <label className="text-xs font-semibold text-gray-500">默认模型选择</label>
-          <select value={aiModel} onChange={(e) => setAiModel(e.target.value)} className={selectClass}>
-            <option value="deepseek-v3">DeepSeek-V3（推荐）</option>
-            <option value="deepseek-r1">DeepSeek-R1</option>
+          <select
+            value={settings.aiModel || "deepseek-ai/DeepSeek-V3.2"}
+            onChange={(e) => setSettings({ ...settings, aiModel: e.target.value })}
+            className={selectClass}
+          >
+            <option value="deepseek-ai/DeepSeek-V3.2">deepseek-ai/DeepSeek-V3.2（推荐）</option>
+            <option value="deepseek-ai/DeepSeek-R1">deepseek-ai/DeepSeek-R1</option>
+            <option value="deepseek-ai/DeepSeek-V3">deepseek-ai/DeepSeek-V3</option>
           </select>
         </div>
       </section>
