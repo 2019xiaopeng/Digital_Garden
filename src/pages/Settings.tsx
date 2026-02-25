@@ -27,6 +27,7 @@ import { bellUrl, getSettings, updateSettings, type AppSettings } from "../lib/s
 import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { documentDir, join } from "@tauri-apps/api/path";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 
 type TabKey =
   | "general"
@@ -68,6 +69,8 @@ const navItems: NavItem[] = [
 ];
 
 const shortcutList = [
+  { keys: "Ctrl/Cmd + Shift + E", desc: "全局唤醒 / 隐藏主窗口（桌面端）" },
+  { keys: "托盘左键 / 双击", desc: "显示或隐藏主窗口（桌面端）" },
   { keys: "Delete", desc: "删除选中的知识库文件" },
   { keys: "F2", desc: "重命名选中的文件或文件夹" },
   { keys: "Ctrl + 点击", desc: "多选知识库文件" },
@@ -95,6 +98,8 @@ export function Settings() {
   const [storageStats, setStorageStats] = useState<StorageStats | null>(null);
   const [storageLoading, setStorageLoading] = useState(false);
   const [maintenanceAction, setMaintenanceAction] = useState<string | null>(null);
+  const [pendingClearCache, setPendingClearCache] = useState<{ cacheType: string; label: string } | null>(null);
+  const [resetConfirmStage, setResetConfirmStage] = useState<0 | 1 | 2>(0);
 
   const formatBytes = (bytes: number) => {
     if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
@@ -297,10 +302,7 @@ export function Settings() {
     }
   };
 
-  const handleClearCache = async (cacheType: string, label: string) => {
-    if (!window.confirm(`确认执行「${label}」？该操作会清理对应本地数据，且不可恢复。`)) {
-      return;
-    }
+  const executeClearCache = async (cacheType: string, label: string) => {
     setMaintenanceAction(cacheType);
     setActionError(null);
     try {
@@ -318,10 +320,12 @@ export function Settings() {
     }
   };
 
-  const handleResetAllData = async () => {
-    if (!window.confirm("⚠️ 高危操作：将清空数据库内容、知识库与资源站文件。是否继续？")) return;
-    if (!window.confirm("请再次确认：该操作不可恢复，确定执行一键重置？")) return;
+  const requestClearCache = (cacheType: string, label: string) => {
+    if (maintenanceAction !== null) return;
+    setPendingClearCache({ cacheType, label });
+  };
 
+  const executeResetAllData = async () => {
     setMaintenanceAction("reset");
     setActionError(null);
     try {
@@ -335,6 +339,20 @@ export function Settings() {
     } finally {
       setMaintenanceAction(null);
     }
+  };
+
+  const requestResetAllData = () => {
+    if (maintenanceAction !== null) return;
+    setResetConfirmStage(1);
+  };
+
+  const handleResetConfirm = async () => {
+    if (resetConfirmStage === 1) {
+      setResetConfirmStage(2);
+      return;
+    }
+    setResetConfirmStage(0);
+    await executeResetAllData();
   };
 
   const handleChangeRoot = async () => {
@@ -711,28 +729,28 @@ export function Settings() {
         <p className="text-sm font-semibold text-gray-900 dark:text-white">分类清理</p>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           <button
-            onClick={() => handleClearCache("drafts", "清理草稿")}
+            onClick={() => requestClearCache("drafts", "清理草稿")}
             disabled={maintenanceAction !== null}
             className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-gray-200/80 dark:border-[#30435c] hover:bg-gray-100 dark:hover:bg-[#1b2a41] text-sm text-gray-700 dark:text-gray-200 transition-colors disabled:opacity-60"
           >
             <Trash2 className="w-4 h-4" /> 清理草稿
           </button>
           <button
-            onClick={() => handleClearCache("tree", "清理树缓存")}
+            onClick={() => requestClearCache("tree", "清理树缓存")}
             disabled={maintenanceAction !== null}
             className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-gray-200/80 dark:border-[#30435c] hover:bg-gray-100 dark:hover:bg-[#1b2a41] text-sm text-gray-700 dark:text-gray-200 transition-colors disabled:opacity-60"
           >
             <Trash2 className="w-4 h-4" /> 清理树缓存
           </button>
           <button
-            onClick={() => handleClearCache("file", "清理文件缓存")}
+            onClick={() => requestClearCache("file", "清理文件缓存")}
             disabled={maintenanceAction !== null}
             className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-gray-200/80 dark:border-[#30435c] hover:bg-gray-100 dark:hover:bg-[#1b2a41] text-sm text-gray-700 dark:text-gray-200 transition-colors disabled:opacity-60"
           >
             <Trash2 className="w-4 h-4" /> 清理文件缓存
           </button>
           <button
-            onClick={() => handleClearCache("tasks", "清理任务回退")}
+            onClick={() => requestClearCache("tasks", "清理任务回退")}
             disabled={maintenanceAction !== null}
             className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-gray-200/80 dark:border-[#30435c] hover:bg-gray-100 dark:hover:bg-[#1b2a41] text-sm text-gray-700 dark:text-gray-200 transition-colors disabled:opacity-60"
           >
@@ -740,7 +758,7 @@ export function Settings() {
           </button>
         </div>
         <button
-          onClick={handleResetAllData}
+          onClick={requestResetAllData}
           disabled={maintenanceAction !== null}
           className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-sm font-semibold transition-colors disabled:opacity-70"
         >
@@ -827,6 +845,37 @@ export function Settings() {
 
       {actionError && <div className="fixed bottom-24 right-8 max-w-sm px-4 py-2 rounded-xl bg-rose-500 text-white text-sm font-semibold shadow-lg animate-in fade-in duration-300">{actionError}</div>}
       {saved && <div className="fixed bottom-8 right-8 px-4 py-2 rounded-xl bg-emerald-500 text-white text-sm font-semibold shadow-lg animate-in fade-in slide-in-from-bottom-4 duration-300">设置已保存</div>}
+
+      <ConfirmDialog
+        open={!!pendingClearCache}
+        title={pendingClearCache ? `确认${pendingClearCache.label}？` : "确认清理缓存？"}
+        description="该操作将删除对应本地缓存数据，执行后不可恢复。"
+        confirmText="确认清理"
+        cancelText="取消"
+        variant="warning"
+        onConfirm={async () => {
+          if (!pendingClearCache) return;
+          const action = pendingClearCache;
+          setPendingClearCache(null);
+          await executeClearCache(action.cacheType, action.label);
+        }}
+        onCancel={() => setPendingClearCache(null)}
+      />
+
+      <ConfirmDialog
+        open={resetConfirmStage > 0}
+        title={resetConfirmStage === 1 ? "确认执行一键清空？" : "二次确认：不可恢复"}
+        description={
+          resetConfirmStage === 1
+            ? "将清空数据库内容、知识库与资源站文件。"
+            : "该操作会永久删除全部数据，且无法撤销。"
+        }
+        confirmText={resetConfirmStage === 1 ? "继续" : "确认清空"}
+        cancelText="取消"
+        variant="danger"
+        onConfirm={handleResetConfirm}
+        onCancel={() => setResetConfirmStage(0)}
+      />
     </div>
   );
 }
