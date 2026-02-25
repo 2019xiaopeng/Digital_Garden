@@ -11,6 +11,9 @@
 **最新进展（2026-02-25 补充）**：
 - Notes AI 对话区已升级为 Markdown 流式渲染，支持 LaTeX 公式与代码高亮
 - Quiz Phase 2 后端基座已启动：`questions` 表与 `create_question/get_questions` 命令已落地
+- Phase 3 局域网共享基座已落地：`get_local_ip`、`toggle_local_server`、`/api/ping`
+- Axum 已支持静态资源托管与 CORS，iPad 浏览器可直接访问 `http://<IP>:9527`
+- Quiz 已完成 Tauri/HTTP 双模桥接：桌面端走 IPC，Web 端走 `/api/quiz/all|due`
 
 **功能来源分类标记**：
 - 🟢 **已完成** — 代码与 UI 均已就位，日常可用
@@ -214,7 +217,7 @@
 
 ### 3.7 系统设置 · Settings 🟢（部分 🟡）
 
-**状态：7/10 标签页完成，3 个占位标签**
+**状态：10/10 标签页已有真实页面，其中 sync 已进入后端联调阶段**
 
 | 标签页 | 说明 | 状态 |
 |--------|------|------|
@@ -225,9 +228,9 @@
 | 番茄钟 (pomodoro) | 默认分钟数、铃声、自动全屏 | 🟢 |
 | 快捷键 (shortcut) | 静态快捷键列表展示 | 🟢 |
 | 关于 (about) | 版本信息 | 🟢 |
-| **同步与备份 (sync)** | **`renderPlaceholder(...)` 占位** | 🟡 |
-| **考研目标 (exam)** | **`renderPlaceholder(...)` 占位** | 🟡 |
-| **隐私与安全 (privacy)** | **`renderPlaceholder(...)` 占位** | 🟡 |
+| **同步与备份 (sync)** | **已接真实局域网 IP 与服务开关，支持本地服务启停** | 🟢 |
+| **考研目标 (exam)** | **骨架表单已落地，待接持久化后端** | 🟡 |
+| **隐私与安全 (privacy)** | **骨架面板已落地，待接真实统计与清理命令** | 🟡 |
 
 ---
 
@@ -248,7 +251,7 @@
 | 资源操作 | 5 | get/add/delete + batch_copy_files + batch_copy_folder |
 | MD 导入 | 1 | parse_markdown_plan |
 
-**已有空壳**：`main.rs` → `start_lan_server()` 空函数体 + TODO 注释，从未调用。
+**局域网服务现状**：已从空壳升级为可运行 Axum 服务，包含 `/api/ping`、`/api/quiz/all`、`/api/quiz/due` 与静态页面托管。
 
 ---
 

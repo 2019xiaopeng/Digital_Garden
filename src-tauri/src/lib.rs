@@ -1,12 +1,19 @@
+use axum::extract::{Query, State as AxumState};
+use axum::http::StatusCode;
+use axum::routing::{get, get_service};
+use axum::{Json, Router};
 use chrono::{Local, Utc};
 use serde::{Deserialize, Serialize};
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Manager, State};
 use tokio::fs;
-use tokio::sync::Mutex;
+use tokio::sync::{oneshot, Mutex};
+use tower_http::cors::CorsLayer;
+use tower_http::services::ServeDir;
 
 // ═══════════════════════════════════════════════════════════
 // Data Structures (shared between Rust & Frontend)
@@ -171,6 +178,195 @@ pub struct ImportReport {
 
 pub struct AppDb {
     pub db: sqlx::SqlitePool,
+}
+
+struct LocalServerRuntime {
+    handle: tauri::async_runtime::JoinHandle<()>,
+    shutdown_tx: Option<oneshot::Sender<()>>,
+}
+
+#[derive(Default)]
+struct LocalServerState {
+    runtime: Option<LocalServerRuntime>,
+}
+
+async fn local_ping_handler() -> &'static str {
+    "EVA Server is running"
+}
+
+#[derive(Debug, Deserialize)]
+struct QuizDueQuery {
+    subject: Option<String>,
+}
+
+fn resolve_static_assets_dir() -> PathBuf {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    if let Ok(current_dir) = std::env::current_dir() {
+        candidates.push(current_dir.join("dist"));
+        candidates.push(current_dir.join("build"));
+        candidates.push(current_dir.join("..").join("dist"));
+        candidates.push(current_dir.join("..").join("build"));
+    }
+
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(exe_dir) = current_exe.parent() {
+            candidates.push(exe_dir.join("dist"));
+            candidates.push(exe_dir.join("build"));
+        }
+    }
+
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.is_dir())
+        .unwrap_or_else(|| PathBuf::from("dist"))
+}
+
+async fn db_fetch_all_questions(pool: &sqlx::SqlitePool) -> Result<Vec<Question>, String> {
+    let rows = sqlx::query_as::<_, Question>(
+        "SELECT id, subject, type, stem, options, answer, explanation, source_files, difficulty, created_at, next_review, review_count, correct_count, ease_factor, interval FROM questions ORDER BY created_at DESC",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to fetch questions: {}", e))?;
+    Ok(rows)
+}
+
+async fn db_fetch_due_questions(
+    pool: &sqlx::SqlitePool,
+    subject: Option<&str>,
+) -> Result<Vec<Question>, String> {
+    let rows = if let Some(subject_value) = subject {
+        sqlx::query_as::<_, Question>(
+            "SELECT id, subject, type, stem, options, answer, explanation, source_files, difficulty, created_at, next_review, review_count, correct_count, ease_factor, interval
+             FROM questions
+             WHERE review_count > 0
+               AND datetime(COALESCE(next_review, CURRENT_TIMESTAMP)) <= datetime('now')
+               AND subject = ?
+             ORDER BY datetime(COALESCE(next_review, CURRENT_TIMESTAMP)) ASC",
+        )
+        .bind(subject_value)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("Failed to fetch due questions by subject: {}", e))?
+    } else {
+        sqlx::query_as::<_, Question>(
+            "SELECT id, subject, type, stem, options, answer, explanation, source_files, difficulty, created_at, next_review, review_count, correct_count, ease_factor, interval
+             FROM questions
+             WHERE review_count > 0
+               AND datetime(COALESCE(next_review, CURRENT_TIMESTAMP)) <= datetime('now')
+             ORDER BY datetime(COALESCE(next_review, CURRENT_TIMESTAMP)) ASC",
+        )
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("Failed to fetch due questions: {}", e))?
+    };
+
+    Ok(rows)
+}
+
+async fn api_quiz_all_handler(
+    AxumState(db): AxumState<Arc<Mutex<AppDb>>>,
+) -> Result<Json<Vec<Question>>, (StatusCode, String)> {
+    let db = db.lock().await;
+    let rows = db_fetch_all_questions(&db.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(rows))
+}
+
+async fn api_quiz_due_handler(
+    AxumState(db): AxumState<Arc<Mutex<AppDb>>>,
+    Query(params): Query<QuizDueQuery>,
+) -> Result<Json<Vec<Question>>, (StatusCode, String)> {
+    let db = db.lock().await;
+    let rows = db_fetch_due_questions(&db.db, params.subject.as_deref())
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(rows))
+}
+
+#[tauri::command]
+fn get_local_ip() -> String {
+    match local_ip_address::local_ip() {
+        Ok(IpAddr::V4(ipv4)) => ipv4.to_string(),
+        _ => "127.0.0.1".to_string(),
+    }
+}
+
+#[tauri::command]
+async fn toggle_local_server(
+    enable: bool,
+    port: u16,
+    app: tauri::AppHandle,
+    server_state: State<'_, Arc<Mutex<LocalServerState>>>,
+) -> Result<String, String> {
+    if port == 0 {
+        return Err("端口必须大于 0".to_string());
+    }
+
+    let previous_runtime = {
+        let mut state = server_state.lock().await;
+        state.runtime.take()
+    };
+
+    if let Some(mut runtime) = previous_runtime {
+        if let Some(shutdown_tx) = runtime.shutdown_tx.take() {
+            let _ = shutdown_tx.send(());
+        }
+        let _ = runtime.handle.await;
+    }
+
+    if !enable {
+        return Ok("局域网共享服务已关闭".to_string());
+    }
+
+    let db_state = app
+        .try_state::<Arc<Mutex<AppDb>>>()
+        .ok_or_else(|| "数据库尚未就绪，请稍后重试。".to_string())?;
+    let shared_db = db_state.inner().clone();
+
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|e| format!("启动局域网服务失败（端口 {}）: {}", port, e))?;
+
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let static_assets_dir = resolve_static_assets_dir();
+    log::info!(
+        "Local LAN server static assets dir: {}",
+        static_assets_dir.to_string_lossy()
+    );
+
+    let router = Router::new()
+        .route("/api/ping", get(local_ping_handler))
+        .route("/api/quiz/all", get(api_quiz_all_handler))
+        .route("/api/quiz/due", get(api_quiz_due_handler))
+        .fallback_service(get_service(
+            ServeDir::new(static_assets_dir).append_index_html_on_directories(true),
+        ))
+        .layer(CorsLayer::permissive())
+        .with_state(shared_db);
+
+    let server = axum::serve(listener, router).with_graceful_shutdown(async move {
+        let _ = shutdown_rx.await;
+    });
+
+    let handle = tauri::async_runtime::spawn(async move {
+        if let Err(err) = server.await {
+            log::error!("Local LAN server stopped with error: {}", err);
+        }
+    });
+
+    {
+        let mut state = server_state.lock().await;
+        state.runtime = Some(LocalServerRuntime {
+            handle,
+            shutdown_tx: Some(shutdown_tx),
+        });
+    }
+
+    Ok(format!("局域网共享服务已启动，端口 {}", port))
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1031,13 +1227,7 @@ async fn delete_resource(
     #[tauri::command]
     async fn get_questions(db: State<'_, Arc<Mutex<AppDb>>>) -> Result<Vec<Question>, String> {
         let db = db.lock().await;
-        let rows = sqlx::query_as::<_, Question>(
-            "SELECT id, subject, type, stem, options, answer, explanation, source_files, difficulty, created_at, next_review, review_count, correct_count, ease_factor, interval FROM questions ORDER BY created_at DESC",
-        )
-        .fetch_all(&db.db)
-        .await
-        .map_err(|e| format!("Failed to fetch questions: {}", e))?;
-        Ok(rows)
+        db_fetch_all_questions(&db.db).await
     }
 
     #[tauri::command]
@@ -1047,33 +1237,7 @@ async fn delete_resource(
     ) -> Result<Vec<Question>, String> {
         let db = db.lock().await;
 
-        let rows = if let Some(subject_value) = subject {
-            sqlx::query_as::<_, Question>(
-                "SELECT id, subject, type, stem, options, answer, explanation, source_files, difficulty, created_at, next_review, review_count, correct_count, ease_factor, interval
-                 FROM questions
-                 WHERE review_count > 0
-                   AND datetime(COALESCE(next_review, CURRENT_TIMESTAMP)) <= datetime('now')
-                   AND subject = ?
-                 ORDER BY datetime(COALESCE(next_review, CURRENT_TIMESTAMP)) ASC",
-            )
-            .bind(subject_value)
-            .fetch_all(&db.db)
-            .await
-            .map_err(|e| format!("Failed to fetch due questions by subject: {}", e))?
-        } else {
-            sqlx::query_as::<_, Question>(
-                "SELECT id, subject, type, stem, options, answer, explanation, source_files, difficulty, created_at, next_review, review_count, correct_count, ease_factor, interval
-                 FROM questions
-                 WHERE review_count > 0
-                   AND datetime(COALESCE(next_review, CURRENT_TIMESTAMP)) <= datetime('now')
-                 ORDER BY datetime(COALESCE(next_review, CURRENT_TIMESTAMP)) ASC",
-            )
-            .fetch_all(&db.db)
-            .await
-            .map_err(|e| format!("Failed to fetch due questions: {}", e))?
-        };
-
-        Ok(rows)
+        db_fetch_due_questions(&db.db, subject.as_deref()).await
     }
 
     #[tauri::command]
@@ -2529,6 +2693,8 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            app.manage(Arc::new(Mutex::new(LocalServerState::default())));
+
             let tray_show =
                 MenuItem::with_id(app, "tray_show", "显示 EVA 终端", true, None::<&str>)?;
             let tray_quit = MenuItem::with_id(app, "tray_quit", "退出系统", true, None::<&str>)?;
@@ -2616,6 +2782,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            get_local_ip,
+            toggle_local_server,
             get_tasks,
             get_tasks_by_date,
             create_task,

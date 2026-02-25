@@ -4,6 +4,8 @@ export interface AppSettings {
   aiApiKey: string;
   aiKimiKey: string;
   aiMinimaxKey: string;
+  lanShareEnabled: boolean;
+  lanSharePort: number;
   fontScale: number;
   pomodoroBell: BellType;
   avatarUrl: string;
@@ -20,6 +22,8 @@ export const defaultSettings: AppSettings = {
   aiApiKey: "",
   aiKimiKey: "",
   aiMinimaxKey: "",
+  lanShareEnabled: false,
+  lanSharePort: 9527,
   fontScale: 100,
   pomodoroBell: "beep",
   avatarUrl: "/pic/head.png",

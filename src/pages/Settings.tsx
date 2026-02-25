@@ -82,7 +82,8 @@ export function Settings() {
   const [autoStartEnabled, setAutoStartEnabled] = useState(false);
   const [autoStartLoading, setAutoStartLoading] = useState(true);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [lanShareEnabled, setLanShareEnabled] = useState(false);
+  const [localIp, setLocalIp] = useState("127.0.0.1");
+  const [lanShareLoading, setLanShareLoading] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -119,6 +120,34 @@ export function Settings() {
     };
 
     initDocRoot();
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+    const initializeLanSync = async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const ip = await invoke<string>("get_local_ip");
+        if (mounted && ip) {
+          setLocalIp(ip);
+        }
+
+        const persisted = getSettings();
+        if (persisted.lanShareEnabled) {
+          await invoke("toggle_local_server", {
+            enable: true,
+            port: persisted.lanSharePort || 9527,
+          });
+        }
+      } catch (error) {
+        console.error("[Settings] Failed to initialize LAN sync state:", error);
+      }
+    };
+
+    initializeLanSync();
     return () => {
       mounted = false;
     };
@@ -179,6 +208,32 @@ export function Settings() {
       setActionError(`开机自启动设置失败：${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setAutoStartLoading(false);
+    }
+  };
+
+  const handleLanShareChange = async (nextEnabled: boolean) => {
+    if (lanShareLoading) return;
+    setLanShareLoading(true);
+    setActionError(null);
+
+    const prevEnabled = settings.lanShareEnabled;
+    const nextSettings = { ...settings, lanShareEnabled: nextEnabled };
+    setSettings(nextSettings);
+    updateSettings({ lanShareEnabled: nextEnabled });
+
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("toggle_local_server", {
+        enable: nextEnabled,
+        port: nextSettings.lanSharePort || 9527,
+      });
+    } catch (error) {
+      console.error("[Settings] Failed to toggle local LAN server:", error);
+      setSettings({ ...nextSettings, lanShareEnabled: prevEnabled });
+      updateSettings({ lanShareEnabled: prevEnabled });
+      setActionError(`局域网共享切换失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setLanShareLoading(false);
     }
   };
 
@@ -434,19 +489,20 @@ export function Settings() {
           <input
             type="checkbox"
             className="sr-only peer"
-            checked={lanShareEnabled}
-            onChange={(e) => setLanShareEnabled(e.target.checked)}
+            checked={settings.lanShareEnabled}
+            onChange={(e) => handleLanShareChange(e.target.checked)}
+            disabled={lanShareLoading}
           />
           <span className="absolute inset-0 rounded-full bg-gray-300 dark:bg-gray-600 transition-colors peer-checked:bg-[#88B5D3]" />
-          <span className={`relative inline-block h-5 w-5 rounded-full bg-white transition-transform ${lanShareEnabled ? "translate-x-6" : "translate-x-1"}`} />
+          <span className={`relative inline-block h-5 w-5 rounded-full bg-white transition-transform ${settings.lanShareEnabled ? "translate-x-6" : "translate-x-1"}`} />
         </label>
       </div>
 
       <div className="glass-card rounded-2xl p-5">
         <p className="text-sm font-semibold text-gray-900 dark:text-white">局域网地址</p>
-        <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">内网 IP:端口（占位）</p>
+        <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">内网 IP:端口</p>
         <div className="mt-2 rounded-xl border border-gray-200/80 dark:border-[#30435c] bg-white/80 dark:bg-[#0f1826]/70 px-4 py-2.5 text-sm font-mono text-gray-700 dark:text-gray-200">
-          http://192.168.1.88:9527
+          {`http://${localIp}:${settings.lanSharePort || 9527}`}
         </div>
       </div>
 

@@ -1,135 +1,41 @@
 # 更新日志（2026-02-25）
 
-## 概览
-本次更新完成 Phase 1（桩代码补全）下半场的核心内容，重点是：
-- 知识库（Notes）从本地缓存树升级为“可从磁盘真实重建”的文件树
-- 知识库搜索从纯 UI 升级为可用的递归过滤
-- 设置中心 Sync / Exam / Privacy 三个占位页替换为真实骨架 UI
+## v0.1.1（当前基线）
+
+### 已完成（Phase 2）
+- Quiz 完成「录题 - 刷题 - 判题」闭环，题库读写全链路接入 SQLite。
+- 资源页可触发真实 AI 出题流程，支持从本地资源读取文本后生成并入库。
+- 复习调度升级为基础 SM-2（`interval` / `ease_factor` / `next_review`）。
+- 新增「今日待复习」视图与 `get_due_questions` 查询。
+- Notes AI 聊天记录已迁移到 SQLite（不再依赖 localStorage）。
+
+### 关键能力状态
+- AI 默认模型：`deepseek-ai/DeepSeek-V3.2`
+- AI 客户端：SiliconFlow OpenAI 兼容接口 + SSE 流式输出
+- 知识库/资源/题库：已形成可持续迭代的数据基座
 
 ---
 
-## 新增与改进
+## Phase 3 进展（局域网共享）
 
-### 1) Notes：物理目录同步（Rust + Frontend）
-- 新增 Tauri Command：`scan_notes_directory`
-- Rust 端递归扫描 `Documents/EVA_Knowledge_Base/Notes`
-- 返回树节点结构：`name`、`path`、`is_dir`、`children`
-- 前端在 `Notes.tsx` 挂载时调用扫描命令，使用磁盘结果覆盖旧缓存树
-- 新增「刷新磁盘目录」按钮，可手动触发重新扫描
+### 目标
+- 将 Settings「同步与备份」从占位 UI 升级为真实系统状态。
+- 建立本地 HTTP 服务基座，为 iPad/同网设备访问铺路。
 
-### 2) Notes：搜索过滤逻辑落地
-- 搜索框新增受控状态：`searchKeyword`
-- 新增递归过滤算法：
-  - 命中文件/文件夹会被保留
-  - 命中节点的父级文件夹会自动展开
-- 搜索结果为空时展示「未找到匹配结果」提示
+### 已落地（本次）
+- Rust 命令：`get_local_ip`（返回真实局域网 IPv4）。
+- Rust 命令：`toggle_local_server(enable, port)`（后台启停本地服务）。
+- Axum 服务升级：
+  - 加入 CORS 中间件（开发调试跨域放开）。
+  - 托管静态前端资源（`dist/build`），iPad 访问 `http://<IP>:9527` 可直接渲染页面。
+- REST API 新增：
+  - `GET /api/quiz/all`
+  - `GET /api/quiz/due`
+- 题库查询逻辑抽离为公共 SQLite 函数，Tauri Command 与 Axum Handler 复用同一套底层查询。
+- 前端新增 `src/utils/apiBridge.ts`：
+  - Tauri 环境走 `invoke`
+  - Web 环境走 HTTP（`http://<hostname>:9527/api/quiz/*`）
+- Quiz 页面已替换直接 `invoke` 调用，改为统一桥接层。
 
-### 3) Settings：三个占位标签页替换为真实骨架
-- **同步与备份（Sync）**
-  - 启用局域网共享开关
-  - 内网 IP:端口占位卡片
-  - Tailscale 状态占位卡片
-- **考研目标（Exam）**
-  - 目标院校、总分目标、考试日期输入框
-  - 408 / 数一 / 英一 / 政治目标分数卡片
-- **隐私与安全（Privacy）**
-  - 存储用量面板（占位数值）
-  - 分类清理按钮（草稿、树缓存、文件缓存、任务回退）
-  - 红色“一键清空”按钮
-
----
-
-## 关联实现文件
-- `src-tauri/src/lib.rs`
-  - 新增 `NotesFsNode` 结构
-  - 新增 `scan_notes_directory_sync`
-  - 新增 `scan_notes_directory` 命令并注册到 `invoke_handler`
-- `src/pages/Notes.tsx`
-  - 新增磁盘同步加载逻辑（挂载 + 刷新）
-  - 搜索状态与递归过滤逻辑
-  - 工具栏新增刷新按钮
-- `src/pages/Settings.tsx`
-  - 新增 `renderSync` / `renderExam` / `renderPrivacy`
-  - 用真实骨架替换 `sync/exam/privacy` 三个 placeholder
-
----
-
-## 已知边界
-- Settings 三个新标签页当前为“骨架层”，未接真实后端逻辑（符合当前阶段目标）
-- Notes 搜索为“树名匹配”，全文检索（文件内容级）尚未接入
-
----
-
-## 下一步建议（用于下次 Release）
-1. 将 Sync 页接入真实 LAN 服务状态与地址检测
-2. 将 Privacy 页接入真实存储统计与清理命令
-3. 将 Notes 搜索扩展为文件内容级全文检索
-
----
-
-## AI 赋能阶段（SiliconFlow）补充记录
-
-### 4) Settings：AI 配置已激活
-- API Key 输入与模型选择已可持久化保存
-- 默认模型改为 `deepseek-ai/DeepSeek-V3.2`
-- 保留密码掩码与 👁️ 显示/隐藏
-
-### 5) 新增统一 AI 客户端（流式）
-- 新增 `src/utils/aiClient.ts`
-- 提供 `chatCompletion`（AsyncGenerator）与 `chatCompletionToText`
-- 兼容 OpenAI 协议，Endpoint：`https://api.siliconflow.cn/v1/chat/completions`
-- 支持 SSE 流式解析与增量输出
-
-### 6) Notes：最小连通测试已落地
-- 知识库 AI 面板已接入 `chatCompletion` 流式函数
-- 输入「你好」可看到流式打字机效果并得到 DeepSeek 回复
-- 模型下拉切换已与本地缓存联动
-
-### 7) SiliconFlow 模型名兼容修复
-- 修复历史缓存模型名 `deepseek-v3` 导致的 400 报错（Model does not exist）
-- `aiClient` 新增模型别名归一化：旧值会自动映射到 `deepseek-ai/DeepSeek-V3.2`
-- 启动请求时会自愈写回 `eva.ai.model`，避免后续重复触发同类错误
-
-### 8) Notes：AI 对话渲染升级（LaTeX + 代码高亮）
-- AI 对话区宽度扩展，聊天内容区可视空间更大
-- 新增 Markdown 渲染增强：
-  - 数学公式支持：`remark-math` + `rehype-katex`
-  - 代码高亮支持：`rehype-highlight` + `highlight.js`
-- AI 回复从纯文本展示升级为 Markdown 流式展示，便于阅读公式与代码片段
-
-### 9) Phase 2 启动：Quiz 题库数据库基座
-- SQLite 新增 `questions` 表（题目主体、选项、答案、解析、来源、难度、复习统计字段）
-- 新增索引：
-  - `idx_questions_subject`
-  - `idx_questions_next_review`
-- 新增 Tauri 命令：
-  - `create_question`
-  - `get_questions`
-- 已注册到 `invoke_handler`，为 Quiz 页面重构与 AI 生成入库打通后端基础
-
-### 10) Phase 2：练功房“录题 - 刷题 - 判题”闭环落地
-- `Quiz.tsx` 已移除硬编码占位题，改为真实题库渲染
-- 新增「录入新题」Modal：
-  - 科目（408/数一/英一/政治）
-  - 题型（当前为单选题）
-  - 题干、A/B/C/D 选项、正确答案、解析
-  - 提交后调用 `create_question` 入库并自动刷新列表
-- 刷题面板已对接 `get_questions`，支持按科目切换拉取/刷新
-- 题干与解析支持 Markdown + LaTeX 渲染：`react-markdown + remark-math + rehype-katex`
-- 新增后端命令 `answer_question(id, is_correct)`：
-  - `review_count + 1`
-  - 若答对则 `correct_count + 1`
-  - 更新 `next_review`
-- 前端判题反馈：
-  - 答对选项标绿、答错选项标红
-  - 答题后自动展开解析区并静默落盘刷题记录
-
-### 11) Phase 2 冲刺：真实 AI 出题 + SM-2 + 今日待复习
-- 资源页「生成练功房」已可携带选中文件路径跳转 Quiz，并触发真实生成流程
-- 后端新增 `read_local_file_text(path)`：支持读取本地 `.md/.txt` 文本（PDF 暂不支持）
-- Quiz 已接入 `aiClient`（SiliconFlow / DeepSeek），根据资源文本调用 AI 生成 3 道单选题
-- AI 返回内容按严格 JSON 解析后自动入库（循环调用 `create_question`）并刷新题库
-- `answer_question` 升级为基础 SM-2：
-  - 维护 `interval`、`ease_factor`、`next_review`
-  - 答对按 1/6/乘 EF 推进间隔，答错重置为 1 天，EF 最低 1.3
-- 新增 `get_due_questions`，前端上线「今日待复习」视图，可只刷到期题
+### 说明
+- 本日志已按发布准备做精简，历史细节改由 Git 提交记录追溯。

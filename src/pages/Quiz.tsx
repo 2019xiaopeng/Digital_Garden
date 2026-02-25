@@ -7,6 +7,7 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import { chatCompletionToText } from "../utils/aiClient";
+import { answerQuizQuestion, createQuizQuestion, fetchQuizQuestions, readLocalResourceText } from "../utils/apiBridge";
 import "katex/dist/katex.min.css";
 
 type Subject = "408" | "数一" | "英一" | "政治";
@@ -90,11 +91,6 @@ export function Quiz() {
   const resourcePaths = locationState.selectedResourcePaths || [];
   const subjects: Subject[] = ["408", "数一", "英一", "政治"];
 
-  const getInvoke = async () => {
-    const mod = await import("@tauri-apps/api/core");
-    return mod.invoke;
-  };
-
   const normalizeAiJsonText = (raw: string): string => {
     const trimmed = raw.trim();
     if (trimmed.startsWith("```")) {
@@ -161,10 +157,10 @@ export function Quiz() {
     setIsLoading(true);
     setLoadError(null);
     try {
-      const invoke = await getInvoke();
-      const rows = mode === "due"
-        ? await invoke<Question[]>("get_due_questions", { subject })
-        : await invoke<Question[]>("get_questions");
+      const rows = await fetchQuizQuestions({
+        mode: mode === "due" ? "due" : "all",
+        subject,
+      });
       const filtered = rows.filter((item) => item.subject === subject && item.type === "choice");
       setQuestions(filtered);
       setCurrentIndex(0);
@@ -179,8 +175,7 @@ export function Quiz() {
 
   const refreshDueCount = async (subject: Subject) => {
     try {
-      const invoke = await getInvoke();
-      const dueRows = await invoke<Question[]>("get_due_questions", { subject });
+      const dueRows = await fetchQuizQuestions({ mode: "due", subject });
       setDueCount(dueRows.length);
     } catch {
       setDueCount(0);
@@ -204,12 +199,11 @@ export function Quiz() {
       setGeneratingText("正在读取资源文本...");
 
       try {
-        const invoke = await getInvoke();
         const textChunks: string[] = [];
 
         for (const path of resourcePaths.slice(0, 3)) {
           try {
-            const content = await invoke<string>("read_local_file_text", { path });
+            const content = await readLocalResourceText(path);
             textChunks.push(`## 来源文件: ${path}\n${content.slice(0, 8000)}`);
           } catch (err) {
             console.warn("[Quiz] read_local_file_text failed:", path, err);
@@ -245,24 +239,22 @@ export function Quiz() {
         setGeneratingText("正在写入题库...");
         for (const item of generated) {
           const id = `q-ai-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-          await invoke("create_question", {
-            question: {
-              id,
-              subject: activeSubject,
-              type: "choice",
-              stem: item.stem,
-              options: JSON.stringify(item.options),
-              answer: item.answer,
-              explanation: item.explanation,
-              source_files: JSON.stringify(resourcePaths),
-              difficulty: 2,
-              created_at: new Date().toISOString(),
-              next_review: new Date().toISOString(),
-              review_count: 0,
-              correct_count: 0,
-              ease_factor: 2.5,
-              interval: 0,
-            },
+          await createQuizQuestion({
+            id,
+            subject: activeSubject,
+            type: "choice",
+            stem: item.stem,
+            options: JSON.stringify(item.options),
+            answer: item.answer,
+            explanation: item.explanation,
+            source_files: JSON.stringify(resourcePaths),
+            difficulty: 2,
+            created_at: new Date().toISOString(),
+            next_review: new Date().toISOString(),
+            review_count: 0,
+            correct_count: 0,
+            ease_factor: 2.5,
+            interval: 0,
           });
         }
 
@@ -303,31 +295,28 @@ export function Quiz() {
 
     setIsCreating(true);
     try {
-      const invoke = await getInvoke();
       const id = `q-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      await invoke("create_question", {
-        question: {
-          id,
-          subject: createForm.subject,
-          type: createForm.type,
-          stem: createForm.stem.trim(),
-          options: JSON.stringify([
-            createForm.optionA.trim(),
-            createForm.optionB.trim(),
-            createForm.optionC.trim(),
-            createForm.optionD.trim(),
-          ]),
-          answer: createForm.answer,
-          explanation: createForm.explanation.trim(),
-          source_files: "[]",
-          difficulty: 2,
-          created_at: new Date().toISOString(),
-          next_review: null,
-          review_count: 0,
-          correct_count: 0,
-          ease_factor: 2.5,
-          interval: 0,
-        },
+      await createQuizQuestion({
+        id,
+        subject: createForm.subject,
+        type: createForm.type,
+        stem: createForm.stem.trim(),
+        options: JSON.stringify([
+          createForm.optionA.trim(),
+          createForm.optionB.trim(),
+          createForm.optionC.trim(),
+          createForm.optionD.trim(),
+        ]),
+        answer: createForm.answer,
+        explanation: createForm.explanation.trim(),
+        source_files: "[]",
+        difficulty: 2,
+        created_at: new Date().toISOString(),
+        next_review: null,
+        review_count: 0,
+        correct_count: 0,
+        ease_factor: 2.5,
+        interval: 0,
       });
 
       setShowCreateModal(false);
@@ -409,11 +398,7 @@ export function Quiz() {
 
     setIsSubmittingAnswer(true);
     try {
-      const invoke = await getInvoke();
-      await invoke("answer_question", {
-        id: currentQuestion.id,
-        isCorrect: optionId === correctAnswer,
-      });
+      await answerQuizQuestion(currentQuestion.id, optionId === correctAnswer);
     } catch (err: any) {
       setLoadError(err?.message || String(err));
     } finally {
