@@ -64,6 +64,10 @@ const shortcutList = [
   { keys: "Shift + 点击", desc: "范围多选知识库文件" },
   { keys: "Escape", desc: "关闭右键菜单 / 取消选中" },
   { keys: "拖拽文件到文件夹", desc: "移动文件到目标目录" },
+  { keys: "Ctrl/Cmd + N", desc: "任务页：新建任务" },
+  { keys: "Ctrl/Cmd + Enter", desc: "任务页：提交新任务（新增状态下）" },
+  { keys: "Ctrl/Cmd + Shift + L", desc: "留痕页：新建留痕" },
+  { keys: "Ctrl/Cmd + Enter", desc: "留痕页：保存当前留痕" },
 ];
 
 export function Settings() {
@@ -417,18 +421,18 @@ export function Settings() {
 
   return (
     <div className="animate-in fade-in slide-in-from-bottom-4 duration-700 ease-out">
-      <section className="rounded-[30px] border border-white/65 dark:border-[#2b3c53]/90 bg-white/58 dark:bg-[#0f1828]/58 backdrop-blur-xl shadow-[0_18px_55px_rgba(15,23,42,0.08)] dark:shadow-[0_18px_55px_rgba(2,8,23,0.5)] p-5 md:p-6 h-[74vh] min-h-[560px]">
-        <header className="flex items-end justify-between gap-4 mb-5">
-          <div>
-            <h1 className="text-3xl font-bold tracking-tight text-gray-900 dark:text-white sm:text-4xl">系统设置</h1>
-            <p className="mt-2 text-gray-600 dark:text-gray-400">按左侧标签管理各模块配置。</p>
-          </div>
-          <button onClick={save} className="px-4 py-2.5 rounded-2xl bg-[#88B5D3] hover:bg-[#6f9fbe] text-white text-sm font-semibold flex items-center gap-2 shadow-sm transition-colors flex-shrink-0">
-            <Save className="w-4 h-4" /> 保存设置
-          </button>
-        </header>
+      <header className="flex items-end justify-between gap-4 mb-5">
+        <div>
+          <h1 className="text-3xl font-bold tracking-tight text-gray-900 dark:text-white sm:text-4xl">系统设置</h1>
+          <p className="mt-2 text-gray-600 dark:text-gray-400">按左侧标签管理各模块配置。</p>
+        </div>
+        <button onClick={save} className="px-4 py-2.5 rounded-2xl bg-[#88B5D3] hover:bg-[#6f9fbe] text-white text-sm font-semibold flex items-center gap-2 shadow-sm transition-colors flex-shrink-0">
+          <Save className="w-4 h-4" /> 保存设置
+        </button>
+      </header>
 
-        <div className="flex gap-5 h-[calc(100%-5.25rem)] min-h-0">
+      <section className="rounded-[30px] border border-white/65 dark:border-[#2b3c53]/90 bg-white/58 dark:bg-[#0f1828]/58 backdrop-blur-xl shadow-[0_18px_55px_rgba(15,23,42,0.08)] dark:shadow-[0_18px_55px_rgba(2,8,23,0.5)] p-5 md:p-6 h-[74vh] min-h-[560px]">
+        <div className="flex gap-5 h-full min-h-0">
           <aside className="w-56 flex-shrink-0 border-r border-gray-200/75 dark:border-[#2a3b52] pr-3 overflow-y-auto">
             <nav className="space-y-1">
               {navItems.map((item) => {
