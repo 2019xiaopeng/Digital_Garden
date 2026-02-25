@@ -179,24 +179,6 @@ async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, String> {
     .map_err(|e| format!("Failed to create tasks table: {}", e))?;
 
     sqlx::query(
-        "CREATE TABLE IF NOT EXISTS daily_logs (
-            id TEXT PRIMARY KEY,
-            date TEXT NOT NULL,
-            title TEXT NOT NULL,
-            content TEXT DEFAULT '',
-            mood TEXT DEFAULT 'neutral',
-            sync_rate INTEGER DEFAULT 80,
-            tags TEXT DEFAULT '',
-            auto_generated INTEGER DEFAULT 0,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        )",
-    )
-    .execute(&pool)
-    .await
-    .map_err(|e| format!("Failed to create daily_logs table: {}", e))?;
-
-    sqlx::query(
         "CREATE TABLE IF NOT EXISTS focus_sessions (
             id TEXT PRIMARY KEY,
             date TEXT NOT NULL,
@@ -225,12 +207,23 @@ async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, String> {
     .await
     .map_err(|e| format!("Failed to create video_bookmarks table: {}", e))?;
 
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS resources (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            path TEXT NOT NULL,
+            file_type TEXT DEFAULT 'file',
+            subject TEXT DEFAULT '',
+            size_bytes INTEGER DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )",
+    )
+    .execute(&pool)
+    .await
+    .map_err(|e| format!("Failed to create resources table: {}", e))?;
+
     // Create index for date-based queries
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_tasks_date ON tasks(date)")
-        .execute(&pool)
-        .await
-        .ok();
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_daily_logs_date ON daily_logs(date)")
         .execute(&pool)
         .await
         .ok();
@@ -239,6 +232,10 @@ async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, String> {
         .await
         .ok();
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_video_bookmarks_created_at ON video_bookmarks(created_at DESC)")
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_resources_subject ON resources(subject)")
         .execute(&pool)
         .await
         .ok();
@@ -795,6 +792,207 @@ async fn delete_video_bookmark(id: String, db: State<'_, Arc<Mutex<AppDb>>>) -> 
         .await
         .map_err(|e| format!("Failed to delete video bookmark: {}", e))?;
     Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════
+// Resource CRUD Commands (SQLite)
+// ═══════════════════════════════════════════════════════════
+
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
+pub struct Resource {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    pub file_type: String,
+    pub subject: String,
+    pub size_bytes: i64,
+    pub created_at: String,
+}
+
+#[tauri::command]
+async fn get_resources(db: State<'_, Arc<Mutex<AppDb>>>) -> Result<Vec<Resource>, String> {
+    let db = db.lock().await;
+    let rows = sqlx::query_as::<_, Resource>(
+        "SELECT id, name, path, file_type, subject, size_bytes, created_at FROM resources ORDER BY created_at DESC",
+    )
+    .fetch_all(&db.db)
+    .await
+    .map_err(|e| format!("Failed to fetch resources: {}", e))?;
+    Ok(rows)
+}
+
+#[tauri::command]
+async fn add_resource(
+    resource: Resource,
+    db: State<'_, Arc<Mutex<AppDb>>>,
+) -> Result<Resource, String> {
+    let db = db.lock().await;
+    sqlx::query(
+        "INSERT OR REPLACE INTO resources (id, name, path, file_type, subject, size_bytes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&resource.id)
+    .bind(&resource.name)
+    .bind(&resource.path)
+    .bind(&resource.file_type)
+    .bind(&resource.subject)
+    .bind(resource.size_bytes)
+    .bind(&resource.created_at)
+    .execute(&db.db)
+    .await
+    .map_err(|e| format!("Failed to add resource: {}", e))?;
+    Ok(resource)
+}
+
+#[tauri::command]
+async fn delete_resource(id: String, db: State<'_, Arc<Mutex<AppDb>>>) -> Result<(), String> {
+    let db = db.lock().await;
+    sqlx::query("DELETE FROM resources WHERE id = ?")
+        .bind(id)
+        .execute(&db.db)
+        .await
+        .map_err(|e| format!("Failed to delete resource: {}", e))?;
+    Ok(())
+}
+
+/// Recursively copy an entire folder into Resources/ and return all copied file entries.
+#[tauri::command]
+async fn batch_copy_folder_to_resources(
+    app: tauri::AppHandle,
+    folder_path: String,
+    db: State<'_, Arc<Mutex<AppDb>>>,
+) -> Result<Vec<Resource>, String> {
+    let root = PathBuf::from(ensure_workspace_dirs(&app).await?);
+    let resources_base = root.join("Resources");
+    let source = PathBuf::from(&folder_path);
+
+    if !source.is_dir() {
+        return Err(format!("Source is not a directory: {}", folder_path));
+    }
+
+    let folder_name = source
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("imported")
+        .to_string();
+
+    let dest_dir = resources_base.join(&folder_name);
+    fs::create_dir_all(&dest_dir)
+        .await
+        .map_err(|e| format!("Failed to create dest dir: {}", e))?;
+
+    // Recursively collect all files
+    let mut stack: Vec<PathBuf> = vec![source.clone()];
+    let mut entries: Vec<Resource> = Vec::new();
+
+    while let Some(dir) = stack.pop() {
+        let mut reader = fs::read_dir(&dir)
+            .await
+            .map_err(|e| format!("Failed to read dir {}: {}", dir.to_string_lossy(), e))?;
+
+        while let Some(entry) = reader
+            .next_entry()
+            .await
+            .map_err(|e| format!("Failed to iterate dir: {}", e))?
+        {
+            let entry_path = entry.path();
+            let metadata = fs::metadata(&entry_path)
+                .await
+                .map_err(|e| format!("Failed to stat {}: {}", entry_path.to_string_lossy(), e))?;
+
+            if metadata.is_dir() {
+                // Mirror sub-directory structure
+                let rel = entry_path
+                    .strip_prefix(&source)
+                    .map_err(|e| format!("strip_prefix error: {}", e))?;
+                let sub_dest = dest_dir.join(rel);
+                fs::create_dir_all(&sub_dest)
+                    .await
+                    .map_err(|e| format!("Failed to create sub dir: {}", e))?;
+                stack.push(entry_path);
+            } else if metadata.is_file() {
+                let rel = entry_path
+                    .strip_prefix(&source)
+                    .map_err(|e| format!("strip_prefix error: {}", e))?;
+                let dest_file = dest_dir.join(rel);
+                // Ensure parent directory exists
+                if let Some(parent) = dest_file.parent() {
+                    fs::create_dir_all(parent)
+                        .await
+                        .map_err(|e| format!("Failed to create parent dir: {}", e))?;
+                }
+                fs::copy(&entry_path, &dest_file)
+                    .await
+                    .map_err(|e| format!("Failed to copy file: {}", e))?;
+
+                let file_name = entry_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+
+                let ext = entry_path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("file")
+                    .to_lowercase();
+
+                let rel_path = dest_file
+                    .strip_prefix(&resources_base)
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| dest_file.to_string_lossy().to_string());
+
+                let now = Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+                let id = format!(
+                    "res-{}-{}",
+                    chrono::Utc::now().timestamp_millis(),
+                    &uuid_short()
+                );
+
+                entries.push(Resource {
+                    id,
+                    name: file_name,
+                    path: rel_path,
+                    file_type: ext,
+                    subject: String::new(),
+                    size_bytes: metadata.len() as i64,
+                    created_at: now,
+                });
+            }
+        }
+    }
+
+    // Batch insert into SQLite
+    let db = db.lock().await;
+    for res in &entries {
+        sqlx::query(
+            "INSERT OR REPLACE INTO resources (id, name, path, file_type, subject, size_bytes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&res.id)
+        .bind(&res.name)
+        .bind(&res.path)
+        .bind(&res.file_type)
+        .bind(&res.subject)
+        .bind(res.size_bytes)
+        .bind(&res.created_at)
+        .execute(&db.db)
+        .await
+        .map_err(|e| format!("Failed to insert resource: {}", e))?;
+    }
+
+    Ok(entries)
+}
+
+/// Generate a short random ID segment
+fn uuid_short() -> String {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    let s = RandomState::new();
+    let mut hasher = s.build_hasher();
+    hasher.write_u128(std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos());
+    format!("{:x}", hasher.finish())
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1885,6 +2083,10 @@ pub fn run() {
             batch_delete_notes_files,
             batch_move_notes_items,
             copy_files_to_resources,
+            batch_copy_folder_to_resources,
+            get_resources,
+            add_resource,
+            delete_resource,
             write_notes_file,
             create_notes_folder,
             delete_notes_item,

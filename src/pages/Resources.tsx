@@ -1,21 +1,21 @@
-import { FileText, Image as ImageIcon, FileArchive, Download, Search, Filter, CheckSquare, Square, Swords, Upload, Folder } from "lucide-react";
-import React, { useMemo, useState } from "react";
+import { FileText, Image as ImageIcon, FileArchive, Download, Search, Filter, CheckSquare, Square, Swords, Upload, Folder, Trash2 } from "lucide-react";
+import React, { useCallback, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { cn } from "../lib/utils";
 import { isTauriAvailable } from "../lib/dataService";
 import { extractBilibiliVideoUrl, openExternalUrl } from "../lib/videoBookmark";
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
+import { openPath } from "@tauri-apps/plugin-opener";
 
 type ResourceItem = {
-  id: number;
+  id: string;
   name: string;
-  size: string;
-  type: string;
-  date: string;
+  path: string;
+  file_type: string;
   subject: string;
-  folder?: string;
-  path?: string;
+  size_bytes: number;
+  created_at: string;
 };
 
 type VideoBookmark = {
@@ -46,9 +46,14 @@ type BilibiliApiResponse = {
   duration: number;
 };
 
-const initialResources: ResourceItem[] = [
-  
-];
+function formatFileSize(bytes: number): string {
+  if (bytes <= 0) return "-";
+  const units = ["B", "KB", "MB", "GB"];
+  let i = 0;
+  let size = bytes;
+  while (size >= 1024 && i < units.length - 1) { size /= 1024; i++; }
+  return `${size.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+}
 
 function getIcon(type: string) {
   switch (type) {
@@ -60,20 +65,26 @@ function getIcon(type: string) {
 }
 
 export function Resources() {
-  const [resources, setResources] = useState(initialResources);
-  const [selectedIds, setSelectedIds] = useState<number[]>([]);
+  const [resources, setResources] = useState<ResourceItem[]>([]);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [subjectFilter, setSubjectFilter] = useState("all");
+  const [searchQuery, setSearchQuery] = useState("");
   const [bilibiliInput, setBilibiliInput] = useState("");
   const [bookmarkToast, setBookmarkToast] = useState<string | null>(null);
   const [videoBookmarks, setVideoBookmarks] = useState<VideoBookmark[]>([]);
   const navigate = useNavigate();
 
+  // Load resources + video bookmarks from SQLite on mount
   React.useEffect(() => {
-    const loadBookmarks = async () => {
+    const loadData = async () => {
       if (!isTauriAvailable()) return;
       try {
-        const rows = await invoke<DbVideoBookmark[]>("get_video_bookmarks");
-        setVideoBookmarks(rows.map((row) => ({
+        const [resRows, bmRows] = await Promise.all([
+          invoke<ResourceItem[]>("get_resources"),
+          invoke<DbVideoBookmark[]>("get_video_bookmarks"),
+        ]);
+        setResources(resRows);
+        setVideoBookmarks(bmRows.map((row) => ({
           id: row.id,
           bvid: row.bvid,
           title: row.title,
@@ -83,17 +94,41 @@ export function Resources() {
           createdAt: row.created_at,
         })));
       } catch (error) {
-        console.error("[Resources] failed to load video bookmarks:", error);
+        console.error("[Resources] failed to load data:", error);
       }
     };
-    loadBookmarks();
+    loadData();
   }, []);
 
-  const toggleSelection = (id: number) => {
+  const toggleSelection = (id: string) => {
     setSelectedIds(prev => 
       prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]
     );
   };
+
+  const handleDeleteResource = useCallback(async (id: string) => {
+    try {
+      await invoke("delete_resource", { id });
+      setResources(prev => prev.filter(r => r.id !== id));
+      setSelectedIds(prev => prev.filter(x => x !== id));
+    } catch (error) {
+      console.error("[Resources] delete resource failed:", error);
+    }
+  }, []);
+
+  const handleOpenResource = useCallback(async (resource: ResourceItem) => {
+    try {
+      const resourcesDir = await invoke<string>("get_resources_dir");
+      const fullPath = `${resourcesDir}${resource.path.startsWith("/") || resource.path.startsWith("\\") ? "" : "/"}${resource.path}`;
+      // Normalise to OS path separators
+      const normalised = fullPath.replace(/\//g, "\\");
+      await openPath(normalised);
+    } catch (error) {
+      console.error("[Resources] open resource failed:", error);
+      setBookmarkToast(`打开文件失败：${error}`);
+      setTimeout(() => setBookmarkToast(null), 2000);
+    }
+  }, []);
 
   const handleGenerateQuiz = () => {
     if (selectedIds.length === 0) return;
@@ -107,27 +142,37 @@ export function Resources() {
       const list = Array.isArray(picked) ? picked : picked ? [picked] : [];
       if (list.length === 0) return;
 
-      const { invoke } = await import("@tauri-apps/api/core");
       type CopiedFileResult = { source_path: string; file_name: string; dest_path: string };
       const copied = await invoke<CopiedFileResult[]>("copy_files_to_resources", {
         sourcePaths: list.map((p) => String(p)),
         relativeDir: "",
       });
 
-      const newResources: ResourceItem[] = copied.map((item, index) => {
-        const ext = item.file_name.includes(".") ? item.file_name.split('.').pop()?.toLowerCase() || "unknown" : "unknown";
-        return {
-          id: Date.now() + index,
-          name: item.file_name,
-          size: "-",
-          type: ext,
-          date: new Date().toISOString().split('T')[0],
-          subject: "未分类",
-          path: item.dest_path,
-        };
-      });
+      const resourcesDir = await invoke<string>("get_resources_dir");
+      const newResources: ResourceItem[] = [];
 
-      setResources([...newResources, ...resources]);
+      for (const item of copied) {
+        const ext = item.file_name.includes(".") ? item.file_name.split('.').pop()?.toLowerCase() || "file" : "file";
+        // Compute relative path from Resources/ root
+        const relPath = item.dest_path.startsWith(resourcesDir)
+          ? item.dest_path.slice(resourcesDir.length).replace(/^\/|^\\/, "")
+          : item.file_name;
+        const now = new Date().toISOString();
+        const res: ResourceItem = {
+          id: `res-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          name: item.file_name,
+          path: relPath,
+          file_type: ext,
+          subject: "",
+          size_bytes: 0,
+          created_at: now,
+        };
+        // Persist to SQLite
+        await invoke("add_resource", { resource: res });
+        newResources.push(res);
+      }
+
+      setResources(prev => [...newResources, ...prev]);
     } catch (error) {
       console.error("[Resources] file upload failed:", error);
     }
@@ -137,19 +182,19 @@ export function Resources() {
     try {
       const picked = await open({ directory: true, multiple: false });
       if (!picked || typeof picked !== "string") return;
-      const folderName = picked.split(/[\\/]/).pop() || "本地目录";
-      const mockFolderEntry: ResourceItem = {
-        id: Date.now(),
-        name: `${folderName} (目录)`,
-        size: "-",
-        type: "folder",
-        date: new Date().toISOString().split('T')[0],
-        subject: "未分类",
-        folder: folderName,
-      };
-      setResources([mockFolderEntry, ...resources]);
+
+      setBookmarkToast("正在导入文件夹，请稍候…");
+      const imported = await invoke<ResourceItem[]>("batch_copy_folder_to_resources", {
+        folderPath: picked,
+      });
+
+      setResources(prev => [...imported, ...prev]);
+      setBookmarkToast(`已导入 ${imported.length} 个文件`);
+      setTimeout(() => setBookmarkToast(null), 2000);
     } catch (error) {
       console.error("[Resources] folder upload failed:", error);
+      setBookmarkToast(`文件夹导入失败：${error}`);
+      setTimeout(() => setBookmarkToast(null), 2500);
     }
   };
 
@@ -179,7 +224,6 @@ export function Resources() {
       return {
         id: `video-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         bvid: payload.bvid || bvid,
-        url: `https://www.bilibili.com/video/${payload.bvid || bvid}`,
         title: payload.title || bvid,
         pic: payload.pic || "",
         ownerName: payload.owner_name || "未知UP主",
@@ -269,11 +313,21 @@ export function Resources() {
 
   const subjects = useMemo(() => {
     const set = new Set<string>(["all"]);
-    resources.forEach(item => set.add(item.subject));
+    resources.forEach(item => { if (item.subject) set.add(item.subject); });
     return Array.from(set);
   }, [resources]);
 
-  const visibleResources = resources.filter(resource => subjectFilter === "all" || resource.subject === subjectFilter);
+  const visibleResources = useMemo(() => {
+    let list = resources;
+    if (subjectFilter !== "all") {
+      list = list.filter(r => r.subject === subjectFilter);
+    }
+    if (searchQuery.trim()) {
+      const q = searchQuery.trim().toLowerCase();
+      list = list.filter(r => r.name.toLowerCase().includes(q) || r.subject.toLowerCase().includes(q));
+    }
+    return list;
+  }, [resources, subjectFilter, searchQuery]);
 
   return (
     <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-700 ease-out">
@@ -329,7 +383,9 @@ export function Resources() {
             <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 dark:text-gray-500" />
             <input 
               type="text" 
-              placeholder="Search files..." 
+              placeholder="搜索资料…" 
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
               className="pl-9 pr-4 py-2.5 bg-white dark:bg-gray-900 border border-gray-200/60 dark:border-gray-800 rounded-2xl text-sm font-medium text-gray-700 dark:text-gray-200 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all w-full md:w-64 shadow-sm"
             />
           </div>
@@ -428,14 +484,22 @@ export function Resources() {
                   "w-16 h-16 rounded-2xl flex items-center justify-center transition-all duration-300 shadow-sm border",
                   isSelected ? "bg-indigo-50 dark:bg-indigo-500/10 border-indigo-100 dark:border-indigo-500/30" : "bg-gray-50 dark:bg-gray-800 border-gray-100 dark:border-gray-800 group-hover:scale-110 group-hover:-rotate-3"
                 )}>
-                  {getIcon(file.type)}
+                  {getIcon(file.file_type)}
                 </div>
                 <div className="flex items-center gap-2">
                   <button 
-                    onClick={(e) => { e.stopPropagation(); /* download logic */ }}
+                    onClick={(e) => { e.stopPropagation(); handleOpenResource(file); }}
+                    title="在系统中打开文件"
                     className="w-10 h-10 bg-indigo-50 dark:bg-indigo-500/10 text-indigo-600 dark:text-indigo-300 rounded-xl flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all duration-300 hover:bg-indigo-600 hover:text-white shadow-sm hover:scale-105 active:scale-95"
                   >
                     <Download className="w-5 h-5" />
+                  </button>
+                  <button 
+                    onClick={(e) => { e.stopPropagation(); handleDeleteResource(file.id); }}
+                    title="删除此资源"
+                    className="w-10 h-10 bg-red-50 dark:bg-red-500/10 text-red-500 dark:text-red-400 rounded-xl flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all duration-300 hover:bg-red-600 hover:text-white shadow-sm hover:scale-105 active:scale-95"
+                  >
+                    <Trash2 className="w-5 h-5" />
                   </button>
                   <button className={cn(
                     "w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-300",
@@ -457,22 +521,22 @@ export function Resources() {
                   <span className={cn(
                     "px-3 py-1.5 rounded-lg uppercase tracking-widest text-[10px]",
                     isSelected ? "bg-indigo-50 dark:bg-indigo-500/10 text-indigo-600 dark:text-indigo-300" : "bg-gray-100 dark:bg-gray-800"
-                  )}>{file.size}</span>
-                  <span className="font-medium">{file.date}</span>
+                  )}>{formatFileSize(file.size_bytes)}</span>
+                  <span className="font-medium">{file.created_at?.split("T")[0] ?? ""}</span>
                 </div>
                 <div className="mt-3 flex flex-wrap gap-2">
                   <span className={cn(
                     "text-[10px] font-semibold px-2.5 py-1 rounded-full border",
                     isSelected ? "border-indigo-200 text-indigo-600 dark:text-indigo-300" : "border-gray-200 dark:border-gray-700 text-gray-500 dark:text-gray-400"
                   )}>
-                    {file.subject}
+                    {file.file_type.toUpperCase()}
                   </span>
-                  {file.folder && (
+                  {file.subject && (
                     <span className={cn(
                       "text-[10px] font-semibold px-2.5 py-1 rounded-full border",
                       isSelected ? "border-indigo-200 text-indigo-600 dark:text-indigo-300" : "border-gray-200 dark:border-gray-700 text-gray-500 dark:text-gray-400"
                     )}>
-                      {file.folder}
+                      {file.subject}
                     </span>
                   )}
                 </div>
