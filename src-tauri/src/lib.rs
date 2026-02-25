@@ -1,8 +1,12 @@
+use axum::body::Body;
 use axum::extract::{Path as AxumPath, Query, State as AxumState};
-use axum::http::StatusCode;
-use axum::routing::{get, get_service, put};
+use axum::http::{header, StatusCode, Uri};
+use axum::response::Response;
+use axum::routing::{get, put};
 use axum::{Json, Router};
 use chrono::{Local, Utc};
+use mime_guess::from_path;
+use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Component, Path, PathBuf};
@@ -10,10 +14,10 @@ use std::sync::Arc;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Manager, State};
+use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 use tokio::fs;
 use tokio::sync::{oneshot, Mutex};
 use tower_http::cors::CorsLayer;
-use tower_http::services::ServeDir;
 
 // ═══════════════════════════════════════════════════════════
 // Data Structures (shared between Rust & Frontend)
@@ -190,6 +194,75 @@ struct LocalServerState {
     runtime: Option<LocalServerRuntime>,
 }
 
+#[derive(RustEmbed)]
+#[folder = "../dist"]
+struct FrontendAssets;
+
+fn command_or_control_modifiers() -> Modifiers {
+    if cfg!(target_os = "macos") {
+        Modifiers::SUPER | Modifiers::SHIFT
+    } else {
+        Modifiers::CONTROL | Modifiers::SHIFT
+    }
+}
+
+fn toggle_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let visible = window.is_visible().unwrap_or(false);
+        let focused = window.is_focused().unwrap_or(false);
+
+        if visible && focused {
+            let _ = window.hide();
+        } else {
+            let _ = window.show();
+            let _ = window.unminimize();
+            let _ = window.set_focus();
+        }
+    }
+}
+
+fn normalize_embedded_asset_path(uri_path: &str) -> String {
+    let trimmed = uri_path.trim_start_matches('/');
+    if trimmed.is_empty() {
+        return "index.html".to_string();
+    }
+    trimmed
+        .split('/')
+        .filter(|seg| !seg.is_empty() && *seg != "." && *seg != "..")
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn embedded_asset_response(path: &str) -> Response<Body> {
+    if let Some(asset) = FrontendAssets::get(path) {
+        let mime = from_path(path).first_or_octet_stream();
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, mime.as_ref())
+            .body(Body::from(asset.data.into_owned()))
+            .unwrap_or_else(|_| Response::new(Body::from("Failed to render asset")));
+    }
+
+    if let Some(index) = FrontendAssets::get("index.html") {
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+            .body(Body::from(index.data.into_owned()))
+            .unwrap_or_else(|_| Response::new(Body::from("Failed to render index")));
+    }
+
+    Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .body(Body::from("Embedded frontend assets not found"))
+        .unwrap_or_else(|_| Response::new(Body::from("Not Found")))
+}
+
+async fn embedded_static_handler(uri: Uri) -> Response<Body> {
+    let path = normalize_embedded_asset_path(uri.path());
+    embedded_asset_response(&path)
+}
+
 async fn local_ping_handler() -> &'static str {
     "EVA Server is running"
 }
@@ -207,29 +280,6 @@ struct TasksQuery {
 #[derive(Debug, Deserialize)]
 struct NotesFileQuery {
     path: String,
-}
-
-fn resolve_static_assets_dir() -> PathBuf {
-    let mut candidates: Vec<PathBuf> = Vec::new();
-
-    if let Ok(current_dir) = std::env::current_dir() {
-        candidates.push(current_dir.join("dist"));
-        candidates.push(current_dir.join("build"));
-        candidates.push(current_dir.join("..").join("dist"));
-        candidates.push(current_dir.join("..").join("build"));
-    }
-
-    if let Ok(current_exe) = std::env::current_exe() {
-        if let Some(exe_dir) = current_exe.parent() {
-            candidates.push(exe_dir.join("dist"));
-            candidates.push(exe_dir.join("build"));
-        }
-    }
-
-    candidates
-        .into_iter()
-        .find(|candidate| candidate.is_dir())
-        .unwrap_or_else(|| PathBuf::from("dist"))
 }
 
 async fn db_fetch_all_questions(pool: &sqlx::SqlitePool) -> Result<Vec<Question>, String> {
@@ -578,12 +628,6 @@ async fn toggle_local_server(
         .map_err(|e| format!("启动局域网服务失败（端口 {}）: {}", port, e))?;
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-    let static_assets_dir = resolve_static_assets_dir();
-    log::info!(
-        "Local LAN server static assets dir: {}",
-        static_assets_dir.to_string_lossy()
-    );
-
     let app_handle_for_notes_tree = app.clone();
     let app_handle_for_notes_file = app.clone();
 
@@ -608,9 +652,7 @@ async fn toggle_local_server(
         )
         .route("/api/quiz/all", get(api_quiz_all_handler))
         .route("/api/quiz/due", get(api_quiz_due_handler))
-        .fallback_service(get_service(
-            ServeDir::new(static_assets_dir).append_index_html_on_directories(true),
-        ))
+        .fallback(embedded_static_handler)
         .layer(CorsLayer::permissive())
         .with_state(shared_db);
 
@@ -3111,6 +3153,15 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--minimized"]),
         ))
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _shortcut, event| {
+                    if event.state() == ShortcutState::Pressed {
+                        toggle_main_window(app);
+                    }
+                })
+                .build(),
+        )
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_http::init())
@@ -3127,8 +3178,11 @@ pub fn run() {
         .setup(|app| {
             app.manage(Arc::new(Mutex::new(LocalServerState::default())));
 
+            let shortcut = Shortcut::new(Some(command_or_control_modifiers()), Code::KeyE);
+            app.global_shortcut().register(shortcut)?;
+
             let tray_show =
-                MenuItem::with_id(app, "tray_show", "显示 EVA 终端", true, None::<&str>)?;
+                MenuItem::with_id(app, "tray_toggle", "显示/隐藏面板", true, None::<&str>)?;
             let tray_quit = MenuItem::with_id(app, "tray_quit", "退出系统", true, None::<&str>)?;
             let tray_menu = Menu::with_items(app, &[&tray_show, &tray_quit])?;
 
@@ -3136,13 +3190,7 @@ pub fn run() {
                 .menu(&tray_menu)
                 .tooltip("EVA 考研辅助终端")
                 .on_menu_event(|app: &tauri::AppHandle, event| match event.id.as_ref() {
-                    "tray_show" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.unminimize();
-                            let _ = window.set_focus();
-                        }
-                    }
+                    "tray_toggle" => toggle_main_window(app),
                     "tray_quit" => {
                         app.exit(0);
                     }
@@ -3159,11 +3207,7 @@ pub fn run() {
                         ..
                     } => {
                         let app = tray.app_handle();
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.unminimize();
-                            let _ = window.set_focus();
-                        }
+                        toggle_main_window(&app);
                     }
                     _ => {}
                 });

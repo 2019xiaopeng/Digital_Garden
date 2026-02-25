@@ -19,6 +19,7 @@
 - Tasks 番茄钟在 Web 端已具备 Fullscreen API 优雅降级（不支持时自动回退页面内全屏）
 - Phase 3 最终冲刺已完成：Dashboard 消除 Web 端原生调用白屏风险，Notes/Resources 跨端阅读闭环落地
 - Phase 4 系统收尾已启动：Settings 的考研目标与隐私面板去 Mock，接入真实持久化与本地清理命令
+- Phase 5 桌面原生化已完成：托盘常驻、全局快捷键呼出、关闭拦截后台运行、Axum 改为 `rust-embed` 内嵌静态资源并支持 SPA fallback
 
 **功能来源分类标记**：
 - 🟢 **已完成** — 代码与 UI 均已就位，日常可用

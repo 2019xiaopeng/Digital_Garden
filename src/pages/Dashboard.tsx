@@ -2,16 +2,10 @@ import React, { useEffect, useMemo, useState } from "react";
 import { ArrowRight, Target, Play, Square, BarChart3, Activity, AlarmClockCheck, CheckCircle2, Circle, Maximize2, X, Pause, RotateCcw } from "lucide-react";
 import { Link } from "react-router-dom";
 import { cn } from "../lib/utils";
-import { FocusService, isTauriAvailable } from "../lib/dataService";
-import type { LegacyTask, FocusSession } from "../lib/dataService";
+import { FocusService } from "../lib/dataService";
+import type { LegacyTask } from "../lib/dataService";
 import { fetchDashboardStats, modifyTask } from "../utils/apiBridge";
-
-type Task = {
-  id: string;
-  title: string;
-  status: "todo" | "in-progress" | "done";
-  date: string;
-};
+import { getSettings, type AppSettings } from "../lib/settings";
 
 type DailyAttendance = {
   checkedInAt?: string;
@@ -24,6 +18,54 @@ type AttendanceMap = Record<string, DailyAttendance>;
 
 const ATTENDANCE_STORAGE_KEY = "qcb.attendance.v1";
 const EXAM_DATE_ISO = "2026-12-20T00:00:00";
+
+type SubjectProgress = {
+  key: "major" | "math" | "english" | "politics";
+  label: string;
+  targetScore: number;
+  done: number;
+  total: number;
+  progress: number;
+  barClass: string;
+  glowClass: string;
+};
+
+const SUBJECT_RULES: Array<{
+  key: SubjectProgress["key"];
+  label: string;
+  keywords: string[];
+  barClass: string;
+  glowClass: string;
+}> = [
+  {
+    key: "major",
+    label: "408 / 专业课",
+    keywords: ["408", "专业课", "数据结构", "计网", "网络", "操作系统", "组成原理", "计组"],
+    barClass: "bg-gradient-to-r from-[#7c3aed] via-[#6d28d9] to-[#5b21b6]",
+    glowClass: "shadow-[0_0_18px_rgba(124,58,237,0.35)]",
+  },
+  {
+    key: "math",
+    label: "数学",
+    keywords: ["数学", "数一", "高数", "线代", "概率"],
+    barClass: "bg-gradient-to-r from-[#2e5ea7] via-[#3b82f6] to-[#88B5D3]",
+    glowClass: "shadow-[0_0_18px_rgba(136,181,211,0.4)]",
+  },
+  {
+    key: "english",
+    label: "英语",
+    keywords: ["英语", "英一", "单词", "阅读", "翻译", "写作"],
+    barClass: "bg-gradient-to-r from-[#0f766e] via-[#14b8a6] to-[#2dd4bf]",
+    glowClass: "shadow-[0_0_18px_rgba(45,212,191,0.35)]",
+  },
+  {
+    key: "politics",
+    label: "政治",
+    keywords: ["政治", "马原", "毛概", "史纲", "思修", "时政"],
+    barClass: "bg-gradient-to-r from-[#b45309] via-[#f59e0b] to-[#fbbf24]",
+    glowClass: "shadow-[0_0_18px_rgba(245,158,11,0.35)]",
+  },
+];
 
 const getTodayStr = () => {
   const d = new Date();
@@ -220,15 +262,24 @@ export function Dashboard() {
   const [timeLeft, setTimeLeft] = useState(() => getCountdown(EXAM_DATE_ISO));
   const today = getTodayStr();
 
-  const [tasks, setTasks] = useState<Task[]>([]);
+  const [tasks, setTasks] = useState<LegacyTask[]>([]);
+  const [examSettings, setExamSettings] = useState<AppSettings>(() => getSettings());
   const [attendanceMap, setAttendanceMap] = useState<AttendanceMap>(() => (typeof window === "undefined" ? {} : loadAttendanceMap()));
   const [sessionNow, setSessionNow] = useState(Date.now());
   const [selectedTaskId, setSelectedTaskId] = useState("");
 
+  useEffect(() => {
+    const onSettingsUpdated = () => {
+      setExamSettings(getSettings());
+    };
+    window.addEventListener("eva:settings-updated", onSettingsUpdated);
+    return () => window.removeEventListener("eva:settings-updated", onSettingsUpdated);
+  }, []);
+
   // Load tasks from dataService
   useEffect(() => {
     fetchDashboardStats().then((stats) => {
-      setTasks(stats.tasks as unknown as Task[]);
+      setTasks(stats.tasks || []);
     });
     FocusService.getAll().then((sessions) => {
       const mapped: AttendanceMap = {};
@@ -266,7 +317,7 @@ export function Dashboard() {
       setTimeLeft(getCountdown(EXAM_DATE_ISO));
     }, 30_000);
     const syncTasks = () => {
-      fetchDashboardStats().then((stats) => setTasks(stats.tasks as unknown as Task[]));
+      fetchDashboardStats().then((stats) => setTasks(stats.tasks || []));
     };
     window.addEventListener("focus", syncTasks);
     return () => { clearInterval(countdownTimer); window.removeEventListener("focus", syncTasks); };
@@ -312,11 +363,11 @@ export function Dashboard() {
 
   const toggleTaskDone = (taskId: string) => {
     setTasks((prev) => {
-      const updated = prev.map((task) => task.id === taskId ? { ...task, status: (task.status === "done" ? "todo" : "done") as Task["status"] } : task);
+      const updated = prev.map((task) => task.id === taskId ? { ...task, status: (task.status === "done" ? "todo" : "done") as LegacyTask["status"] } : task);
       // Persist via TaskService
       const changedTask = updated.find(t => t.id === taskId);
       if (changedTask) {
-        modifyTask(taskId, changedTask as unknown as LegacyTask).catch(console.warn);
+        modifyTask(taskId, changedTask).catch(console.warn);
       }
       return updated;
     });
@@ -396,6 +447,70 @@ export function Dashboard() {
     const tid = selectedTaskId || todayAttendance.activeTaskId || pendingTasks[0]?.id;
     return todayTasks.find(t => t.id === tid)?.title || pendingTasks[0]?.title || "";
   }, [selectedTaskId, todayAttendance.activeTaskId, pendingTasks, todayTasks]);
+
+  const examCountdownDays = useMemo(() => {
+    if (!examSettings.examDate) return 0;
+    const examDate = new Date(`${examSettings.examDate}T00:00:00`);
+    if (Number.isNaN(examDate.getTime())) return 0;
+    const diff = examDate.getTime() - Date.now();
+    return Math.max(0, Math.ceil(diff / (1000 * 60 * 60 * 24)));
+  }, [examSettings.examDate]);
+
+  const hasExamGoalConfigured = useMemo(() => {
+    return Boolean(examSettings.targetUniversity?.trim() && examSettings.examDate?.trim());
+  }, [examSettings.examDate, examSettings.targetUniversity]);
+
+  const subjectProgress = useMemo<SubjectProgress[]>(() => {
+    const statsMap = new Map<SubjectProgress["key"], { done: number; total: number }>();
+    SUBJECT_RULES.forEach((item) => {
+      statsMap.set(item.key, { done: 0, total: 0 });
+    });
+
+    const normalize = (raw: string) => raw.trim().toLowerCase();
+
+    for (const task of tasks) {
+      const title = normalize(task.title || "");
+      const tags = (task.tags || []).map(normalize);
+      const mergedText = `${title} ${tags.join(" ")}`;
+
+      SUBJECT_RULES.forEach((rule) => {
+        const matched = rule.keywords.some((keyword) => mergedText.includes(normalize(keyword)));
+        if (!matched) return;
+
+        const current = statsMap.get(rule.key);
+        if (!current) return;
+        current.total += 1;
+        if (task.status === "done") current.done += 1;
+      });
+    }
+
+    return SUBJECT_RULES.map((rule) => {
+      const subjectStat = statsMap.get(rule.key) || { done: 0, total: 0 };
+      const progress = subjectStat.total > 0
+        ? Math.round((subjectStat.done / subjectStat.total) * 100)
+        : 0;
+
+      const targetScore =
+        rule.key === "major"
+          ? examSettings.targetScores.major
+          : rule.key === "math"
+            ? examSettings.targetScores.math
+            : rule.key === "english"
+              ? examSettings.targetScores.english
+              : examSettings.targetScores.politics;
+
+      return {
+        key: rule.key,
+        label: rule.label,
+        targetScore,
+        done: subjectStat.done,
+        total: subjectStat.total,
+        progress,
+        barClass: rule.barClass,
+        glowClass: rule.glowClass,
+      };
+    });
+  }, [examSettings.targetScores, tasks]);
 
   /* ── Set pomodoro preset ── */
   const setPomodoroPreset = (minutes: number) => {
@@ -604,6 +719,58 @@ export function Dashboard() {
             ))
           )}
         </div>
+      </div>
+
+      {/* ─── Row 4: Subject Progress & Exam Goal ─── */}
+      <div className="glass-card rounded-3xl p-6 relative overflow-hidden">
+        <div className="absolute top-0 left-0 w-full h-[2px] bg-gradient-to-r from-[#7c3aed]/45 via-[#88B5D3]/50 to-[#f59e0b]/45" />
+
+        {!hasExamGoalConfigured ? (
+          <div className="rounded-2xl border border-dashed border-gray-300/80 dark:border-[#31445d] bg-white/35 dark:bg-[#111b2a]/50 p-6 text-center">
+            <p className="text-sm font-semibold text-gray-700 dark:text-gray-200">检测到尚未设定同步率目标...</p>
+            <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">前往设置页填写目标院校、考试日期与各科目标分数后，可解锁科目进度监控面板。</p>
+            <Link
+              to="/settings?tab=exam"
+              className="inline-flex mt-4 items-center gap-2 px-4 py-2 rounded-xl bg-[#88B5D3] hover:bg-[#6f9fbe] text-white text-sm font-semibold transition-colors"
+            >
+              前往设置考研目标 <ArrowRight className="w-4 h-4" />
+            </Link>
+          </div>
+        ) : (
+          <>
+            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-5">
+              <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
+                终极目标：<span className="text-[#88B5D3]">{examSettings.targetUniversity}</span>
+              </h3>
+              <p className="text-sm font-mono text-[#f59e0b] dark:text-[#fbbf24] tracking-wide">
+                距离决战还剩 {examCountdownDays} 天
+              </p>
+            </div>
+
+            <div className="space-y-4">
+              {subjectProgress.map((item) => (
+                <div key={item.key} className="rounded-2xl border border-white/40 dark:border-[#2a3b52] bg-white/35 dark:bg-[#111b2a]/45 p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                    <div className="text-sm font-semibold text-gray-800 dark:text-gray-100">{item.label}</div>
+                    <div className="text-xs text-gray-500 dark:text-gray-400">
+                      <span className="font-semibold text-[#88B5D3]">{item.progress}%</span>
+                      <span className="mx-1">|</span>
+                      已完成 {item.done}/{item.total}
+                      <span className="mx-1">|</span>
+                      目标：{item.targetScore} 分
+                    </div>
+                  </div>
+                  <div className="h-2.5 rounded-full bg-gray-200/80 dark:bg-[#1d2a3d] overflow-hidden">
+                    <div
+                      className={cn("h-full rounded-full transition-all duration-500", item.barClass, item.glowClass)}
+                      style={{ width: `${item.progress}%` }}
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
       </div>
     </div>
   );

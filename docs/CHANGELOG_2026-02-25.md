@@ -86,3 +86,15 @@
   - `clear_cache(cache_type)`
   - `reset_all_data()`
 - 分类清理与一键清空已接真实调用，且加入前端确认拦截（重置为二次确认）。
+
+---
+
+## Phase 5 桌面原生化与终极打包（v1.0）
+
+### 已落地（本次）
+- 版本升级到 `1.0.0`：`package.json` / `src-tauri/Cargo.toml` / `src-tauri/tauri.conf.json`。
+- 托盘能力升级：新增“显示/隐藏面板”与“彻底退出”，支持左键点击托盘图标切换窗口显隐。
+- 关闭按钮行为改为后台常驻：点击窗口 `X` 拦截为 `window.hide()`，不退出服务。
+- 新增全局快捷键：`CmdOrCtrl+Shift+E`，用于快速呼出/隐藏主窗口。
+- Axum 静态资源服务重构：移除 `ServeDir`，改为 `rust-embed` 内嵌前端资源并提供 SPA `index.html` fallback，修复生产环境局域网访问白屏风险。
+- 新增交付文档：`docs/report.md`（依赖清单、托盘/快捷键代码、嵌入式静态资源路由代码）。

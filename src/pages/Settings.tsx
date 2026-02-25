@@ -172,6 +172,16 @@ export function Settings() {
   }, []);
 
   useEffect(() => {
+    if (typeof window === "undefined") return;
+    const queryTab = new URLSearchParams(window.location.search).get("tab");
+    if (!queryTab) return;
+    const isValidTab = navItems.some((item) => item.key === queryTab);
+    if (isValidTab) {
+      setActiveTab(queryTab as TabKey);
+    }
+  }, []);
+
+  useEffect(() => {
     loadStorageUsage();
   }, [loadStorageUsage]);
 
