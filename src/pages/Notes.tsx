@@ -1,7 +1,7 @@
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { 
   Folder, FileText, ChevronRight, ChevronDown, 
-  Search, Plus, Sparkles, Send, Bot, User, X, File, Upload, Edit2, Trash2, MessageSquarePlus
+  Search, Plus, Sparkles, Send, Bot, User, X, File, Upload, Edit2, Trash2, MessageSquarePlus, RefreshCw
 } from "lucide-react";
 import { cn } from "../lib/utils";
 import { ThemedPromptDialog } from "../components/ThemedPromptDialog";
@@ -22,6 +22,13 @@ type TreeNode = {
   children?: TreeNode[];
 };
 
+type NotesFsNode = {
+  name: string;
+  path: string;        // relative path from Notes/
+  is_dir: boolean;
+  children: NotesFsNode[];
+};
+
 const initialTree: TreeNode[] = [
   
 ];
@@ -30,14 +37,9 @@ type ChatMessage = { role: 'user' | 'model'; text: string };
 type ChatSession = { id: string; title: string; messages: ChatMessage[] };
 
 export function Notes() {
-  const [treeData, setTreeData] = useState<TreeNode[]>(() => {
-    try {
-      const saved = localStorage.getItem("eva:knowledge-tree");
-      if (saved) return JSON.parse(saved) as TreeNode[];
-    } catch {}
-    return initialTree;
-  });
+  const [treeData, setTreeData] = useState<TreeNode[]>(initialTree);
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
+  const [searchKeyword, setSearchKeyword] = useState("");
   const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>([]);
   const [activeNodeId, setActiveNodeId] = useState<string | null>(null);
   const [selectionAnchorId, setSelectionAnchorId] = useState<string | null>(null);
@@ -75,6 +77,53 @@ export function Notes() {
     setUploadToast({ type, message });
     window.setTimeout(() => setUploadToast(null), 1800);
   };
+
+  const convertFsNodesToTree = useCallback((nodes: NotesFsNode[]): TreeNode[] => {
+    const walk = (items: NotesFsNode[]): TreeNode[] => {
+      return items.map((node) => {
+        const id = `notes:${node.path}`;
+        if (node.is_dir) {
+          return {
+            id,
+            name: node.name,
+            type: "folder",
+            children: walk(node.children || []),
+          };
+        }
+        return {
+          id,
+          name: node.name,
+          type: "file",
+          path: node.path,
+        };
+      });
+    };
+    return walk(nodes);
+  }, []);
+
+  const loadTreeFromDisk = useCallback(async (silent = false) => {
+    if (!isTauriAvailable()) {
+      try {
+        const saved = localStorage.getItem("eva:knowledge-tree");
+        if (saved) setTreeData(JSON.parse(saved) as TreeNode[]);
+      } catch {}
+      return;
+    }
+
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const scanned = await invoke<NotesFsNode[]>("scan_notes_directory");
+      setTreeData(convertFsNodesToTree(scanned));
+      if (!silent) showUploadToast("success", "已同步磁盘目录");
+    } catch (err: any) {
+      console.error("[Notes] Failed to scan notes directory:", err);
+      showUploadToast("error", `同步失败：${err?.message || String(err)}`);
+    }
+  }, [convertFsNodesToTree]);
+
+  useEffect(() => {
+    loadTreeFromDisk(true);
+  }, [loadTreeFromDisk]);
 
   // Persist tree data to localStorage
   useEffect(() => {
@@ -938,9 +987,53 @@ export function Notes() {
 
   const selectedNode = activeNodeId ? findNode(treeData, activeNodeId) : null;
 
-  const renderTree = (nodes: TreeNode[], level = 0) => {
+  const filterTreeByKeyword = useCallback((nodes: TreeNode[], keyword: string) => {
+    const expandedBySearch = new Set<string>();
+    const normalized = keyword.trim().toLowerCase();
+    if (!normalized) {
+      return { filtered: nodes, expanded: expandedBySearch };
+    }
+
+    const walk = (items: TreeNode[]): TreeNode[] => {
+      const result: TreeNode[] = [];
+
+      for (const node of items) {
+        const selfHit = node.name.toLowerCase().includes(normalized);
+        const childMatches = node.children ? walk(node.children) : [];
+        const hasChildHit = childMatches.length > 0;
+
+        if (selfHit || hasChildHit) {
+          if (node.type === "folder" && hasChildHit) {
+            expandedBySearch.add(node.id);
+          }
+          result.push({
+            ...node,
+            children: node.type === "folder" ? childMatches : node.children,
+          });
+        }
+      }
+
+      return result;
+    };
+
+    return { filtered: walk(nodes), expanded: expandedBySearch };
+  }, []);
+
+  const searchResult = useMemo(
+    () => filterTreeByKeyword(treeData, searchKeyword),
+    [treeData, searchKeyword, filterTreeByKeyword]
+  );
+
+  const effectiveExpandedFolders = useMemo(() => {
+    if (!searchKeyword.trim()) return expandedFolders;
+    const merged = new Set(expandedFolders);
+    searchResult.expanded.forEach((id) => merged.add(id));
+    return merged;
+  }, [expandedFolders, searchResult.expanded, searchKeyword]);
+
+  const renderTree = (nodes: TreeNode[], expandedState: Set<string>, level = 0) => {
     return nodes.map(node => {
-      const isExpanded = expandedFolders.has(node.id);
+      const isExpanded = expandedState.has(node.id);
       const isSelected = selectedNodeIds.includes(node.id);
       const isDragTarget = dropTargetId === node.id;
       const isBeingDragged = draggedNodeId === node.id;
@@ -990,7 +1083,7 @@ export function Notes() {
           </div>
           
           {node.type === "folder" && isExpanded && node.children && (
-            <div>{renderTree(node.children, level + 1)}</div>
+            <div>{renderTree(node.children, expandedState, level + 1)}</div>
           )}
         </div>
       );
@@ -1029,10 +1122,19 @@ export function Notes() {
               <input 
                 type="text" 
                 placeholder="搜索文档..." 
+                value={searchKeyword}
+                onChange={(e) => setSearchKeyword(e.target.value)}
                 className="w-full pl-8 pr-3 py-1.5 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#88B5D3]/20 focus:border-[#88B5D3] text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 transition-all"
               />
             </div>
             <div className="flex items-center ml-2 gap-1">
+              <button 
+                className="p-1.5 text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-800 rounded-lg transition-colors"
+                onClick={() => loadTreeFromDisk()}
+                title="刷新磁盘目录"
+              >
+                <RefreshCw className="w-4 h-4" />
+              </button>
               <button 
                 className="p-1.5 text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-800 rounded-lg transition-colors"
                 onClick={handleFileUpload}
@@ -1081,14 +1183,14 @@ export function Notes() {
               }
             }}
           >
-            {treeData.length === 0 ? (
+            {searchResult.filtered.length === 0 ? (
               <div className="h-full min-h-48 flex flex-col items-center justify-center text-center px-4 text-gray-500 dark:text-gray-400">
                 <Folder className="w-10 h-10 mb-3 text-[#88B5D3]/70" />
-                <p className="font-medium">当前暂无文档</p>
-                <p className="text-xs mt-1">上传文件或新建文件夹后，这里会显示你的知识库结构</p>
+                <p className="font-medium">{searchKeyword.trim() ? "未找到匹配结果" : "当前暂无文档"}</p>
+                <p className="text-xs mt-1">{searchKeyword.trim() ? "请尝试更换关键词" : "上传文件或新建文件夹后，这里会显示你的知识库结构"}</p>
               </div>
             ) : (
-              renderTree(treeData)
+              renderTree(searchResult.filtered, effectiveExpandedFolders)
             )}
           </div>
         </div>

@@ -1608,6 +1608,79 @@ async fn get_resources_dir(app: tauri::AppHandle) -> Result<String, String> {
         .to_string())
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct NotesFsNode {
+    name: String,
+    path: String,
+    is_dir: bool,
+    children: Vec<NotesFsNode>,
+}
+
+fn scan_notes_directory_sync(current: &Path) -> Result<Vec<NotesFsNode>, String> {
+    let mut out: Vec<NotesFsNode> = Vec::new();
+
+    let entries = std::fs::read_dir(current)
+        .map_err(|e| format!("Failed to read directory {}: {}", current.to_string_lossy(), e))?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
+        let entry_path = entry.path();
+        let metadata = entry
+            .metadata()
+            .map_err(|e| format!("Failed to stat {}: {}", entry_path.to_string_lossy(), e))?;
+
+        let name = entry.file_name().to_string_lossy().to_string();
+        let absolute = entry_path.to_string_lossy().to_string();
+
+        if metadata.is_dir() {
+            out.push(NotesFsNode {
+                name,
+                path: absolute,
+                is_dir: true,
+                children: scan_notes_directory_sync(&entry_path)?,
+            });
+            continue;
+        }
+
+        if metadata.is_file() {
+            out.push(NotesFsNode {
+                name,
+                path: absolute,
+                is_dir: false,
+                children: Vec::new(),
+            });
+        }
+    }
+
+    out.sort_by(|a, b| {
+        if a.is_dir == b.is_dir {
+            a.name.to_lowercase().cmp(&b.name.to_lowercase())
+        } else if a.is_dir {
+            std::cmp::Ordering::Less
+        } else {
+            std::cmp::Ordering::Greater
+        }
+    });
+
+    Ok(out)
+}
+
+#[tauri::command]
+async fn scan_notes_directory(app: tauri::AppHandle) -> Result<Vec<NotesFsNode>, String> {
+    let root = PathBuf::from(ensure_workspace_dirs(&app).await?);
+    let notes_root = root.join("Notes");
+
+    fs::create_dir_all(&notes_root).await.map_err(|e| {
+        format!(
+            "Failed to ensure notes directory {}: {}",
+            notes_root.to_string_lossy(),
+            e
+        )
+    })?;
+
+    scan_notes_directory_sync(&notes_root)
+}
+
 #[derive(Debug, Serialize)]
 struct CopiedFileResult {
     source_path: String,
@@ -2114,6 +2187,7 @@ pub fn run() {
             get_workspace_root,
             read_file_content,
             get_notes_dir,
+            scan_notes_directory,
             get_logs_dir,
             get_resources_dir,
             copy_file_to_notes,

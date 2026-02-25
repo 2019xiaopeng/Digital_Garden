@@ -3,6 +3,8 @@ import {
   AlarmClock,
   Bell,
   Bot,
+  CheckCircle2,
+  Trash2,
   Eye,
   EyeOff,
   ExternalLink,
@@ -80,6 +82,7 @@ export function Settings() {
   const [autoStartEnabled, setAutoStartEnabled] = useState(false);
   const [autoStartLoading, setAutoStartLoading] = useState(true);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [lanShareEnabled, setLanShareEnabled] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -417,11 +420,130 @@ export function Settings() {
     </section>
   );
 
-  const renderPlaceholder = (title: string, desc: string) => (
+  const renderSync = () => (
     <section className="space-y-5">
-      <h2 className="text-xl font-bold text-gray-900 dark:text-white">{title}</h2>
+      <h2 className="text-xl font-bold text-gray-900 dark:text-white">同步与备份</h2>
+
+      <div className="glass-card rounded-2xl p-5 flex items-center justify-between gap-4">
+        <div>
+          <p className="font-semibold text-gray-900 dark:text-white">启用局域网共享</p>
+          <p className="text-sm text-gray-500 dark:text-gray-400">允许同一 Wi-Fi 下的设备访问本地数据（后续绑定真实服务）</p>
+        </div>
+        <label className="relative inline-flex h-7 w-12 items-center cursor-pointer select-none">
+          <input
+            type="checkbox"
+            className="sr-only peer"
+            checked={lanShareEnabled}
+            onChange={(e) => setLanShareEnabled(e.target.checked)}
+          />
+          <span className="absolute inset-0 rounded-full bg-gray-300 dark:bg-gray-600 transition-colors peer-checked:bg-[#88B5D3]" />
+          <span className={`relative inline-block h-5 w-5 rounded-full bg-white transition-transform ${lanShareEnabled ? "translate-x-6" : "translate-x-1"}`} />
+        </label>
+      </div>
+
       <div className="glass-card rounded-2xl p-5">
-        <p className="text-sm text-gray-500 dark:text-gray-400">{desc}</p>
+        <p className="text-sm font-semibold text-gray-900 dark:text-white">局域网地址</p>
+        <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">内网 IP:端口（占位）</p>
+        <div className="mt-2 rounded-xl border border-gray-200/80 dark:border-[#30435c] bg-white/80 dark:bg-[#0f1826]/70 px-4 py-2.5 text-sm font-mono text-gray-700 dark:text-gray-200">
+          http://192.168.1.88:9527
+        </div>
+      </div>
+
+      <div className="glass-card rounded-2xl p-5">
+        <p className="text-sm font-semibold text-gray-900 dark:text-white">Tailscale 状态</p>
+        <div className="mt-2 flex items-center gap-2 text-sm text-gray-600 dark:text-gray-300">
+          <CheckCircle2 className="w-4 h-4 text-emerald-500" />
+          状态：未检测（占位）
+        </div>
+        <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">MagicDNS: eva-desktop.tailnet-xxxx.ts.net:9527（占位）</p>
+      </div>
+    </section>
+  );
+
+  const renderExam = () => (
+    <section className="space-y-5">
+      <h2 className="text-xl font-bold text-gray-900 dark:text-white">考研目标</h2>
+
+      <div className="glass-card rounded-2xl p-5 grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div>
+          <label className="text-xs font-semibold text-gray-500">目标院校</label>
+          <input defaultValue="浙江大学 计算机学院" className={inputClass} />
+        </div>
+        <div>
+          <label className="text-xs font-semibold text-gray-500">总分目标</label>
+          <input type="number" defaultValue={380} className={inputClass} />
+        </div>
+        <div className="md:col-span-2">
+          <label className="text-xs font-semibold text-gray-500">考试日期</label>
+          <input type="date" defaultValue="2026-12-20" className={inputClass} />
+        </div>
+      </div>
+
+      <div className="glass-card rounded-2xl p-5">
+        <p className="text-sm font-semibold text-gray-900 dark:text-white mb-3">各科目标分数</p>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <div>
+            <label className="text-xs text-gray-500">408</label>
+            <input type="number" defaultValue={120} className={inputClass} />
+          </div>
+          <div>
+            <label className="text-xs text-gray-500">数一</label>
+            <input type="number" defaultValue={130} className={inputClass} />
+          </div>
+          <div>
+            <label className="text-xs text-gray-500">英一</label>
+            <input type="number" defaultValue={75} className={inputClass} />
+          </div>
+          <div>
+            <label className="text-xs text-gray-500">政治</label>
+            <input type="number" defaultValue={70} className={inputClass} />
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+
+  const renderPrivacy = () => (
+    <section className="space-y-5">
+      <h2 className="text-xl font-bold text-gray-900 dark:text-white">隐私与安全</h2>
+
+      <div className="glass-card rounded-2xl p-5">
+        <p className="text-sm font-semibold text-gray-900 dark:text-white mb-3">存储用量面板（占位）</p>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
+          <div className="rounded-xl border border-gray-200/80 dark:border-[#30435c] px-4 py-3 bg-white/80 dark:bg-[#0f1826]/70">
+            <p className="text-gray-500">SQLite</p>
+            <p className="font-semibold text-gray-900 dark:text-white">12.4 MB</p>
+          </div>
+          <div className="rounded-xl border border-gray-200/80 dark:border-[#30435c] px-4 py-3 bg-white/80 dark:bg-[#0f1826]/70">
+            <p className="text-gray-500">文件系统</p>
+            <p className="font-semibold text-gray-900 dark:text-white">486.2 MB</p>
+          </div>
+          <div className="rounded-xl border border-gray-200/80 dark:border-[#30435c] px-4 py-3 bg-white/80 dark:bg-[#0f1826]/70">
+            <p className="text-gray-500">localStorage</p>
+            <p className="font-semibold text-gray-900 dark:text-white">0.8 MB</p>
+          </div>
+        </div>
+      </div>
+
+      <div className="glass-card rounded-2xl p-5 space-y-3">
+        <p className="text-sm font-semibold text-gray-900 dark:text-white">分类清理</p>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <button className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-gray-200/80 dark:border-[#30435c] hover:bg-gray-100 dark:hover:bg-[#1b2a41] text-sm text-gray-700 dark:text-gray-200 transition-colors">
+            <Trash2 className="w-4 h-4" /> 清理草稿
+          </button>
+          <button className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-gray-200/80 dark:border-[#30435c] hover:bg-gray-100 dark:hover:bg-[#1b2a41] text-sm text-gray-700 dark:text-gray-200 transition-colors">
+            <Trash2 className="w-4 h-4" /> 清理树缓存
+          </button>
+          <button className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-gray-200/80 dark:border-[#30435c] hover:bg-gray-100 dark:hover:bg-[#1b2a41] text-sm text-gray-700 dark:text-gray-200 transition-colors">
+            <Trash2 className="w-4 h-4" /> 清理文件缓存
+          </button>
+          <button className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-gray-200/80 dark:border-[#30435c] hover:bg-gray-100 dark:hover:bg-[#1b2a41] text-sm text-gray-700 dark:text-gray-200 transition-colors">
+            <Trash2 className="w-4 h-4" /> 清理任务回退
+          </button>
+        </div>
+        <button className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-sm font-semibold transition-colors">
+          <Trash2 className="w-4 h-4" /> 一键清空
+        </button>
       </div>
     </section>
   );
@@ -437,15 +559,15 @@ export function Settings() {
       case "workspace":
         return renderWorkspace();
       case "sync":
-        return renderPlaceholder("同步与备份", "云端同步和本地备份策略将在此处配置。");
+        return renderSync();
       case "exam":
-        return renderPlaceholder("考研目标", "阶段目标、计划里程碑与复盘模板将在此处配置。");
+        return renderExam();
       case "pomodoro":
         return renderPomodoro();
       case "shortcut":
         return renderShortcuts();
       case "privacy":
-        return renderPlaceholder("隐私与安全", "本地加密、密钥管理与权限策略将在此处配置。");
+        return renderPrivacy();
       case "about":
         return (
           <section className="space-y-5">
