@@ -1,6 +1,6 @@
-use axum::extract::{Query, State as AxumState};
+use axum::extract::{Path as AxumPath, Query, State as AxumState};
 use axum::http::StatusCode;
-use axum::routing::{get, get_service};
+use axum::routing::{get, get_service, put};
 use axum::{Json, Router};
 use chrono::{Local, Utc};
 use serde::{Deserialize, Serialize};
@@ -199,6 +199,11 @@ struct QuizDueQuery {
     subject: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct TasksQuery {
+    date: Option<String>,
+}
+
 fn resolve_static_assets_dir() -> PathBuf {
     let mut candidates: Vec<PathBuf> = Vec::new();
 
@@ -230,6 +235,113 @@ async fn db_fetch_all_questions(pool: &sqlx::SqlitePool) -> Result<Vec<Question>
     .await
     .map_err(|e| format!("Failed to fetch questions: {}", e))?;
     Ok(rows)
+}
+
+async fn db_get_tasks(pool: &sqlx::SqlitePool) -> Result<Vec<Task>, String> {
+    let rows = sqlx::query_as::<_, Task>(
+        "SELECT id, title, description, status, priority, date, start_time, duration, tags, repeat_type, timer_type, timer_duration, created_at, updated_at FROM tasks ORDER BY date ASC, start_time ASC",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to fetch tasks: {}", e))?;
+    Ok(rows)
+}
+
+async fn db_get_tasks_by_date(pool: &sqlx::SqlitePool, date: &str) -> Result<Vec<Task>, String> {
+    let rows = sqlx::query_as::<_, Task>(
+        "SELECT id, title, description, status, priority, date, start_time, duration, tags, repeat_type, timer_type, timer_duration, created_at, updated_at FROM tasks WHERE date = ? ORDER BY start_time ASC",
+    )
+    .bind(date)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to fetch tasks by date: {}", e))?;
+    Ok(rows)
+}
+
+async fn db_create_task(pool: &sqlx::SqlitePool, task: &Task) -> Result<Task, String> {
+    sqlx::query(
+        "INSERT INTO tasks (id, title, description, status, priority, date, start_time, duration, tags, repeat_type, timer_type, timer_duration, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&task.id)
+    .bind(&task.title)
+    .bind(&task.description)
+    .bind(&task.status)
+    .bind(&task.priority)
+    .bind(&task.date)
+    .bind(&task.start_time)
+    .bind(&task.duration)
+    .bind(&task.tags)
+    .bind(&task.repeat_type)
+    .bind(&task.timer_type)
+    .bind(&task.timer_duration)
+    .bind(&task.created_at)
+    .bind(&task.updated_at)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to create task: {}", e))?;
+    Ok(task.clone())
+}
+
+async fn db_update_task(pool: &sqlx::SqlitePool, task: &Task) -> Result<Task, String> {
+    sqlx::query(
+        "UPDATE tasks SET title=?, description=?, status=?, priority=?, date=?, start_time=?, duration=?, tags=?, repeat_type=?, timer_type=?, timer_duration=?, updated_at=? WHERE id=?",
+    )
+    .bind(&task.title)
+    .bind(&task.description)
+    .bind(&task.status)
+    .bind(&task.priority)
+    .bind(&task.date)
+    .bind(&task.start_time)
+    .bind(&task.duration)
+    .bind(&task.tags)
+    .bind(&task.repeat_type)
+    .bind(&task.timer_type)
+    .bind(&task.timer_duration)
+    .bind(&task.updated_at)
+    .bind(&task.id)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to update task: {}", e))?;
+    Ok(task.clone())
+}
+
+async fn db_delete_task(pool: &sqlx::SqlitePool, id: &str) -> Result<(), String> {
+    sqlx::query("DELETE FROM tasks WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("Failed to delete task: {}", e))?;
+    Ok(())
+}
+
+async fn db_batch_create_tasks(pool: &sqlx::SqlitePool, tasks: &[Task]) -> Result<usize, String> {
+    let mut count = 0;
+    for task in tasks {
+        let result = sqlx::query(
+            "INSERT OR IGNORE INTO tasks (id, title, description, status, priority, date, start_time, duration, tags, repeat_type, timer_type, timer_duration, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&task.id)
+        .bind(&task.title)
+        .bind(&task.description)
+        .bind(&task.status)
+        .bind(&task.priority)
+        .bind(&task.date)
+        .bind(&task.start_time)
+        .bind(&task.duration)
+        .bind(&task.tags)
+        .bind(&task.repeat_type)
+        .bind(&task.timer_type)
+        .bind(&task.timer_duration)
+        .bind(&task.created_at)
+        .bind(&task.updated_at)
+        .execute(pool)
+        .await;
+
+        if result.is_ok() {
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 
 async fn db_fetch_due_questions(
@@ -286,6 +398,56 @@ async fn api_quiz_due_handler(
     Ok(Json(rows))
 }
 
+async fn api_tasks_handler(
+    AxumState(db): AxumState<Arc<Mutex<AppDb>>>,
+    Query(params): Query<TasksQuery>,
+) -> Result<Json<Vec<Task>>, (StatusCode, String)> {
+    let db = db.lock().await;
+    let rows = if let Some(date) = params.date.as_deref() {
+        db_get_tasks_by_date(&db.db, date).await
+    } else {
+        db_get_tasks(&db.db).await
+    }
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(rows))
+}
+
+async fn api_create_task_handler(
+    AxumState(db): AxumState<Arc<Mutex<AppDb>>>,
+    Json(task): Json<Task>,
+) -> Result<Json<Task>, (StatusCode, String)> {
+    let db = db.lock().await;
+    let created = db_create_task(&db.db, &task)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(created))
+}
+
+async fn api_update_task_handler(
+    AxumState(db): AxumState<Arc<Mutex<AppDb>>>,
+    AxumPath(id): AxumPath<String>,
+    Json(mut task): Json<Task>,
+) -> Result<Json<Task>, (StatusCode, String)> {
+    task.id = id;
+    let db = db.lock().await;
+    let updated = db_update_task(&db.db, &task)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(updated))
+}
+
+async fn api_delete_task_handler(
+    AxumState(db): AxumState<Arc<Mutex<AppDb>>>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let db = db.lock().await;
+    db_delete_task(&db.db, &id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[tauri::command]
 fn get_local_ip() -> String {
     match local_ip_address::local_ip() {
@@ -340,6 +502,8 @@ async fn toggle_local_server(
 
     let router = Router::new()
         .route("/api/ping", get(local_ping_handler))
+        .route("/api/tasks", get(api_tasks_handler).post(api_create_task_handler))
+        .route("/api/tasks/{id}", put(api_update_task_handler).delete(api_delete_task_handler))
         .route("/api/quiz/all", get(api_quiz_all_handler))
         .route("/api/quiz/due", get(api_quiz_due_handler))
         .fallback_service(get_service(
@@ -578,13 +742,7 @@ async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, String> {
 #[tauri::command]
 async fn get_tasks(db: State<'_, Arc<Mutex<AppDb>>>) -> Result<Vec<Task>, String> {
     let db = db.lock().await;
-    let rows = sqlx::query_as::<_, Task>(
-        "SELECT id, title, description, status, priority, date, start_time, duration, tags, repeat_type, timer_type, timer_duration, created_at, updated_at FROM tasks ORDER BY date ASC, start_time ASC"
-    )
-    .fetch_all(&db.db)
-    .await
-    .map_err(|e| format!("Failed to fetch tasks: {}", e))?;
-    Ok(rows)
+    db_get_tasks(&db.db).await
 }
 
 #[tauri::command]
@@ -593,76 +751,25 @@ async fn get_tasks_by_date(
     db: State<'_, Arc<Mutex<AppDb>>>,
 ) -> Result<Vec<Task>, String> {
     let db = db.lock().await;
-    let rows = sqlx::query_as::<_, Task>(
-        "SELECT id, title, description, status, priority, date, start_time, duration, tags, repeat_type, timer_type, timer_duration, created_at, updated_at FROM tasks WHERE date = ? ORDER BY start_time ASC"
-    )
-    .bind(date)
-    .fetch_all(&db.db)
-    .await
-    .map_err(|e| format!("Failed to fetch tasks by date: {}", e))?;
-    Ok(rows)
+    db_get_tasks_by_date(&db.db, &date).await
 }
 
 #[tauri::command]
 async fn create_task(task: Task, db: State<'_, Arc<Mutex<AppDb>>>) -> Result<Task, String> {
     let db = db.lock().await;
-    sqlx::query(
-        "INSERT INTO tasks (id, title, description, status, priority, date, start_time, duration, tags, repeat_type, timer_type, timer_duration, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-    )
-    .bind(&task.id)
-    .bind(&task.title)
-    .bind(&task.description)
-    .bind(&task.status)
-    .bind(&task.priority)
-    .bind(&task.date)
-    .bind(&task.start_time)
-    .bind(&task.duration)
-    .bind(&task.tags)
-    .bind(&task.repeat_type)
-    .bind(&task.timer_type)
-    .bind(&task.timer_duration)
-    .bind(&task.created_at)
-    .bind(&task.updated_at)
-    .execute(&db.db)
-    .await
-    .map_err(|e| format!("Failed to create task: {}", e))?;
-    Ok(task)
+    db_create_task(&db.db, &task).await
 }
 
 #[tauri::command]
 async fn update_task(task: Task, db: State<'_, Arc<Mutex<AppDb>>>) -> Result<Task, String> {
     let db = db.lock().await;
-    sqlx::query(
-        "UPDATE tasks SET title=?, description=?, status=?, priority=?, date=?, start_time=?, duration=?, tags=?, repeat_type=?, timer_type=?, timer_duration=?, updated_at=? WHERE id=?"
-    )
-    .bind(&task.title)
-    .bind(&task.description)
-    .bind(&task.status)
-    .bind(&task.priority)
-    .bind(&task.date)
-    .bind(&task.start_time)
-    .bind(&task.duration)
-    .bind(&task.tags)
-    .bind(&task.repeat_type)
-    .bind(&task.timer_type)
-    .bind(&task.timer_duration)
-    .bind(&task.updated_at)
-    .bind(&task.id)
-    .execute(&db.db)
-    .await
-    .map_err(|e| format!("Failed to update task: {}", e))?;
-    Ok(task)
+    db_update_task(&db.db, &task).await
 }
 
 #[tauri::command]
 async fn delete_task(id: String, db: State<'_, Arc<Mutex<AppDb>>>) -> Result<(), String> {
     let db = db.lock().await;
-    sqlx::query("DELETE FROM tasks WHERE id = ?")
-        .bind(&id)
-        .execute(&db.db)
-        .await
-        .map_err(|e| format!("Failed to delete task: {}", e))?;
-    Ok(())
+    db_delete_task(&db.db, &id).await
 }
 
 #[tauri::command]
@@ -671,32 +778,7 @@ async fn batch_create_tasks(
     db: State<'_, Arc<Mutex<AppDb>>>,
 ) -> Result<usize, String> {
     let db = db.lock().await;
-    let mut count = 0;
-    for task in &tasks {
-        let result = sqlx::query(
-            "INSERT OR IGNORE INTO tasks (id, title, description, status, priority, date, start_time, duration, tags, repeat_type, timer_type, timer_duration, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-        )
-        .bind(&task.id)
-        .bind(&task.title)
-        .bind(&task.description)
-        .bind(&task.status)
-        .bind(&task.priority)
-        .bind(&task.date)
-        .bind(&task.start_time)
-        .bind(&task.duration)
-        .bind(&task.tags)
-        .bind(&task.repeat_type)
-        .bind(&task.timer_type)
-        .bind(&task.timer_duration)
-        .bind(&task.created_at)
-        .bind(&task.updated_at)
-        .execute(&db.db)
-        .await;
-        if result.is_ok() {
-            count += 1;
-        }
-    }
-    Ok(count)
+    db_batch_create_tasks(&db.db, &tasks).await
 }
 
 // ═══════════════════════════════════════════════════════════

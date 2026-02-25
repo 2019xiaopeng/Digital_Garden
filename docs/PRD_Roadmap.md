@@ -14,6 +14,9 @@
 - Phase 3 局域网共享基座已落地：`get_local_ip`、`toggle_local_server`、`/api/ping`
 - Axum 已支持静态资源托管与 CORS，iPad 浏览器可直接访问 `http://<IP>:9527`
 - Quiz 已完成 Tauri/HTTP 双模桥接：桌面端走 IPC，Web 端走 `/api/quiz/all|due`
+- Tasks 已完成 Tauri/HTTP 双模桥接：`fetchTasks/addTask/modifyTask/removeTask`
+- Axum 已新增 Tasks REST：`GET/POST /api/tasks`、`PUT/DELETE /api/tasks/{id}`
+- Tasks 番茄钟在 Web 端已具备 Fullscreen API 优雅降级（不支持时自动回退页面内全屏）
 
 **功能来源分类标记**：
 - 🟢 **已完成** — 代码与 UI 均已就位，日常可用
@@ -35,7 +38,7 @@
 |------|------|
 | 身份 | 考研备考学生（408 + 数一 + 英一 + 政治） |
 | 痛点 | 需要在多科目之间高效切换、精确管理碎片化时间、快速沉淀与回顾知识 |
-| 习惯 | 习惯 iPad 看视频、电脑做题复盘，需要多端同步 |
+| 习惯 | 真正的重度刷题推导依赖纸笔，iPad/手机在局域网下的核心定位是副屏控制台（任务打卡、番茄钟）与随身资料库（知识库/资源站查阅） |
 | 审美 | 偏好极简、高级感界面，减少视觉噪音提高专注力 |
 
 ### 1.3 设计语言
@@ -263,10 +266,15 @@
 
 ### 4.1 🔵 局域网共享 (LAN Sharing)
 
-**目标**：让 iPad/手机在同一 WiFi 下以浏览器访问桌面端全部数据，实现多端协同复习。
+**目标**：将 iPad/手机定位为学习副屏与资料阅读端，而非主力刷题端；在同一 WiFi 下提供任务与时间中枢、跨端阅读与轻量回顾能力。
 
 **用户故事**：
-> 考研人在书房电脑上录入任务和笔记 → 到图书馆用 iPad 打开局域网地址 → 看到今日任务和笔记 → 在 iPad 上勾选完成的任务 → 回到电脑上数据已同步。
+> 考研人在纸笔/电脑上完成重度刷题推导 → 抬头用 iPad 查看今日任务与番茄钟状态并打卡 → 课间用手机查阅知识库和资源站资料 → 晚上用平板轻量查看「今日待复习」。
+
+**核心场景（Top 3）**：
+1. **任务与时间中枢**：在平板上查看今日任务、勾选完成状态、同步操控番茄钟，作为学习副屏。
+2. **跨端阅读**：在平板上流畅阅读电脑“资源站”和“知识库”中的 Markdown/PDF 资料。
+3. **轻量回顾**：辅以错题本（Quiz）的轻量级“今日待复习”查看（以回顾为主，不承载重度推导）。
 
 **技术方案**：
 
@@ -297,8 +305,8 @@
 ```
 GET    /api/tasks?date=2026-02-25
 POST   /api/tasks
-PUT    /api/tasks/:id
-DELETE /api/tasks/:id
+PUT    /api/tasks/{id}
+DELETE /api/tasks/{id}
 GET    /api/logs
 GET    /api/notes/tree
 GET    /api/notes/file?path=xxx
@@ -762,15 +770,16 @@ Phase 6: 测试 + 打包发布    (Week 10)
 
 ---
 
-### Phase 3: 局域网共享 + 内网穿透 · Week 5–6
+### Phase 3: 局域网共享与同步 · Week 5–6
 
-**目标**：实现 iPad / 手机通过浏览器访问桌面端数据。
+**目标**：实现“副屏控制台 + 随身资料库”跨端协同，优先打通任务/番茄钟/知识阅读，不把重度刷题作为移动端主场景。
 
 | 任务 | 优先级 | 预估 | 关联 |
 |------|--------|------|------|
 | Rust 集成 Axum HTTP Server | P1 | 2d | §4.1 |
-| 封装 RESTful API（任务/日志/专注/笔记树） | P1 | 2d | §4.1 |
-| 前端 API 层适配（Tauri invoke ↔ fetch 自动切换） | P1 | 1.5d | §4.1 |
+| 扩展 RESTful API（Tasks 增删改查 + Notes/Resources 文件树与文本读取） | P1 | 2d | §4.1 |
+| 扩展 `apiBridge.ts`（Tauri invoke ↔ fetch 双模调用覆盖 Tasks/Notes/Resources） | P1 | 1.5d | §4.1 |
+| 番茄钟 Web 纯浏览器可运行（独立计时或与桌面端状态同步） | P1 | 1.5d | §4.1 |
 | 设置 sync 标签页：开关 + IP 展示 + 二维码 + PIN 码 | P1 | 1.5d | §4.1 |
 | 侧边栏 LAN 状态指示器 | P3 | 0.5d | §4.1 |
 | Tailscale 状态检测命令 | P2 | 1d | §4.2 |
@@ -778,7 +787,7 @@ Phase 6: 测试 + 打包发布    (Week 10)
 | 移动端响应式适配 | P2 | 1d | — |
 
 **验收标准**：
-- ✅ iPad Safari 输入 `http://192.168.x.x:9527` 可看到任务列表和笔记
+- ✅ iPad Safari 输入 `http://192.168.x.x:9527` 可进行任务勾选、查看番茄钟状态并阅读笔记/资源
 - ✅ 设置页显示局域网地址 + 二维码
 - ✅ Tailscale 在线时显示 MagicDNS 地址
 

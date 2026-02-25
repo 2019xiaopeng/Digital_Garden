@@ -1,3 +1,5 @@
+import type { LegacyTask } from "../lib/dataService";
+
 export type QuizQuestion = {
   id: string;
   subject: string;
@@ -14,6 +16,23 @@ export type QuizQuestion = {
   correct_count: number;
   ease_factor: number;
   interval: number;
+};
+
+type DbTaskRow = {
+  id: string;
+  title: string;
+  description: string;
+  status: "todo" | "in-progress" | "done";
+  priority: "low" | "medium" | "high";
+  date: string;
+  start_time: string;
+  duration: number;
+  tags: string;
+  repeat_type: string;
+  timer_type: string;
+  timer_duration: number;
+  created_at: string;
+  updated_at: string;
 };
 
 type FetchQuizQuestionsOptions = {
@@ -35,6 +54,169 @@ async function getInvoke() {
 function getLanBaseUrl(): string {
   const host = window.location.hostname || "127.0.0.1";
   return `http://${host}:9527`;
+}
+
+function nowIso(): string {
+  return new Date().toISOString();
+}
+
+function dbToLegacyTask(t: DbTaskRow): LegacyTask {
+  return {
+    id: t.id,
+    title: t.title,
+    description: t.description,
+    status: t.status,
+    priority: t.priority,
+    date: t.date,
+    startTime: t.start_time,
+    duration: t.duration,
+    tags: t.tags ? t.tags.split(",").filter(Boolean) : [],
+    repeat: (t.repeat_type || "none") as LegacyTask["repeat"],
+    timerType: (t.timer_type || "none") as LegacyTask["timerType"],
+    timerDuration: t.timer_duration || 25,
+  };
+}
+
+function legacyToDbTask(t: LegacyTask): DbTaskRow {
+  const now = nowIso();
+  return {
+    id: t.id,
+    title: t.title,
+    description: t.description || "",
+    status: t.status,
+    priority: t.priority,
+    date: t.date,
+    start_time: t.startTime || "09:00",
+    duration: t.duration || 1,
+    tags: (t.tags || []).join(","),
+    repeat_type: t.repeat || "none",
+    timer_type: t.timerType || "none",
+    timer_duration: t.timerDuration || 25,
+    created_at: now,
+    updated_at: now,
+  };
+}
+
+function hasCompleteTaskFields(task: Partial<LegacyTask>): task is LegacyTask {
+  return Boolean(
+    task.id &&
+      task.title &&
+      task.status &&
+      task.priority &&
+      task.date &&
+      task.startTime &&
+      typeof task.duration === "number" &&
+      Array.isArray(task.tags)
+  );
+}
+
+async function normalizeTaskUpdate(id: string, updates: Partial<LegacyTask>): Promise<LegacyTask> {
+  if (hasCompleteTaskFields(updates)) {
+    return { ...updates, id };
+  }
+
+  const allTasks = await fetchTasks();
+  const existing = allTasks.find((item) => item.id === id);
+  if (!existing) {
+    throw new Error("未找到要更新的任务记录");
+  }
+
+  return {
+    ...existing,
+    ...updates,
+    id,
+  };
+}
+
+export async function fetchTasks(date?: string): Promise<LegacyTask[]> {
+  if (isTauriRuntime()) {
+    const invoke = await getInvoke();
+    const rows = (date
+      ? await invoke<DbTaskRow[]>("get_tasks_by_date", { date })
+      : await invoke<DbTaskRow[]>("get_tasks")) || [];
+    return rows.map(dbToLegacyTask);
+  }
+
+  const query = date ? `?date=${encodeURIComponent(date)}` : "";
+  const response = await fetch(`${getLanBaseUrl()}/api/tasks${query}`);
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`HTTP 请求失败 (${response.status}): ${text || response.statusText}`);
+  }
+
+  const rows = (await response.json()) as DbTaskRow[];
+  return Array.isArray(rows) ? rows.map(dbToLegacyTask) : [];
+}
+
+export async function addTask(task: LegacyTask): Promise<LegacyTask> {
+  const payload = legacyToDbTask(task);
+
+  if (isTauriRuntime()) {
+    const invoke = await getInvoke();
+    const row = await invoke<DbTaskRow>("create_task", { task: payload });
+    return dbToLegacyTask(row || payload);
+  }
+
+  const response = await fetch(`${getLanBaseUrl()}/api/tasks`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`HTTP 请求失败 (${response.status}): ${text || response.statusText}`);
+  }
+
+  const row = (await response.json()) as DbTaskRow;
+  return dbToLegacyTask(row || payload);
+}
+
+export async function modifyTask(id: string, updates: Partial<LegacyTask>): Promise<LegacyTask> {
+  const merged = await normalizeTaskUpdate(id, updates);
+  const payload = legacyToDbTask({ ...merged, id });
+  payload.updated_at = nowIso();
+
+  if (isTauriRuntime()) {
+    const invoke = await getInvoke();
+    const row = await invoke<DbTaskRow>("update_task", { task: payload });
+    return dbToLegacyTask(row || payload);
+  }
+
+  const response = await fetch(`${getLanBaseUrl()}/api/tasks/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`HTTP 请求失败 (${response.status}): ${text || response.statusText}`);
+  }
+
+  const row = (await response.json()) as DbTaskRow;
+  return dbToLegacyTask(row || payload);
+}
+
+export async function removeTask(id: string): Promise<void> {
+  if (isTauriRuntime()) {
+    const invoke = await getInvoke();
+    await invoke("delete_task", { id });
+    return;
+  }
+
+  const response = await fetch(`${getLanBaseUrl()}/api/tasks/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+
+  if (!response.ok && response.status !== 204) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`HTTP 请求失败 (${response.status}): ${text || response.statusText}`);
+  }
 }
 
 export async function fetchQuizQuestions(options: FetchQuizQuestionsOptions): Promise<QuizQuestion[]> {

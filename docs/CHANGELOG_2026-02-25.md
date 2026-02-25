@@ -29,13 +29,20 @@
   - 加入 CORS 中间件（开发调试跨域放开）。
   - 托管静态前端资源（`dist/build`），iPad 访问 `http://<IP>:9527` 可直接渲染页面。
 - REST API 新增：
+  - `GET /api/tasks`（支持 `?date=YYYY-MM-DD`）
+  - `POST /api/tasks`
+  - `PUT /api/tasks/{id}`
+  - `DELETE /api/tasks/{id}`
   - `GET /api/quiz/all`
   - `GET /api/quiz/due`
+- Tasks 底层 SQLite 查询已抽离为公共函数，Tauri Command 与 Axum Handler 共用同一套逻辑。
 - 题库查询逻辑抽离为公共 SQLite 函数，Tauri Command 与 Axum Handler 复用同一套底层查询。
 - 前端新增 `src/utils/apiBridge.ts`：
   - Tauri 环境走 `invoke`
   - Web 环境走 HTTP（`http://<hostname>:9527/api/quiz/*`）
+- `apiBridge.ts` 已扩展 Tasks 双模能力：`fetchTasks`、`addTask`、`modifyTask`、`removeTask`。
 - Quiz 页面已替换直接 `invoke` 调用，改为统一桥接层。
+- Tasks 页面任务 CRUD 已迁移到桥接层；番茄钟全屏支持浏览器 Fullscreen API，并在不支持时自动降级为页面内最大化。
 
 ### 说明
 - 本日志已按发布准备做精简，历史细节改由 Git 提交记录追溯。

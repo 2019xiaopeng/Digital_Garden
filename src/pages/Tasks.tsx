@@ -8,9 +8,10 @@ import {
 } from "lucide-react";
 import { cn } from "../lib/utils";
 import { ConfirmDialog } from "../components/ConfirmDialog";
-import { TaskService, MarkdownImportService, AiService, isTauriAvailable } from "../lib/dataService";
+import { MarkdownImportService, AiService, isTauriAvailable } from "../lib/dataService";
 import type { LegacyTask, ImportedTask } from "../lib/dataService";
 import { bellUrl, getSettings } from "../lib/settings";
+import { addTask, fetchTasks, modifyTask, removeTask } from "../utils/apiBridge";
 
 type Task = LegacyTask;
 
@@ -39,9 +40,9 @@ export function Tasks() {
   const [aiParsedTasks, setAiParsedTasks] = useState<ImportedTask[]>([]);
   const [aiApiKey, setAiApiKey] = useState(() => getSettings().aiApiKey || localStorage.getItem("eva.ai.apiKey") || "");
 
-  // Load tasks from dataService on mount
+  // Load tasks on mount
   useEffect(() => {
-    TaskService.getAll().then((loaded) => {
+    fetchTasks().then((loaded) => {
       setTasks(loaded);
       setDataLoaded(true);
     });
@@ -74,6 +75,7 @@ export function Tasks() {
   const [isPomodoroFullscreen, setIsPomodoroFullscreen] = useState(false);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const pomodoroWidgetRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     // Create audio element for bell
@@ -85,6 +87,16 @@ export function Tasks() {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
       window.removeEventListener("eva:settings-updated", refreshBell);
+    };
+  }, []);
+
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      setIsPomodoroFullscreen(Boolean(document.fullscreenElement));
+    };
+    document.addEventListener("fullscreenchange", handleFullscreenChange);
+    return () => {
+      document.removeEventListener("fullscreenchange", handleFullscreenChange);
     };
   }, []);
 
@@ -131,7 +143,7 @@ export function Tasks() {
     return tasks.filter(t => t.date === selectedDate).sort((a, b) => a.startTime.localeCompare(b.startTime));
   }, [tasks, selectedDate]);
 
-  const handleAddTask = (e: React.FormEvent) => {
+  const handleAddTask = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newTask.title?.trim()) return;
 
@@ -155,7 +167,15 @@ export function Tasks() {
     }
     
     if (editingTaskId) {
-      setTasks(tasks.map(t => t.id === editingTaskId ? { ...t, ...newTask } as Task : t));
+      const existing = tasks.find((item) => item.id === editingTaskId);
+      if (!existing) return;
+      const updatedTask = { ...existing, ...newTask, id: editingTaskId } as Task;
+      setTasks(tasks.map(t => t.id === editingTaskId ? updatedTask : t));
+      try {
+        await modifyTask(editingTaskId, updatedTask);
+      } catch (error) {
+        console.warn("Update task failed:", error);
+      }
     } else {
       // Handle recurring tasks
       const newTasks: Task[] = [];
@@ -198,6 +218,11 @@ export function Tasks() {
       }
       
       setTasks([...tasks, ...newTasks]);
+      try {
+        await Promise.all(newTasks.map((task) => addTask(task as LegacyTask)));
+      } catch (error) {
+        console.warn("Create task failed:", error);
+      }
     }
     setIsAddingTask(false);
     setEditingTaskId(null);
@@ -205,14 +230,20 @@ export function Tasks() {
   };
 
   const toggleTaskStatus = (id: string) => {
+    let pendingUpdate: Task | null = null;
     setTasks(tasks.map(t => {
       if (t.id === id) {
-        const updated = { ...t, status: t.status === "done" ? "todo" : "done" } as Task;
-        TaskService.update(updated as unknown as LegacyTask).catch(console.warn);
-        return updated;
+        pendingUpdate = { ...t, status: t.status === "done" ? "todo" : "done" } as Task;
+        return pendingUpdate;
       }
       return t;
     }));
+
+    if (pendingUpdate) {
+      modifyTask(id, pendingUpdate).catch((error) => {
+        console.warn("Toggle task status failed:", error);
+      });
+    }
   };
 
   const getPriorityColor = (priority: string) => {
@@ -239,7 +270,7 @@ export function Tasks() {
     }
   };
 
-  const handleQuickAddTask = () => {
+  const handleQuickAddTask = async () => {
     if (!quickTaskTitle.trim()) return;
     const today = getTodayStr();
     if (selectedDate < today) {
@@ -261,7 +292,11 @@ export function Tasks() {
       timerDuration: 25,
     };
     setTasks(prev => [task, ...prev]);
-    TaskService.create(task as unknown as LegacyTask).catch(console.warn);
+    try {
+      await addTask(task as LegacyTask);
+    } catch (error) {
+      console.warn("Quick add task failed:", error);
+    }
     setQuickTaskTitle("");
   };
 
@@ -274,7 +309,9 @@ export function Tasks() {
         ...task,
         date: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`,
       };
-      TaskService.update(updated as unknown as LegacyTask).catch(console.warn);
+      modifyTask(id, updated as LegacyTask).catch((error) => {
+        console.warn("Postpone task failed:", error);
+      });
       return updated;
     }));
   };
@@ -284,7 +321,7 @@ export function Tasks() {
   };
   const confirmDeleteTask = async () => {
     if (!deletingTaskId) return;
-    await TaskService.delete(deletingTaskId);
+    await removeTask(deletingTaskId);
     setTasks(prev => prev.filter(t => t.id !== deletingTaskId));
     setDeletingTaskId(null);
   };
@@ -317,7 +354,7 @@ export function Tasks() {
   useEffect(() => {
     if (isFirstRender.current) { isFirstRender.current = false; return; }
     if (!dataLoaded) return;
-    // We sync individual operations via TaskService in handlers,
+    // We sync individual operations via apiBridge in handlers,
     // but also persist full array for localStorage fallback
     if (!isTauriAvailable()) {
       localStorage.setItem("qcb.tasks.v1", JSON.stringify(tasks));
@@ -356,7 +393,7 @@ export function Tasks() {
     setImportLoading(true);
     const count = await MarkdownImportService.importTasks(importPreview);
     // Reload tasks
-    const updated = await TaskService.getAll();
+    const updated = await fetchTasks();
     setTasks(updated);
     setImportResult(`成功导入 ${count} 个任务`);
     setImportLoading(false);
@@ -380,11 +417,52 @@ export function Tasks() {
   const handleAiConfirm = async () => {
     if (aiParsedTasks.length === 0) return;
     const count = await MarkdownImportService.importTasks(aiParsedTasks);
-    const updated = await TaskService.getAll();
+    const updated = await fetchTasks();
     setTasks(updated);
     setShowAiInbox(false);
     setAiInput("");
     setAiParsedTasks([]);
+  };
+
+  const togglePomodoroFullscreen = async () => {
+    if (!isPomodoroFullscreen) {
+      const requestFullscreen = pomodoroWidgetRef.current?.requestFullscreen;
+      if (requestFullscreen) {
+        try {
+          await requestFullscreen.call(pomodoroWidgetRef.current);
+          return;
+        } catch {
+          setIsPomodoroFullscreen(true);
+          return;
+        }
+      }
+      setIsPomodoroFullscreen(true);
+      return;
+    }
+
+    if (document.fullscreenElement && document.exitFullscreen) {
+      try {
+        await document.exitFullscreen();
+        return;
+      } catch {
+        setIsPomodoroFullscreen(false);
+        return;
+      }
+    }
+
+    setIsPomodoroFullscreen(false);
+  };
+
+  const closePomodoroWidget = async () => {
+    if (document.fullscreenElement && document.exitFullscreen) {
+      try {
+        await document.exitFullscreen();
+      } catch {
+        // noop
+      }
+    }
+    setActiveTimerTask(null);
+    setIsPomodoroFullscreen(false);
   };
 
   return (
@@ -1034,7 +1112,8 @@ export function Tasks() {
           isPomodoroFullscreen 
             ? "fixed inset-0 flex flex-col items-center justify-center p-8" 
             : "fixed bottom-6 right-6 rounded-2xl border border-gray-200/60 dark:border-gray-800 p-5 w-72 animate-in slide-in-from-bottom-8"
-        )}>
+        )}
+        ref={pomodoroWidgetRef}>
           <div className={cn(
             "flex justify-between items-start w-full",
             isPomodoroFullscreen ? "absolute top-8 left-8 right-8" : "mb-4"
@@ -1048,10 +1127,10 @@ export function Tasks() {
               </p>
             </div>
             <div className="flex items-center gap-2">
-              <button onClick={() => setIsPomodoroFullscreen(!isPomodoroFullscreen)} className="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors">
+              <button onClick={() => void togglePomodoroFullscreen()} className="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors">
                 {isPomodoroFullscreen ? <Minimize2 className="w-5 h-5" /> : <Maximize2 className="w-4 h-4" />}
               </button>
-              <button onClick={() => { setActiveTimerTask(null); setIsPomodoroFullscreen(false); }} className="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors">
+              <button onClick={() => void closePomodoroWidget()} className="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors">
                 <X className="w-5 h-5" />
               </button>
             </div>
