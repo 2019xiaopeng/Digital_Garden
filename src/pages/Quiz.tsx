@@ -1,12 +1,12 @@
-import { CheckCircle2, XCircle, HelpCircle, RefreshCw, Sparkles, ArrowLeft, Plus, X } from "lucide-react";
-import React, { useMemo, useState } from "react";
+import { CheckCircle2, XCircle, HelpCircle, RefreshCw, Sparkles, ArrowLeft, Plus, X, Wand2 } from "lucide-react";
+import React, { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { cn } from "../lib/utils";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
-import { isTauriAvailable } from "../lib/dataService";
+import { chatCompletionToText } from "../utils/aiClient";
 import "katex/dist/katex.min.css";
 
 type Subject = "408" | "数一" | "英一" | "政治";
@@ -26,6 +26,7 @@ type Question = {
   review_count: number;
   correct_count: number;
   ease_factor: number;
+  interval: number;
 };
 
 type NewQuestionForm = {
@@ -39,6 +40,14 @@ type NewQuestionForm = {
   answer: "A" | "B" | "C" | "D";
   explanation: string;
 };
+
+type QuizLocationState = {
+  generateFromResources?: boolean;
+  selectedResourcePaths?: string[];
+};
+
+type FormMode = "manual" | "smart";
+type PracticeMode = "all" | "due";
 
 const emptyForm: NewQuestionForm = {
   subject: "408",
@@ -63,10 +72,63 @@ export function Quiz() {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [createForm, setCreateForm] = useState<NewQuestionForm>(emptyForm);
   const [isCreating, setIsCreating] = useState(false);
+  const [formMode, setFormMode] = useState<FormMode>("manual");
+  const [smartInput, setSmartInput] = useState("");
+  const [smartParseError, setSmartParseError] = useState<string | null>(null);
+  const [showGeneratingHint, setShowGeneratingHint] = useState(false);
+  const [generatingText, setGeneratingText] = useState("正在呼叫 AI 根据资源生成题目...");
+  const [isAiGenerating, setIsAiGenerating] = useState(false);
+  const [practiceMode, setPracticeMode] = useState<PracticeMode>("all");
+  const [dueCount, setDueCount] = useState(0);
   const location = useLocation();
   const navigate = useNavigate();
+  const locationState = (location.state || {}) as QuizLocationState;
   const isGenerated = new URLSearchParams(location.search).get("generated") === "true";
+  const fromResourcesSignal =
+    new URLSearchParams(location.search).get("fromResources") === "true" ||
+    Boolean(locationState.generateFromResources);
+  const resourcePaths = locationState.selectedResourcePaths || [];
   const subjects: Subject[] = ["408", "数一", "英一", "政治"];
+
+  const getInvoke = async () => {
+    const mod = await import("@tauri-apps/api/core");
+    return mod.invoke;
+  };
+
+  const normalizeAiJsonText = (raw: string): string => {
+    const trimmed = raw.trim();
+    if (trimmed.startsWith("```")) {
+      return trimmed.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+    }
+    return trimmed;
+  };
+
+  const parseAiQuestions = (raw: string): Array<{ stem: string; options: string[]; answer: string; explanation: string }> => {
+    const normalized = normalizeAiJsonText(raw);
+    const parsed = JSON.parse(normalized) as Array<{
+      stem?: string;
+      options?: string[] | Record<string, string>;
+      answer?: string;
+      explanation?: string;
+    }>;
+
+    if (!Array.isArray(parsed)) return [];
+
+    const toOptionsArray = (options: string[] | Record<string, string> | undefined): string[] => {
+      if (!options) return [];
+      if (Array.isArray(options)) return options;
+      return ["A", "B", "C", "D"].map((key) => options[key] || "");
+    };
+
+    return parsed
+      .map((item) => ({
+        stem: String(item.stem || "").trim(),
+        options: toOptionsArray(item.options).map((opt) => String(opt || "").trim()).slice(0, 4),
+        answer: String(item.answer || "A").trim().toUpperCase(),
+        explanation: String(item.explanation || "").trim(),
+      }))
+      .filter((item) => item.stem && item.options.length === 4 && ["A", "B", "C", "D"].includes(item.answer));
+  };
 
   const parseOptions = (optionsJson: string | null): Array<{ id: string; text: string }> => {
     if (!optionsJson) {
@@ -95,33 +157,138 @@ export function Quiz() {
     }
   };
 
-  const loadQuestions = async (subject: Subject) => {
-    if (!isTauriAvailable()) {
-      setQuestions([]);
-      setLoadError("当前环境不支持本地数据库命令，请在 Tauri 桌面端使用。");
-      return;
-    }
-
+  const loadQuestions = async (subject: Subject, mode: PracticeMode = practiceMode) => {
     setIsLoading(true);
     setLoadError(null);
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      const rows = await invoke<Question[]>("get_questions");
+      const invoke = await getInvoke();
+      const rows = mode === "due"
+        ? await invoke<Question[]>("get_due_questions", { subject })
+        : await invoke<Question[]>("get_questions");
       const filtered = rows.filter((item) => item.subject === subject && item.type === "choice");
       setQuestions(filtered);
       setCurrentIndex(0);
       setSelected(null);
     } catch (err: any) {
-      setLoadError(err?.message || String(err));
+      setLoadError(`当前环境不支持本地数据库命令或 IPC 调用失败：${err?.message || String(err)}`);
       setQuestions([]);
     } finally {
       setIsLoading(false);
     }
   };
 
-  React.useEffect(() => {
-    loadQuestions(activeSubject);
-  }, [activeSubject]);
+  const refreshDueCount = async (subject: Subject) => {
+    try {
+      const invoke = await getInvoke();
+      const dueRows = await invoke<Question[]>("get_due_questions", { subject });
+      setDueCount(dueRows.length);
+    } catch {
+      setDueCount(0);
+    }
+  };
+
+  useEffect(() => {
+    loadQuestions(activeSubject, practiceMode);
+    refreshDueCount(activeSubject);
+  }, [activeSubject, practiceMode]);
+
+  useEffect(() => {
+    if (!fromResourcesSignal) return;
+    if (isAiGenerating) return;
+
+    const run = async () => {
+      if (resourcePaths.length === 0) return;
+
+      setShowGeneratingHint(true);
+      setIsAiGenerating(true);
+      setGeneratingText("正在读取资源文本...");
+
+      try {
+        const invoke = await getInvoke();
+        const textChunks: string[] = [];
+
+        for (const path of resourcePaths.slice(0, 3)) {
+          try {
+            const content = await invoke<string>("read_local_file_text", { path });
+            textChunks.push(`## 来源文件: ${path}\n${content.slice(0, 8000)}`);
+          } catch (err) {
+            console.warn("[Quiz] read_local_file_text failed:", path, err);
+          }
+        }
+
+        if (textChunks.length === 0) {
+          throw new Error("未读取到可用于出题的 .md/.txt 文本内容");
+        }
+
+        setGeneratingText("正在调用 AI 生成题目...");
+        const aiRaw = await chatCompletionToText({
+          messages: [
+            {
+              role: "system",
+              content:
+                "你是考研命题专家。请基于给定资料生成 3 道高质量单选题。必须严格只返回 JSON 数组，不要输出任何解释或 Markdown。每个元素字段固定为：stem(字符串), options(长度为4的字符串数组), answer(仅A/B/C/D), explanation(字符串)。",
+            },
+            {
+              role: "user",
+              content: `请根据以下资料生成题目：\n\n${textChunks.join("\n\n---\n\n")}`,
+            },
+          ],
+          temperature: 0.4,
+          maxTokens: 2200,
+        });
+
+        const generated = parseAiQuestions(aiRaw).slice(0, 3);
+        if (generated.length === 0) {
+          throw new Error("AI 返回内容无法解析为题目 JSON");
+        }
+
+        setGeneratingText("正在写入题库...");
+        for (const item of generated) {
+          const id = `q-ai-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+          await invoke("create_question", {
+            question: {
+              id,
+              subject: activeSubject,
+              type: "choice",
+              stem: item.stem,
+              options: JSON.stringify(item.options),
+              answer: item.answer,
+              explanation: item.explanation,
+              source_files: JSON.stringify(resourcePaths),
+              difficulty: 2,
+              created_at: new Date().toISOString(),
+              next_review: new Date().toISOString(),
+              review_count: 0,
+              correct_count: 0,
+              ease_factor: 2.5,
+              interval: 0,
+            },
+          });
+        }
+
+        await loadQuestions(activeSubject, practiceMode);
+        await refreshDueCount(activeSubject);
+        setGeneratingText("AI 出题完成，已写入练功房");
+      } catch (err: any) {
+        setLoadError(err?.message || String(err));
+        setGeneratingText("AI 出题失败，请检查资料格式或 API 配置");
+      } finally {
+        const timer = window.setTimeout(() => {
+          setShowGeneratingHint(false);
+          setIsAiGenerating(false);
+        }, 1400);
+
+        navigate(location.pathname, {
+          replace: true,
+          state: {},
+        });
+
+        return () => window.clearTimeout(timer);
+      }
+    };
+
+    run();
+  }, [fromResourcesSignal]);
 
   const currentQuestion = questions[currentIndex] || null;
   const options = useMemo(() => parseOptions(currentQuestion?.options || null), [currentQuestion?.options]);
@@ -134,14 +301,9 @@ export function Quiz() {
     if (!createForm.stem.trim()) return;
     if (!createForm.optionA.trim() || !createForm.optionB.trim() || !createForm.optionC.trim() || !createForm.optionD.trim()) return;
 
-    if (!isTauriAvailable()) {
-      setLoadError("当前环境不支持本地数据库命令，请在 Tauri 桌面端使用。\n");
-      return;
-    }
-
     setIsCreating(true);
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const invoke = await getInvoke();
       const id = `q-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       await invoke("create_question", {
         question: {
@@ -164,13 +326,15 @@ export function Quiz() {
           review_count: 0,
           correct_count: 0,
           ease_factor: 2.5,
+          interval: 0,
         },
       });
 
       setShowCreateModal(false);
       setCreateForm(emptyForm);
       setActiveSubject(createForm.subject);
-      await loadQuestions(createForm.subject);
+      await loadQuestions(createForm.subject, practiceMode);
+      await refreshDueCount(createForm.subject);
     } catch (err: any) {
       setLoadError(err?.message || String(err));
     } finally {
@@ -178,15 +342,74 @@ export function Quiz() {
     }
   };
 
+  const parseSmartQuestionInput = () => {
+    setSmartParseError(null);
+    const raw = smartInput.trim();
+    if (!raw) {
+      setSmartParseError("请先粘贴题目文本。");
+      return;
+    }
+
+    const lines = raw.split(/\r?\n/);
+    const optionRegex = /^\s*(?:[-*]\s*)?([A-D])[\.、:：\)\s]+(.+)$/i;
+    const optionMap: Record<"A" | "B" | "C" | "D", string> = { A: "", B: "", C: "", D: "" };
+
+    const optionLineIndexes: number[] = [];
+    lines.forEach((line, index) => {
+      const match = line.match(optionRegex);
+      if (match) {
+        const key = match[1].toUpperCase() as "A" | "B" | "C" | "D";
+        optionMap[key] = match[2].trim();
+        optionLineIndexes.push(index);
+      }
+    });
+
+    const answerMatch = raw.match(/(?:答案|正确答案)\s*[:：]?\s*([A-D])/i);
+    const answer = (answerMatch?.[1]?.toUpperCase() || "A") as "A" | "B" | "C" | "D";
+
+    const explanationMatch = raw.match(/(?:解析|答案解析)\s*[:：]?\s*([\s\S]*)$/i);
+    const explanation = explanationMatch?.[1]?.trim() || "";
+
+    let stem = "";
+    const explicitStemMatch = raw.match(/题干\s*[:：]?\s*([\s\S]*?)(?:\n\s*(?:[-*]\s*)?[A-D][\.、:：\)\s]|$)/i);
+    if (explicitStemMatch?.[1]) {
+      stem = explicitStemMatch[1].trim();
+    } else if (optionLineIndexes.length > 0) {
+      stem = lines.slice(0, optionLineIndexes[0]).join("\n").trim();
+    } else {
+      stem = raw;
+    }
+
+    if (!stem) {
+      setSmartParseError("未识别到题干，请检查输入格式。");
+      return;
+    }
+
+    if (!optionMap.A || !optionMap.B || !optionMap.C || !optionMap.D) {
+      setSmartParseError("未识别完整的 A/B/C/D 选项，请检查输入格式。");
+      return;
+    }
+
+    setCreateForm((prev) => ({
+      ...prev,
+      stem,
+      optionA: optionMap.A,
+      optionB: optionMap.B,
+      optionC: optionMap.C,
+      optionD: optionMap.D,
+      answer,
+      explanation,
+    }));
+    setFormMode("manual");
+  };
+
   const handleAnswer = async (optionId: string) => {
     if (!currentQuestion || hasAnswered || isSubmittingAnswer) return;
     setSelected(optionId);
 
-    if (!isTauriAvailable()) return;
-
     setIsSubmittingAnswer(true);
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const invoke = await getInvoke();
       await invoke("answer_question", {
         id: currentQuestion.id,
         isCorrect: optionId === correctAnswer,
@@ -230,6 +453,35 @@ export function Quiz() {
         <p className="text-lg text-gray-600 dark:text-gray-400 font-medium">
           {isGenerated ? "基于所选资源生成的专属测试题" : "录题 - 刷题 - 判题闭环"}
         </p>
+        {fromResourcesSignal && resourcePaths.length > 0 && (
+          <p className="mt-2 text-sm text-emerald-600 dark:text-emerald-300">
+            已接收资源站信号：{resourcePaths.length} 个资源待生成题目
+          </p>
+        )}
+        <div className="mt-3 flex items-center justify-center gap-3">
+          <button
+            onClick={() => setPracticeMode("all")}
+            className={cn(
+              "px-3 py-1.5 text-xs rounded-lg border",
+              practiceMode === "all"
+                ? "border-[#88B5D3] bg-[#88B5D3]/15 text-[#88B5D3]"
+                : "border-gray-200 dark:border-gray-700"
+            )}
+          >
+            全部题目
+          </button>
+          <button
+            onClick={() => setPracticeMode("due")}
+            className={cn(
+              "px-3 py-1.5 text-xs rounded-lg border",
+              practiceMode === "due"
+                ? "border-emerald-500 bg-emerald-500/15 text-emerald-600 dark:text-emerald-300"
+                : "border-gray-200 dark:border-gray-700"
+            )}
+          >
+            今日待复习 ({dueCount})
+          </button>
+        </div>
         <div className="flex flex-wrap items-center justify-center gap-2 mt-4 mb-4">
           {subjects.map(subject => (
             <button
@@ -371,6 +623,56 @@ export function Quiz() {
               </button>
             </div>
             <form onSubmit={submitCreateQuestion} className="p-6 space-y-4">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setFormMode("manual")}
+                  className={cn(
+                    "px-3 py-1.5 text-xs rounded-lg border",
+                    formMode === "manual"
+                      ? "border-[#88B5D3] bg-[#88B5D3]/15 text-[#88B5D3]"
+                      : "border-gray-200 dark:border-gray-700"
+                  )}
+                >
+                  手动录入
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFormMode("smart")}
+                  className={cn(
+                    "px-3 py-1.5 text-xs rounded-lg border inline-flex items-center gap-1",
+                    formMode === "smart"
+                      ? "border-[#88B5D3] bg-[#88B5D3]/15 text-[#88B5D3]"
+                      : "border-gray-200 dark:border-gray-700"
+                  )}
+                >
+                  <Wand2 className="w-3.5 h-3.5" /> 智能文本识别
+                </button>
+              </div>
+
+              {formMode === "smart" && (
+                <div className="space-y-3 bg-gray-50/70 dark:bg-[#101929] rounded-2xl border border-gray-200 dark:border-gray-800 p-4">
+                  <textarea
+                    value={smartInput}
+                    onChange={(e) => setSmartInput(e.target.value)}
+                    placeholder={"粘贴题目 Markdown 文本，例如：\n题干：...\nA. ...\nB. ...\nC. ...\nD. ...\n答案：B\n解析：..."}
+                    className="w-full min-h-44 px-3 py-2 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900"
+                  />
+                  {smartParseError && (
+                    <div className="text-xs text-red-600 dark:text-red-400">{smartParseError}</div>
+                  )}
+                  <div className="flex justify-end">
+                    <button
+                      type="button"
+                      onClick={parseSmartQuestionInput}
+                      className="px-3 py-1.5 rounded-lg text-sm border border-[#88B5D3] text-[#88B5D3] hover:bg-[#88B5D3]/10"
+                    >
+                      解析到表单
+                    </button>
+                  </div>
+                </div>
+              )}
+
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                 <select
                   value={createForm.subject}
@@ -427,10 +729,23 @@ export function Quiz() {
                   取消
                 </button>
                 <button type="submit" disabled={isCreating} className="px-4 py-2 rounded-xl bg-[#88B5D3] hover:bg-[#75a0be] text-white disabled:opacity-60">
-                  {isCreating ? "提交中..." : "保存题目"}
+                  {isCreating ? "提交中..." : "一键保存"}
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {showGeneratingHint && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/35 backdrop-blur-sm" />
+          <div className="relative w-full max-w-md rounded-2xl bg-white dark:bg-[#0b1320] border border-gray-200 dark:border-gray-800 shadow-xl p-6 text-center">
+            <div className="inline-flex w-12 h-12 rounded-2xl items-center justify-center bg-emerald-50 dark:bg-emerald-500/10 text-emerald-600 dark:text-emerald-300 mb-3">
+              <Sparkles className="w-6 h-6 animate-pulse" />
+            </div>
+            <h4 className="text-base font-semibold text-gray-900 dark:text-white">正在呼叫 AI 根据资源生成题目...</h4>
+            <p className="text-sm text-gray-500 dark:text-gray-400 mt-2">{generatingText}</p>
           </div>
         </div>
       )}

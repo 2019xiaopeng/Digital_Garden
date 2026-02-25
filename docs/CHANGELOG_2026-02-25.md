@@ -123,3 +123,13 @@
 - 前端判题反馈：
   - 答对选项标绿、答错选项标红
   - 答题后自动展开解析区并静默落盘刷题记录
+
+### 11) Phase 2 冲刺：真实 AI 出题 + SM-2 + 今日待复习
+- 资源页「生成练功房」已可携带选中文件路径跳转 Quiz，并触发真实生成流程
+- 后端新增 `read_local_file_text(path)`：支持读取本地 `.md/.txt` 文本（PDF 暂不支持）
+- Quiz 已接入 `aiClient`（SiliconFlow / DeepSeek），根据资源文本调用 AI 生成 3 道单选题
+- AI 返回内容按严格 JSON 解析后自动入库（循环调用 `create_question`）并刷新题库
+- `answer_question` 升级为基础 SM-2：
+  - 维护 `interval`、`ease_factor`、`next_review`
+  - 答对按 1/6/乘 EF 推进间隔，答错重置为 1 天，EF 最低 1.3
+- 新增 `get_due_questions`，前端上线「今日待复习」视图，可只刷到期题

@@ -206,6 +206,9 @@
 - 已完成基础闭环：手动录题（Modal）→ 真实刷题（SQLite）→ 判题落盘（统计更新）
 - 题干与解析已支持 Markdown + LaTeX 渲染
 - 新增 `answer_question` 命令，记录 `review_count/correct_count/next_review`
+- 资源站已打通真实 AI 出题链路：选中文件 → 读取文本 → DeepSeek 生成 JSON 题目 → 自动入库
+- `answer_question` 已升级为基础 SM-2 间隔重复算法（`interval` / `ease_factor` / `next_review`）
+- Quiz 已新增「今日待复习」视图，可筛选 `next_review <= now` 且 `review_count > 0` 的题
 
 ---
 
@@ -520,8 +523,8 @@ get_due_questions(date)                  // 获取今日待复习题
 ```
 
 **当前实现补充（2026-02-25）**：
-- 已实现：`get_questions`、`create_question`、`answer_question`
-- 待实现：`batch_create_questions`、`update_question_review`（SM-2）、`delete_question`、`get_due_questions`
+- 已实现：`get_questions`、`get_due_questions`、`create_question`、`answer_question`（含基础 SM-2）
+- 待实现：`batch_create_questions`、`delete_question`
 
 ---
 

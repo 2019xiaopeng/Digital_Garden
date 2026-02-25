@@ -108,6 +108,7 @@ pub struct Question {
     pub review_count: i32,
     pub correct_count: i32,
     pub ease_factor: f64,
+    pub r#interval: i32,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
@@ -274,15 +275,42 @@ async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, String> {
             source_files TEXT DEFAULT '[]',
             difficulty INTEGER DEFAULT 2,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            next_review DATETIME,
+            next_review DATETIME DEFAULT CURRENT_TIMESTAMP,
             review_count INTEGER DEFAULT 0,
             correct_count INTEGER DEFAULT 0,
-            ease_factor REAL DEFAULT 2.5
+            ease_factor REAL DEFAULT 2.5,
+            interval INTEGER DEFAULT 0
         )",
     )
     .execute(&pool)
     .await
     .map_err(|e| format!("Failed to create questions table: {}", e))?;
+
+    let question_columns: Vec<String> = sqlx::query_scalar::<_, String>(
+        "SELECT name FROM pragma_table_info('questions')",
+    )
+    .fetch_all(&pool)
+    .await
+    .map_err(|e| format!("Failed to inspect questions columns: {}", e))?;
+
+    if !question_columns.iter().any(|col| col == "interval") {
+        sqlx::query("ALTER TABLE questions ADD COLUMN interval INTEGER DEFAULT 0")
+            .execute(&pool)
+            .await
+            .map_err(|e| format!("Failed to add questions.interval column: {}", e))?;
+    }
+
+    if !question_columns.iter().any(|col| col == "next_review") {
+        sqlx::query("ALTER TABLE questions ADD COLUMN next_review DATETIME DEFAULT CURRENT_TIMESTAMP")
+            .execute(&pool)
+            .await
+            .map_err(|e| format!("Failed to add questions.next_review column: {}", e))?;
+    }
+
+    sqlx::query("UPDATE questions SET next_review = CURRENT_TIMESTAMP WHERE next_review IS NULL")
+        .execute(&pool)
+        .await
+        .ok();
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS ai_sessions (
@@ -1004,11 +1032,47 @@ async fn delete_resource(
     async fn get_questions(db: State<'_, Arc<Mutex<AppDb>>>) -> Result<Vec<Question>, String> {
         let db = db.lock().await;
         let rows = sqlx::query_as::<_, Question>(
-            "SELECT id, subject, type, stem, options, answer, explanation, source_files, difficulty, created_at, next_review, review_count, correct_count, ease_factor FROM questions ORDER BY created_at DESC",
+            "SELECT id, subject, type, stem, options, answer, explanation, source_files, difficulty, created_at, next_review, review_count, correct_count, ease_factor, interval FROM questions ORDER BY created_at DESC",
         )
         .fetch_all(&db.db)
         .await
         .map_err(|e| format!("Failed to fetch questions: {}", e))?;
+        Ok(rows)
+    }
+
+    #[tauri::command]
+    async fn get_due_questions(
+        subject: Option<String>,
+        db: State<'_, Arc<Mutex<AppDb>>>,
+    ) -> Result<Vec<Question>, String> {
+        let db = db.lock().await;
+
+        let rows = if let Some(subject_value) = subject {
+            sqlx::query_as::<_, Question>(
+                "SELECT id, subject, type, stem, options, answer, explanation, source_files, difficulty, created_at, next_review, review_count, correct_count, ease_factor, interval
+                 FROM questions
+                 WHERE review_count > 0
+                   AND datetime(COALESCE(next_review, CURRENT_TIMESTAMP)) <= datetime('now')
+                   AND subject = ?
+                 ORDER BY datetime(COALESCE(next_review, CURRENT_TIMESTAMP)) ASC",
+            )
+            .bind(subject_value)
+            .fetch_all(&db.db)
+            .await
+            .map_err(|e| format!("Failed to fetch due questions by subject: {}", e))?
+        } else {
+            sqlx::query_as::<_, Question>(
+                "SELECT id, subject, type, stem, options, answer, explanation, source_files, difficulty, created_at, next_review, review_count, correct_count, ease_factor, interval
+                 FROM questions
+                 WHERE review_count > 0
+                   AND datetime(COALESCE(next_review, CURRENT_TIMESTAMP)) <= datetime('now')
+                 ORDER BY datetime(COALESCE(next_review, CURRENT_TIMESTAMP)) ASC",
+            )
+            .fetch_all(&db.db)
+            .await
+            .map_err(|e| format!("Failed to fetch due questions: {}", e))?
+        };
+
         Ok(rows)
     }
 
@@ -1019,7 +1083,7 @@ async fn delete_resource(
     ) -> Result<Question, String> {
         let db = db.lock().await;
         sqlx::query(
-            "INSERT OR REPLACE INTO questions (id, subject, type, stem, options, answer, explanation, source_files, difficulty, created_at, next_review, review_count, correct_count, ease_factor) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO questions (id, subject, type, stem, options, answer, explanation, source_files, difficulty, created_at, next_review, review_count, correct_count, ease_factor, interval) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&question.id)
         .bind(&question.subject)
@@ -1035,11 +1099,44 @@ async fn delete_resource(
         .bind(question.review_count)
         .bind(question.correct_count)
         .bind(question.ease_factor)
+        .bind(question.r#interval)
         .execute(&db.db)
         .await
         .map_err(|e| format!("Failed to create question: {}", e))?;
         Ok(question)
     }
+
+#[tauri::command]
+async fn read_local_file_text(app: tauri::AppHandle, path: String) -> Result<String, String> {
+    let input_path = PathBuf::from(&path);
+
+    let resolved_path = if input_path.is_absolute() {
+        input_path
+    } else {
+        let root = PathBuf::from(ensure_workspace_dirs(&app).await?);
+        let resources_base = root.join("Resources");
+        let sanitized = sanitize_relative_path(&path)?;
+        resources_base.join(sanitized)
+    };
+
+    let extension = resolved_path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    if extension == "pdf" {
+        return Err("暂不支持读取 PDF 文本，请先转换为 .md 或 .txt".to_string());
+    }
+
+    if extension != "md" && extension != "txt" {
+        return Err("当前仅支持 .md / .txt 文本文件".to_string());
+    }
+
+    fs::read_to_string(&resolved_path)
+        .await
+        .map_err(|e| format!("Failed to read file {}: {}", resolved_path.to_string_lossy(), e))
+}
 
 #[tauri::command]
 async fn answer_question(
@@ -1049,27 +1146,57 @@ async fn answer_question(
 ) -> Result<(), String> {
     let db = db.lock().await;
 
-    let next_review_expr = if is_correct {
-        "datetime('now', '+2 day')"
+    let row = sqlx::query_as::<_, (i32, i32, f64, i32)>(
+        "SELECT review_count, correct_count, ease_factor, interval FROM questions WHERE id = ?",
+    )
+    .bind(&id)
+    .fetch_optional(&db.db)
+    .await
+    .map_err(|e| format!("Failed to fetch question stats: {}", e))?
+    .ok_or_else(|| "Question not found".to_string())?;
+
+    let (review_count, correct_count, ease_factor, interval_days) = row;
+    let new_review_count = review_count + 1;
+    let new_correct_count = if is_correct {
+        correct_count + 1
     } else {
-        "datetime('now', '+1 day')"
+        correct_count
     };
 
-    let sql = format!(
-        "UPDATE questions
-         SET review_count = review_count + 1,
-             correct_count = correct_count + ?,
-             next_review = {}
-         WHERE id = ?",
-        next_review_expr
-    );
+    let (new_interval_days, new_ease_factor) = if is_correct {
+        let interval = if new_review_count == 1 {
+            1
+        } else if new_review_count == 2 {
+            6
+        } else {
+            ((interval_days as f64) * ease_factor).round().max(1.0) as i32
+        };
 
-    sqlx::query(&sql)
-        .bind(if is_correct { 1 } else { 0 })
-        .bind(&id)
-        .execute(&db.db)
-        .await
-        .map_err(|e| format!("Failed to update question answer stats: {}", e))?;
+        let ef = (ease_factor + 0.05).max(1.3);
+        (interval, ef)
+    } else {
+        let ef = (ease_factor - 0.2).max(1.3);
+        (1, ef)
+    };
+
+    sqlx::query(
+        "UPDATE questions
+         SET review_count = ?,
+             correct_count = ?,
+             ease_factor = ?,
+             interval = ?,
+             next_review = datetime('now', '+' || ? || ' day')
+         WHERE id = ?",
+    )
+    .bind(new_review_count)
+    .bind(new_correct_count)
+    .bind(new_ease_factor)
+    .bind(new_interval_days)
+    .bind(new_interval_days)
+    .bind(&id)
+    .execute(&db.db)
+    .await
+    .map_err(|e| format!("Failed to update question answer stats: {}", e))?;
 
     Ok(())
 }
@@ -2525,7 +2652,9 @@ pub fn run() {
             add_resource,
             delete_resource,
             get_questions,
+            get_due_questions,
             create_question,
+            read_local_file_text,
             answer_question,
             get_ai_sessions,
             create_ai_session,

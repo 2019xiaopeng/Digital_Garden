@@ -115,7 +115,12 @@ async function getInvoke() {
 }
 
 export function isTauriAvailable(): boolean {
-  return typeof window !== "undefined" && "__TAURI__" in window;
+  if (typeof window === "undefined") return false;
+  const win = window as Window & {
+    __TAURI__?: unknown;
+    __TAURI_INTERNALS__?: unknown;
+  };
+  return Boolean(win.__TAURI__ || win.__TAURI_INTERNALS__);
 }
 
 // ═══════════════════════════════════════════════════════════

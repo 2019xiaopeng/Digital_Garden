@@ -149,8 +149,16 @@ export function Resources() {
 
   const handleGenerateQuiz = () => {
     if (selectedIds.length === 0) return;
-    // In a real app, we would pass the selected resource IDs to the quiz generator
-    navigate("/quiz?generated=true");
+
+    const selectedResources = resources.filter((item) => selectedIds.includes(item.id));
+    const selectedResourcePaths = selectedResources.map((item) => item.path);
+
+    navigate("/quiz?generated=true&fromResources=true", {
+      state: {
+        generateFromResources: true,
+        selectedResourcePaths,
+      },
+    });
   };
 
   const handleFileUpload = async () => {
