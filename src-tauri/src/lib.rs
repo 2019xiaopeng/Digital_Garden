@@ -204,6 +204,11 @@ struct TasksQuery {
     date: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct NotesFileQuery {
+    path: String,
+}
+
 fn resolve_static_assets_dir() -> PathBuf {
     let mut candidates: Vec<PathBuf> = Vec::new();
 
@@ -344,6 +349,16 @@ async fn db_batch_create_tasks(pool: &sqlx::SqlitePool, tasks: &[Task]) -> Resul
     Ok(count)
 }
 
+async fn db_get_resources_rows(pool: &sqlx::SqlitePool) -> Result<Vec<Resource>, String> {
+    let rows = sqlx::query_as::<_, Resource>(
+        "SELECT id, name, path, file_type, subject, size_bytes, created_at FROM resources ORDER BY created_at DESC",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to fetch resources: {}", e))?;
+    Ok(rows)
+}
+
 async fn db_fetch_due_questions(
     pool: &sqlx::SqlitePool,
     subject: Option<&str>,
@@ -448,6 +463,75 @@ async fn api_delete_task_handler(
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn api_resources_handler(
+    AxumState(db): AxumState<Arc<Mutex<AppDb>>>,
+) -> Result<Json<Vec<Resource>>, (StatusCode, String)> {
+    let db = db.lock().await;
+    let rows = db_get_resources_rows(&db.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(rows))
+}
+
+async fn load_notes_tree(app: &tauri::AppHandle) -> Result<Vec<NotesFsNode>, String> {
+    let root = PathBuf::from(ensure_workspace_dirs(app).await?);
+    let notes_root = root.join("Notes");
+
+    fs::create_dir_all(&notes_root).await.map_err(|e| {
+        format!(
+            "Failed to ensure notes directory {}: {}",
+            notes_root.to_string_lossy(),
+            e
+        )
+    })?;
+
+    scan_notes_directory_sync(&notes_root)
+}
+
+async fn api_notes_tree_handler(
+    app: tauri::AppHandle,
+) -> Result<Json<Vec<NotesFsNode>>, (StatusCode, String)> {
+    let rows = load_notes_tree(&app)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(rows))
+}
+
+async fn api_notes_file_handler(
+    app: tauri::AppHandle,
+    Query(params): Query<NotesFileQuery>,
+) -> Result<String, (StatusCode, String)> {
+    let path = params.path.trim();
+    if path.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "path 参数不能为空".to_string()));
+    }
+
+    let full_path = {
+        let as_path = PathBuf::from(path);
+        if as_path.is_absolute() {
+            as_path
+        } else {
+            let root = PathBuf::from(ensure_workspace_dirs(&app).await.map_err(|e| {
+                (StatusCode::INTERNAL_SERVER_ERROR, e)
+            })?);
+            let notes_root = root.join("Notes");
+            let sanitized = sanitize_relative_path(path)
+                .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+            notes_root.join(sanitized)
+        }
+    };
+
+    let content = fs::read_to_string(&full_path)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to read notes file {}: {}", full_path.to_string_lossy(), e),
+            )
+        })?;
+    Ok(content)
+}
+
 #[tauri::command]
 fn get_local_ip() -> String {
     match local_ip_address::local_ip() {
@@ -500,10 +584,28 @@ async fn toggle_local_server(
         static_assets_dir.to_string_lossy()
     );
 
+    let app_handle_for_notes_tree = app.clone();
+    let app_handle_for_notes_file = app.clone();
+
     let router = Router::new()
         .route("/api/ping", get(local_ping_handler))
         .route("/api/tasks", get(api_tasks_handler).post(api_create_task_handler))
         .route("/api/tasks/{id}", put(api_update_task_handler).delete(api_delete_task_handler))
+        .route("/api/resources", get(api_resources_handler))
+        .route(
+            "/api/notes/tree",
+            get(move || {
+                let app = app_handle_for_notes_tree.clone();
+                async move { api_notes_tree_handler(app).await }
+            }),
+        )
+        .route(
+            "/api/notes/file",
+            get(move |query: Query<NotesFileQuery>| {
+                let app = app_handle_for_notes_file.clone();
+                async move { api_notes_file_handler(app, query).await }
+            }),
+        )
         .route("/api/quiz/all", get(api_quiz_all_handler))
         .route("/api/quiz/due", get(api_quiz_due_handler))
         .fallback_service(get_service(
@@ -1222,13 +1324,7 @@ pub struct Resource {
 #[tauri::command]
 async fn get_resources(db: State<'_, Arc<Mutex<AppDb>>>) -> Result<Vec<Resource>, String> {
     let db = db.lock().await;
-    let rows = sqlx::query_as::<_, Resource>(
-        "SELECT id, name, path, file_type, subject, size_bytes, created_at FROM resources ORDER BY created_at DESC",
-    )
-    .fetch_all(&db.db)
-    .await
-    .map_err(|e| format!("Failed to fetch resources: {}", e))?;
-    Ok(rows)
+    db_get_resources_rows(&db.db).await
 }
 
 #[tauri::command]
@@ -2365,18 +2461,7 @@ fn scan_notes_directory_sync(current: &Path) -> Result<Vec<NotesFsNode>, String>
 
 #[tauri::command]
 async fn scan_notes_directory(app: tauri::AppHandle) -> Result<Vec<NotesFsNode>, String> {
-    let root = PathBuf::from(ensure_workspace_dirs(&app).await?);
-    let notes_root = root.join("Notes");
-
-    fs::create_dir_all(&notes_root).await.map_err(|e| {
-        format!(
-            "Failed to ensure notes directory {}: {}",
-            notes_root.to_string_lossy(),
-            e
-        )
-    })?;
-
-    scan_notes_directory_sync(&notes_root)
+    load_notes_tree(&app).await
 }
 
 #[derive(Debug, Serialize)]

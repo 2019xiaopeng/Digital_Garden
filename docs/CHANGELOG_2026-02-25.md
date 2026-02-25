@@ -49,24 +49,22 @@
 
 ---
 
-## Phase 3 最终冲刺（文档确认）
+## Phase 3 最终冲刺（已完成）
 
 ### 新增产品判断
 - iPad/手机在局域网中的核心定位是“任务打卡 + 番茄钟副屏控制台”与“知识资料跨端阅读”，不是重度刷题主战场。
 
-### 本轮确认的收口目标（待开发）
-- 首页（Dashboard/Home）完成双模降级，移除 Web 端残留原生 `invoke` 依赖，避免白屏。
-- Axum 增补跨端阅读接口：
+### 本轮收口结果（代码落地）
+- 首页（Dashboard）已完成双模数据桥接，Web 端不再触发原生 `invoke` 链路。
+- Axum 已补齐跨端阅读接口：
   - `GET /api/notes/tree`
   - `GET /api/notes/file?path=...`
   - `GET /api/resources`
-- `apiBridge.ts` 扩展统一桥接：
-  - `fetchDashboardStats()`（如首页需要）
+- `apiBridge.ts` 已扩展统一桥接：
+  - `fetchDashboardStats()`
   - `fetchNotesTree()`
   - `fetchNoteContent(relativePath)`
   - `fetchResources()`
-- Dashboard / Notes / Resources 页面统一走桥接层，不再直接依赖 `@tauri-apps/api/core`。
-- Web 端防御性降级：隐藏或禁用文件管理动作（新建/重命名/删除/上传/本地打开），点击提示“局域网模式下仅支持跨端阅读，请在桌面端进行文件管理”。
-
-### 交付约束
-- 本次提交仅更新 PRD 与 CHANGELOG，不包含代码实现。
+  - `invokeDesktop()`（桌面专属写操作统一入口）
+- Dashboard / Notes / Resources 已统一走桥接层，页面内不再直接依赖 `@tauri-apps/api/core`。
+- Web 端防御性降级已生效：文件管理动作改为禁用/只读提示，统一文案为“局域网模式下仅支持跨端阅读，请在桌面端进行文件管理”。

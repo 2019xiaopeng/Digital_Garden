@@ -8,6 +8,7 @@ import { ThemedPromptDialog } from "../components/ThemedPromptDialog";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { isTauriAvailable } from "../lib/dataService";
 import { open } from "@tauri-apps/plugin-dialog";
+import { fetchNoteContent, fetchNotesTree, invokeDesktop, type NotesFsNode } from "../utils/apiBridge";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -25,13 +26,6 @@ type TreeNode = {
   type: "folder" | "file";
   path?: string;       // absolute path on disk (Tauri) or virtual path
   children?: TreeNode[];
-};
-
-type NotesFsNode = {
-  name: string;
-  path: string;        // relative path from Notes/
-  is_dir: boolean;
-  children: NotesFsNode[];
 };
 const DEFAULT_CHAT_TITLE = "新对话";
 
@@ -103,10 +97,18 @@ export function Notes() {
   const renameTargetSession = chatSessions.find(session => session.id === chatSessionToRenameId) || null;
   const deleteTargetSession = chatSessions.find(session => session.id === chatSessionToDeleteId) || null;
   const chatHistory = activeSessionId ? (chatMessagesBySession[activeSessionId] || []) : [];
+  const isDesktopRuntime = isTauriAvailable();
+  const readonlyWebHint = "局域网模式下仅支持跨端阅读，请在桌面端进行文件管理";
 
   const showUploadToast = (type: "success" | "error", message: string) => {
     setUploadToast({ type, message });
     window.setTimeout(() => setUploadToast(null), 1800);
+  };
+
+  const ensureDesktopWritable = () => {
+    if (isDesktopRuntime) return true;
+    showUploadToast("error", readonlyWebHint);
+    return false;
   };
 
   const convertFsNodesToTree = useCallback((nodes: NotesFsNode[]): TreeNode[] => {
@@ -133,24 +135,21 @@ export function Notes() {
   }, []);
 
   const loadTreeFromDisk = useCallback(async (silent = false) => {
-    if (!isTauriAvailable()) {
-      try {
-        const saved = localStorage.getItem("eva:knowledge-tree");
-        if (saved) setTreeData(JSON.parse(saved) as TreeNode[]);
-      } catch {}
-      return;
-    }
-
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      const scanned = await invoke<NotesFsNode[]>("scan_notes_directory");
+      const scanned = await fetchNotesTree();
       setTreeData(convertFsNodesToTree(scanned));
       if (!silent) showUploadToast("success", "已同步磁盘目录");
     } catch (err: any) {
+      if (!isDesktopRuntime) {
+        try {
+          const saved = localStorage.getItem("eva:knowledge-tree");
+          if (saved) setTreeData(JSON.parse(saved) as TreeNode[]);
+        } catch {}
+      }
       console.error("[Notes] Failed to scan notes directory:", err);
       showUploadToast("error", `同步失败：${err?.message || String(err)}`);
     }
-  }, [convertFsNodesToTree]);
+  }, [convertFsNodesToTree, isDesktopRuntime]);
 
   useEffect(() => {
     loadTreeFromDisk(true);
@@ -217,9 +216,8 @@ export function Notes() {
     const loadContent = async () => {
       setIsLoadingContent(true);
       try {
-        if (isTauriAvailable() && viewingFile.path) {
-          const { invoke } = await import("@tauri-apps/api/core");
-          const content = await invoke<string>("read_file_content", { path: viewingFile.path });
+        if (viewingFile.path) {
+          const content = await fetchNoteContent(viewingFile.path);
           setFileContent(content);
         } else {
           // Web fallback: check localStorage
@@ -327,6 +325,7 @@ export function Notes() {
   };
 
   const handleCreateFolder = async (folderName?: string) => {
+    if (!ensureDesktopWritable()) return;
     if (!folderName) {
       setPromptMode("create-folder");
       return;
@@ -347,15 +346,12 @@ export function Notes() {
     }
 
     // Create actual folder on disk
-    if (isTauriAvailable()) {
-      try {
-        const { invoke } = await import("@tauri-apps/api/core");
-        const parentRelDir = getRelativeDir(treeData, targetFolderId);
-        const relativePath = parentRelDir ? `${parentRelDir}/${folderName}` : folderName;
-        await invoke("create_notes_folder", { relativePath });
-      } catch (err) {
-        console.error("[Notes] Failed to create folder on disk:", err);
-      }
+    try {
+      const parentRelDir = getRelativeDir(treeData, targetFolderId);
+      const relativePath = parentRelDir ? `${parentRelDir}/${folderName}` : folderName;
+      await invokeDesktop("create_notes_folder", { relativePath });
+    } catch (err) {
+      console.error("[Notes] Failed to create folder on disk:", err);
     }
   };
 
@@ -377,10 +373,10 @@ export function Notes() {
   };
 
   const handleFileUpload = async () => {
+    if (!ensureDesktopWritable()) return;
     const targetFolderId = selectedNode?.type === "folder" ? selectedNode.id : null;
 
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
       const picked = await open({
         multiple: true,
         filters: [{ name: "Documents", extensions: ["md", "pdf", "txt", "json", "csv"] }],
@@ -391,7 +387,7 @@ export function Notes() {
       const relativeDir = getRelativeDir(treeData, targetFolderId);
 
       type CopiedFileResult = { source_path: string; file_name: string; dest_path: string };
-      const copied = await invoke<CopiedFileResult[]>("copy_files_to_notes", {
+      const copied = await invokeDesktop<CopiedFileResult[]>("copy_files_to_notes", {
         sourcePaths: list.map((p) => String(p)),
         relativeDir,
       });
@@ -419,6 +415,7 @@ export function Notes() {
   };
 
   const handleRenameNode = async (nextName?: string) => {
+    if (!ensureDesktopWritable()) return;
     if (!selectedNode || selectedNodeIds.length !== 1) return;
     if (!nextName) {
       setPromptMode("rename");
@@ -429,12 +426,11 @@ export function Notes() {
     if (!trimmedName || trimmedName === selectedNode.name) return;
 
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
       const fromPath = getRelativePath(treeData, selectedNode.id);
       if (fromPath) {
         const parent = fromPath.includes("/") ? fromPath.slice(0, fromPath.lastIndexOf("/")) : "";
         const toPath = parent ? `${parent}/${trimmedName}` : trimmedName;
-        await invoke("move_notes_item", { fromRelative: fromPath, toRelative: toPath });
+        await invokeDesktop("move_notes_item", { fromRelative: fromPath, toRelative: toPath });
       }
 
       setTreeData(prev => updateNodeName(prev, selectedNode.id, trimmedName));
@@ -453,11 +449,10 @@ export function Notes() {
     setShowDeleteConfirm(true);
   };
   const confirmDeleteNode = async () => {
+    if (!ensureDesktopWritable()) return;
     if (selectedNodeIds.length === 0) return;
 
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
-
       if (selectedNodeIds.length > 1) {
         const selectedNodes = selectedNodeIds
           .map(id => findNode(treeData, id))
@@ -478,7 +473,7 @@ export function Notes() {
           return;
         }
 
-        await invoke<number>("batch_delete_notes_files", { absolutePaths });
+        await invokeDesktop<number>("batch_delete_notes_files", { absolutePaths });
         setTreeData(prev => selectedNodeIds.reduce((acc, id) => removeNode(acc, id), prev));
         if (viewingFile && selectedNodeIds.includes(viewingFile.id)) {
           setViewingFile(null);
@@ -488,7 +483,7 @@ export function Notes() {
         const onlyId = selectedNodeIds[0];
         const rel = getRelativePath(treeData, onlyId);
         if (rel) {
-          await invoke("delete_notes_item", { relativePath: rel });
+          await invokeDesktop("delete_notes_item", { relativePath: rel });
         }
         setTreeData(prev => removeNode(prev, onlyId));
         if (viewingFile?.id === onlyId) {
@@ -509,6 +504,7 @@ export function Notes() {
   };
 
   const handleMoveSelected = (targetRelativeDir?: string) => {
+    if (!ensureDesktopWritable()) return;
     if (!targetRelativeDir) {
       setPromptMode("move");
       return;
@@ -539,8 +535,7 @@ export function Notes() {
 
         if (fromRelatives.length === 0) return;
 
-        const { invoke } = await import("@tauri-apps/api/core");
-        await invoke<number>("batch_move_notes_items", {
+        await invokeDesktop<number>("batch_move_notes_items", {
           fromRelatives,
           targetRelativeDir: normalizedTarget,
         });
@@ -604,6 +599,10 @@ export function Notes() {
   };
 
   const handleDropOnFolder = async (e: React.DragEvent, targetFolderId: string) => {
+    if (!isDesktopRuntime) {
+      showUploadToast("error", readonlyWebHint);
+      return;
+    }
     e.preventDefault();
     e.stopPropagation();
     setDropTargetId(null);
@@ -630,15 +629,14 @@ export function Notes() {
 
     // Move on disk (Tauri mode)
     let canUpdateTree = true;
-    if (isTauriAvailable()) {
+    if (isDesktopRuntime) {
       try {
-        const { invoke } = await import("@tauri-apps/api/core");
         const fromPath = getRelativePath(treeData, draggedNodeId);
         const targetDirPath = getRelativePath(treeData, targetFolderId);
         if (fromPath && targetDirPath !== null) {
           const name = fromPath.split("/").pop() || "";
           const toPath = targetDirPath ? `${targetDirPath}/${name}` : name;
-          await invoke("move_notes_item", { fromRelative: fromPath, toRelative: toPath });
+          await invokeDesktop("move_notes_item", { fromRelative: fromPath, toRelative: toPath });
         }
       } catch (err) {
         console.error("[Notes] Failed to move on disk:", err);
@@ -659,6 +657,10 @@ export function Notes() {
   };
 
   const handleDropOnRoot = async (e: React.DragEvent) => {
+    if (!isDesktopRuntime) {
+      showUploadToast("error", readonlyWebHint);
+      return;
+    }
     e.preventDefault();
     e.stopPropagation();
     setDropTargetId(null);
@@ -674,13 +676,12 @@ export function Notes() {
 
     // Move to root on disk
     let canUpdateTree = true;
-    if (isTauriAvailable()) {
+    if (isDesktopRuntime) {
       try {
-        const { invoke } = await import("@tauri-apps/api/core");
         const fromPath = getRelativePath(treeData, draggedNodeId);
         if (fromPath) {
           const name = fromPath.split("/").pop() || "";
-          await invoke("move_notes_item", { fromRelative: fromPath, toRelative: name });
+          await invokeDesktop("move_notes_item", { fromRelative: fromPath, toRelative: name });
         }
       } catch (err) {
         console.error("[Notes] Failed to move to root on disk:", err);
@@ -751,12 +752,12 @@ export function Notes() {
   };
 
   const copyDroppedFilesToFolder = async (sourcePaths: string[], targetFolderId: string | null) => {
+    if (!ensureDesktopWritable()) return;
     if (sourcePaths.length === 0) return;
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
       const relativeDir = getRelativeDir(treeData, targetFolderId);
       type CopiedFileResult = { source_path: string; file_name: string; dest_path: string };
-      const copied = await invoke<CopiedFileResult[]>("copy_files_to_notes", {
+      const copied = await invokeDesktop<CopiedFileResult[]>("copy_files_to_notes", {
         sourcePaths,
         relativeDir,
       });
@@ -814,14 +815,13 @@ export function Notes() {
   });
 
   const refreshAiSessions = useCallback(async (preferredSessionId?: string | null) => {
-    if (!isTauriAvailable()) {
+    if (!isDesktopRuntime) {
       setChatSessions([]);
       setActiveSessionId(null);
       return [] as ChatSession[];
     }
 
-    const { invoke } = await import("@tauri-apps/api/core");
-    const rows = await invoke<DbAiSession[]>("get_ai_sessions");
+    const rows = await invokeDesktop<DbAiSession[]>("get_ai_sessions");
     const mapped = rows.map(mapDbSession);
     setChatSessions(mapped);
 
@@ -837,13 +837,12 @@ export function Notes() {
   }, []);
 
   const loadAiMessages = useCallback(async (sessionId: string) => {
-    if (!isTauriAvailable()) {
+    if (!isDesktopRuntime) {
       setChatMessagesBySession((prev) => ({ ...prev, [sessionId]: prev[sessionId] || [] }));
       return;
     }
 
-    const { invoke } = await import("@tauri-apps/api/core");
-    const rows = await invoke<DbAiMessage[]>("get_ai_messages", { sessionId });
+    const rows = await invokeDesktop<DbAiMessage[]>("get_ai_messages", { sessionId });
     setChatMessagesBySession((prev) => ({
       ...prev,
       [sessionId]: rows.map(mapDbMessage),
@@ -871,7 +870,7 @@ export function Notes() {
   };
 
   const createSession = async (firstMessage?: string): Promise<ChatSession | null> => {
-    if (!isTauriAvailable()) {
+    if (!isDesktopRuntime) {
       const now = new Date().toISOString();
       const localSession: ChatSession = {
         id: `memory-session-${Date.now()}`,
@@ -884,8 +883,7 @@ export function Notes() {
       return localSession;
     }
 
-    const { invoke } = await import("@tauri-apps/api/core");
-    const sessionId = await invoke<string>("create_ai_session", {
+    const sessionId = await invokeDesktop<string>("create_ai_session", {
       title: (firstMessage || "").trim().slice(0, 24) || DEFAULT_CHAT_TITLE,
     });
     const sessions = await refreshAiSessions(sessionId);
@@ -897,20 +895,19 @@ export function Notes() {
     const trimmed = nextTitle.trim().slice(0, 40);
     if (!trimmed) return;
 
-    if (!isTauriAvailable()) {
+    if (!isDesktopRuntime) {
       setChatSessions((prev) =>
         prev.map((session) => (session.id === sessionId ? { ...session, title: trimmed } : session))
       );
       return;
     }
 
-    const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("update_ai_session_title", { sessionId, title: trimmed });
+    await invokeDesktop("update_ai_session_title", { sessionId, title: trimmed });
     await refreshAiSessions(sessionId);
   };
 
   const deleteChatSession = async (sessionId: string) => {
-    if (!isTauriAvailable()) {
+    if (!isDesktopRuntime) {
       setChatSessions((prev) => prev.filter((session) => session.id !== sessionId));
       setChatMessagesBySession((prev) => {
         const next = { ...prev };
@@ -921,8 +918,7 @@ export function Notes() {
       return;
     }
 
-    const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("delete_ai_session", { sessionId });
+    await invokeDesktop("delete_ai_session", { sessionId });
     setChatMessagesBySession((prev) => {
       const next = { ...prev };
       delete next[sessionId];
@@ -959,9 +955,8 @@ export function Notes() {
 
     for (const file of filesToRead) {
       try {
-        if (isTauriAvailable() && file.path) {
-          const { invoke } = await import("@tauri-apps/api/core");
-          const content = await invoke<string>("read_file_content", { path: file.path });
+        if (file.path) {
+          const content = await fetchNoteContent(file.path);
           chunks.push(`### ${file.name}\n${content.slice(0, 3000)}`);
           continue;
         }
@@ -1000,10 +995,9 @@ export function Notes() {
       createdAt: nowIso,
     });
 
-    if (isTauriAvailable()) {
+    if (isDesktopRuntime) {
       try {
-        const { invoke } = await import("@tauri-apps/api/core");
-        await invoke<string>("add_ai_message", {
+        await invokeDesktop<string>("add_ai_message", {
           sessionId: currentSession.id,
           role: "user",
           content: userMsg,
@@ -1056,9 +1050,8 @@ export function Notes() {
         replaceLastAssistantMessageText(currentSession.id, () => streamed);
       }
 
-      if (isTauriAvailable()) {
-        const { invoke } = await import("@tauri-apps/api/core");
-        await invoke<string>("add_ai_message", {
+      if (isDesktopRuntime) {
+        await invokeDesktop<string>("add_ai_message", {
           sessionId: currentSession.id,
           role: "assistant",
           content: streamed,
@@ -1070,10 +1063,9 @@ export function Notes() {
       const message = `调用 ${getModelLabel(selectedModel)} 失败: ${error.message || "Failed to get response."}`;
       replaceLastAssistantMessageText(currentSession.id, (current) => (current.trim() ? current : message));
 
-      if (isTauriAvailable()) {
+      if (isDesktopRuntime) {
         try {
-          const { invoke } = await import("@tauri-apps/api/core");
-          await invoke<string>("add_ai_message", {
+          await invokeDesktop<string>("add_ai_message", {
             sessionId: currentSession.id,
             role: "assistant",
             content: message,
@@ -1296,6 +1288,9 @@ export function Notes() {
         <div>
           <h1 className="text-3xl font-bold tracking-tight text-gray-900 dark:text-white sm:text-4xl">知识库</h1>
           <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">管理你的文档、笔记与资料，并使用 AI 辅助阅读。</p>
+          {!isDesktopRuntime && (
+            <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">{readonlyWebHint}</p>
+          )}
         </div>
       </header>
 
@@ -1328,36 +1323,41 @@ export function Notes() {
               <button 
                 className="p-1.5 text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-800 rounded-lg transition-colors"
                 onClick={handleFileUpload}
-                title="上传本地文件"
+                disabled={!isDesktopRuntime}
+                title={isDesktopRuntime ? "上传本地文件" : readonlyWebHint}
               >
                 <Upload className="w-4 h-4" />
               </button>
               <button 
                 onClick={() => handleCreateFolder()}
-                className="p-1.5 text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-800 rounded-lg transition-colors" 
-                title="新建文件夹"
+                disabled={!isDesktopRuntime}
+                className={cn(
+                  "p-1.5 rounded-lg transition-colors",
+                  isDesktopRuntime ? "text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-800" : "text-gray-300 dark:text-gray-700 cursor-not-allowed"
+                )}
+                title={isDesktopRuntime ? "新建文件夹" : readonlyWebHint}
               >
                 <Plus className="w-4 h-4" />
               </button>
               <button 
                 onClick={() => handleRenameNode()}
-                disabled={!selectedNode || selectedNodeIds.length !== 1}
+                disabled={!isDesktopRuntime || !selectedNode || selectedNodeIds.length !== 1}
                 className={cn(
                   "p-1.5 rounded-lg transition-colors",
-                  selectedNode && selectedNodeIds.length === 1 ? "text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-800" : "text-gray-300 dark:text-gray-700 cursor-not-allowed"
+                  isDesktopRuntime && selectedNode && selectedNodeIds.length === 1 ? "text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-800" : "text-gray-300 dark:text-gray-700 cursor-not-allowed"
                 )}
-                title="重命名"
+                title={isDesktopRuntime ? "重命名" : readonlyWebHint}
               >
                 <Edit2 className="w-4 h-4" />
               </button>
               <button 
                 onClick={handleDeleteNode}
-                disabled={selectedNodeIds.length === 0}
+                disabled={!isDesktopRuntime || selectedNodeIds.length === 0}
                 className={cn(
                   "p-1.5 rounded-lg transition-colors",
-                  selectedNodeIds.length > 0 ? "text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-800" : "text-gray-300 dark:text-gray-700 cursor-not-allowed"
+                  isDesktopRuntime && selectedNodeIds.length > 0 ? "text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-800" : "text-gray-300 dark:text-gray-700 cursor-not-allowed"
                 )}
-                title="删除"
+                title={isDesktopRuntime ? "删除" : readonlyWebHint}
               >
                 <Trash2 className="w-4 h-4" />
               </button>
@@ -1377,7 +1377,7 @@ export function Notes() {
               <div className="h-full min-h-48 flex flex-col items-center justify-center text-center px-4 text-gray-500 dark:text-gray-400">
                 <Folder className="w-10 h-10 mb-3 text-[#88B5D3]/70" />
                 <p className="font-medium">{searchKeyword.trim() ? "未找到匹配结果" : "当前暂无文档"}</p>
-                <p className="text-xs mt-1">{searchKeyword.trim() ? "请尝试更换关键词" : "上传文件或新建文件夹后，这里会显示你的知识库结构"}</p>
+                <p className="text-xs mt-1">{searchKeyword.trim() ? "请尝试更换关键词" : (isDesktopRuntime ? "上传文件或新建文件夹后，这里会显示你的知识库结构" : "已进入局域网只读模式，可跨端浏览与阅读")}</p>
               </div>
             ) : (
               renderTree(searchResult.filtered, effectiveExpandedFolders)
@@ -1634,10 +1634,13 @@ export function Notes() {
                 const ext = viewingFile.name.split(".").pop()?.toLowerCase() || "";
                 // PDF preview
                 if (ext === "pdf") {
-                  if (isTauriAvailable() && viewingFile.path) {
+                  if (viewingFile.path) {
+                    const pdfSrc = isDesktopRuntime
+                      ? viewingFile.path
+                      : `/Notes/${encodeURI(viewingFile.path.replace(/^\/+|^\\+/, "").replace(/\\/g, "/"))}`;
                     return (
                       <iframe
-                        src={viewingFile.path}
+                        src={pdfSrc}
                         className="w-full h-full border-none"
                         title={viewingFile.name}
                       />
@@ -1757,35 +1760,41 @@ export function Notes() {
             >
               打开
             </button>
-            <button
-              className="w-full text-left px-3 py-2 text-sm rounded-lg text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-[#1a2a40]"
-              onClick={() => {
-                setSelectedNodeIds([node.id]);
-                setActiveNodeId(node.id);
-                handleRenameNode();
-                setContextMenu(null);
-              }}
-            >
-              重命名
-            </button>
-            <button
-              className="w-full text-left px-3 py-2 text-sm rounded-lg text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10"
-              onClick={() => {
-                setShowDeleteConfirm(true);
-                setContextMenu(null);
-              }}
-            >
-              删除{selectedNodeIds.length > 1 ? `（${selectedNodeIds.length} 项）` : ""}
-            </button>
-            <button
-              className="w-full text-left px-3 py-2 text-sm rounded-lg text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-[#1a2a40]"
-              onClick={() => {
-                setPromptMode("move");
-                setContextMenu(null);
-              }}
-            >
-              移动到...{selectedNodeIds.length > 1 ? `（${selectedNodeIds.length} 项）` : ""}
-            </button>
+            {isDesktopRuntime ? (
+              <>
+                <button
+                  className="w-full text-left px-3 py-2 text-sm rounded-lg text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-[#1a2a40]"
+                  onClick={() => {
+                    setSelectedNodeIds([node.id]);
+                    setActiveNodeId(node.id);
+                    handleRenameNode();
+                    setContextMenu(null);
+                  }}
+                >
+                  重命名
+                </button>
+                <button
+                  className="w-full text-left px-3 py-2 text-sm rounded-lg text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10"
+                  onClick={() => {
+                    setShowDeleteConfirm(true);
+                    setContextMenu(null);
+                  }}
+                >
+                  删除{selectedNodeIds.length > 1 ? `（${selectedNodeIds.length} 项）` : ""}
+                </button>
+                <button
+                  className="w-full text-left px-3 py-2 text-sm rounded-lg text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-[#1a2a40]"
+                  onClick={() => {
+                    setPromptMode("move");
+                    setContextMenu(null);
+                  }}
+                >
+                  移动到...{selectedNodeIds.length > 1 ? `（${selectedNodeIds.length} 项）` : ""}
+                </button>
+              </>
+            ) : (
+              <div className="px-3 py-2 text-xs text-amber-600 dark:text-amber-400">{readonlyWebHint}</div>
+            )}
           </div>
         );
       })()}

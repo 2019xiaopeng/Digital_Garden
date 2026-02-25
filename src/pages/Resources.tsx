@@ -6,8 +6,8 @@ import { isTauriAvailable } from "../lib/dataService";
 import { extractBilibiliVideoUrl, openExternalUrl } from "../lib/videoBookmark";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { open } from "@tauri-apps/plugin-dialog";
-import { invoke } from "@tauri-apps/api/core";
 import { openPath } from "@tauri-apps/plugin-opener";
+import { fetchResources, invokeDesktop } from "../utils/apiBridge";
 
 type ResourceItem = {
   id: string;
@@ -76,37 +76,46 @@ export function Resources() {
   const [pendingDeleteResource, setPendingDeleteResource] = useState<ResourceItem | null>(null);
   const [videoBookmarks, setVideoBookmarks] = useState<VideoBookmark[]>([]);
   const navigate = useNavigate();
+  const isDesktopRuntime = isTauriAvailable();
+  const readonlyWebHint = "局域网模式下仅支持跨端阅读，请在桌面端进行文件管理";
 
   const showResourceToast = useCallback((type: "success" | "error", message: string) => {
     setResourceToast({ type, message });
     window.setTimeout(() => setResourceToast(null), 1800);
   }, []);
 
+  const ensureDesktopWritable = useCallback(() => {
+    if (isDesktopRuntime) return true;
+    showResourceToast("error", readonlyWebHint);
+    return false;
+  }, [isDesktopRuntime, showResourceToast]);
+
   // Load resources + video bookmarks from SQLite on mount
   React.useEffect(() => {
     const loadData = async () => {
-      if (!isTauriAvailable()) return;
       try {
-        const [resRows, bmRows] = await Promise.all([
-          invoke<ResourceItem[]>("get_resources"),
-          invoke<DbVideoBookmark[]>("get_video_bookmarks"),
-        ]);
+        const resRows = await fetchResources();
         setResources(resRows);
-        setVideoBookmarks(bmRows.map((row) => ({
-          id: row.id,
-          bvid: row.bvid,
-          title: row.title,
-          pic: row.pic,
-          ownerName: row.owner_name,
-          duration: row.duration,
-          createdAt: row.created_at,
-        })));
+        if (isDesktopRuntime) {
+          const bmRows = await invokeDesktop<DbVideoBookmark[]>("get_video_bookmarks");
+          setVideoBookmarks(bmRows.map((row) => ({
+            id: row.id,
+            bvid: row.bvid,
+            title: row.title,
+            pic: row.pic,
+            ownerName: row.owner_name,
+            duration: row.duration,
+            createdAt: row.created_at,
+          })));
+        } else {
+          setVideoBookmarks([]);
+        }
       } catch (error) {
         console.error("[Resources] failed to load data:", error);
       }
     };
     loadData();
-  }, []);
+  }, [isDesktopRuntime]);
 
   const toggleSelection = (id: string) => {
     setSelectedIds(prev => 
@@ -119,9 +128,10 @@ export function Resources() {
   }, []);
 
   const confirmDeleteResource = useCallback(async () => {
+    if (!ensureDesktopWritable()) return;
     if (!pendingDeleteResource) return;
     try {
-      await invoke("delete_resource", { id: pendingDeleteResource.id });
+      await invokeDesktop("delete_resource", { id: pendingDeleteResource.id });
       setResources(prev => prev.filter(r => r.id !== pendingDeleteResource.id));
       setSelectedIds(prev => prev.filter(x => x !== pendingDeleteResource.id));
       showResourceToast("success", "删除成功");
@@ -131,21 +141,26 @@ export function Resources() {
     } finally {
       setPendingDeleteResource(null);
     }
-  }, [pendingDeleteResource, showResourceToast]);
+  }, [ensureDesktopWritable, pendingDeleteResource, showResourceToast]);
 
   const handleOpenResource = useCallback(async (resource: ResourceItem) => {
     try {
-      const resourcesDir = await invoke<string>("get_resources_dir");
-      const fullPath = `${resourcesDir}${resource.path.startsWith("/") || resource.path.startsWith("\\") ? "" : "/"}${resource.path}`;
-      // Normalise to OS path separators
-      const normalised = fullPath.replace(/\//g, "\\");
-      await openPath(normalised);
+      if (isDesktopRuntime) {
+        const resourcesDir = await invokeDesktop<string>("get_resources_dir");
+        const fullPath = `${resourcesDir}${resource.path.startsWith("/") || resource.path.startsWith("\\") ? "" : "/"}${resource.path}`;
+        const normalised = fullPath.replace(/\//g, "\\");
+        await openPath(normalised);
+      } else {
+        const relativePath = resource.path.replace(/^\/+|^\\+/, "").replace(/\\/g, "/");
+        const url = `/Resources/${encodeURI(relativePath)}`;
+        window.open(url, "_blank", "noopener,noreferrer");
+      }
     } catch (error) {
       console.error("[Resources] open resource failed:", error);
       setBookmarkToast(`打开文件失败：${error}`);
       setTimeout(() => setBookmarkToast(null), 2000);
     }
-  }, []);
+  }, [isDesktopRuntime]);
 
   const handleGenerateQuiz = () => {
     if (selectedIds.length === 0) return;
@@ -162,18 +177,19 @@ export function Resources() {
   };
 
   const handleFileUpload = async () => {
+    if (!ensureDesktopWritable()) return;
     try {
       const picked = await open({ multiple: true, filters: [{ name: "All", extensions: ["*"] }] });
       const list = Array.isArray(picked) ? picked : picked ? [picked] : [];
       if (list.length === 0) return;
 
       type CopiedFileResult = { source_path: string; file_name: string; dest_path: string };
-      const copied = await invoke<CopiedFileResult[]>("copy_files_to_resources", {
+      const copied = await invokeDesktop<CopiedFileResult[]>("copy_files_to_resources", {
         sourcePaths: list.map((p) => String(p)),
         relativeDir: "",
       });
 
-      const resourcesDir = await invoke<string>("get_resources_dir");
+      const resourcesDir = await invokeDesktop<string>("get_resources_dir");
       const newResources: ResourceItem[] = [];
 
       for (const item of copied) {
@@ -193,7 +209,7 @@ export function Resources() {
           created_at: now,
         };
         // Persist to SQLite
-        await invoke("add_resource", { resource: res });
+        await invokeDesktop("add_resource", { resource: res });
         newResources.push(res);
       }
 
@@ -204,12 +220,13 @@ export function Resources() {
   };
 
   const handleFolderUpload = async () => {
+    if (!ensureDesktopWritable()) return;
     try {
       const picked = await open({ directory: true, multiple: false });
       if (!picked || typeof picked !== "string") return;
 
       setBookmarkToast("正在导入文件夹，请稍候…");
-      const imported = await invoke<ResourceItem[]>("batch_copy_folder_to_resources", {
+      const imported = await invokeDesktop<ResourceItem[]>("batch_copy_folder_to_resources", {
         folderPath: picked,
       });
 
@@ -242,10 +259,9 @@ export function Resources() {
   };
 
   const fetchBilibiliMetadata = async (bvid: string): Promise<VideoBookmark | null> => {
-    if (!isTauriAvailable()) return null;
+    if (!isDesktopRuntime) return null;
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      const payload = await invoke<BilibiliApiResponse>("fetch_bilibili_metadata", { bvid });
+      const payload = await invokeDesktop<BilibiliApiResponse>("fetch_bilibili_metadata", { bvid });
       return {
         id: `video-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         bvid: payload.bvid || bvid,
@@ -304,7 +320,7 @@ export function Resources() {
         duration: bookmark.duration,
         created_at: bookmark.createdAt,
       };
-      const saved = await invoke<DbVideoBookmark>("add_video_bookmark", { bookmark: payload });
+      const saved = await invokeDesktop<DbVideoBookmark>("add_video_bookmark", { bookmark: payload });
       setVideoBookmarks((prev) => [{
         id: saved.id,
         bvid: saved.bvid,
@@ -326,8 +342,9 @@ export function Resources() {
   };
 
   const removeVideoBookmark = async (id: string) => {
+    if (!ensureDesktopWritable()) return;
     try {
-      await invoke("delete_video_bookmark", { id });
+      await invokeDesktop("delete_video_bookmark", { id });
       setVideoBookmarks((prev) => prev.filter((x) => x.id !== id));
     } catch (error) {
       console.error("[Resources] delete video bookmark failed:", error);
@@ -360,19 +377,32 @@ export function Resources() {
         <div>
           <h1 className="text-3xl font-bold tracking-tight text-gray-900 dark:text-white sm:text-4xl">资源站</h1>
           <p className="mt-3 text-lg text-gray-600 dark:text-gray-400 leading-relaxed">收集整理的学习资料与工具包。</p>
+          {!isDesktopRuntime && (
+            <p className="mt-2 text-xs text-amber-600 dark:text-amber-400">{readonlyWebHint}</p>
+          )}
         </div>
         
         <div className="flex flex-wrap items-center gap-3">
           <button 
             onClick={handleFileUpload}
-            className="flex items-center gap-2 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-800 text-gray-700 dark:text-gray-200 px-4 py-2.5 rounded-2xl text-sm font-semibold shadow-sm transition-all active:scale-95"
+            disabled={!isDesktopRuntime}
+            title={isDesktopRuntime ? "上传文件" : readonlyWebHint}
+            className={cn(
+              "flex items-center gap-2 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 text-gray-700 dark:text-gray-200 px-4 py-2.5 rounded-2xl text-sm font-semibold shadow-sm transition-all",
+              isDesktopRuntime ? "hover:bg-gray-50 dark:hover:bg-gray-800 active:scale-95" : "opacity-60 cursor-not-allowed"
+            )}
           >
             <Upload className="w-4 h-4" />
             上传文件
           </button>
           <button 
             onClick={handleFolderUpload}
-            className="flex items-center gap-2 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-800 text-gray-700 dark:text-gray-200 px-4 py-2.5 rounded-2xl text-sm font-semibold shadow-sm transition-all active:scale-95"
+            disabled={!isDesktopRuntime}
+            title={isDesktopRuntime ? "上传目录" : readonlyWebHint}
+            className={cn(
+              "flex items-center gap-2 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 text-gray-700 dark:text-gray-200 px-4 py-2.5 rounded-2xl text-sm font-semibold shadow-sm transition-all",
+              isDesktopRuntime ? "hover:bg-gray-50 dark:hover:bg-gray-800 active:scale-95" : "opacity-60 cursor-not-allowed"
+            )}
           >
             <Folder className="w-4 h-4" />
             上传目录
@@ -432,7 +462,12 @@ export function Resources() {
             />
             <button
               onClick={addVideoBookmark}
-              className="px-4 py-2.5 rounded-2xl bg-gray-900 dark:bg-white text-white dark:text-gray-900 text-sm font-semibold"
+              disabled={!isDesktopRuntime}
+              title={isDesktopRuntime ? "添加视频书签" : readonlyWebHint}
+              className={cn(
+                "px-4 py-2.5 rounded-2xl text-sm font-semibold",
+                isDesktopRuntime ? "bg-gray-900 dark:bg-white text-white dark:text-gray-900" : "bg-gray-300 dark:bg-gray-700 text-gray-100 cursor-not-allowed"
+              )}
             >
               添加
             </button>
@@ -467,7 +502,12 @@ export function Resources() {
                 </button>
                 <button
                   onClick={() => removeVideoBookmark(item.id)}
-                  className="px-3 py-1.5 rounded-lg text-xs font-semibold text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10"
+                  disabled={!isDesktopRuntime}
+                  title={isDesktopRuntime ? "删除书签" : readonlyWebHint}
+                  className={cn(
+                    "px-3 py-1.5 rounded-lg text-xs font-semibold",
+                    isDesktopRuntime ? "text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10" : "text-gray-400 cursor-not-allowed"
+                  )}
                 >
                   删除
                 </button>
@@ -521,8 +561,14 @@ export function Resources() {
                   </button>
                   <button 
                     onClick={(e) => { e.stopPropagation(); requestDeleteResource(file); }}
-                    title="删除此资源"
-                    className="w-10 h-10 bg-red-50 dark:bg-red-500/10 text-red-500 dark:text-red-400 rounded-xl flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all duration-300 hover:bg-red-600 hover:text-white shadow-sm hover:scale-105 active:scale-95"
+                    disabled={!isDesktopRuntime}
+                    title={isDesktopRuntime ? "删除此资源" : readonlyWebHint}
+                    className={cn(
+                      "w-10 h-10 rounded-xl flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all duration-300 shadow-sm",
+                      isDesktopRuntime
+                        ? "bg-red-50 dark:bg-red-500/10 text-red-500 dark:text-red-400 hover:bg-red-600 hover:text-white hover:scale-105 active:scale-95"
+                        : "bg-gray-100 dark:bg-gray-800 text-gray-400 cursor-not-allowed"
+                    )}
                   >
                     <Trash2 className="w-5 h-5" />
                   </button>

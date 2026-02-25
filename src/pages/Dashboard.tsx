@@ -2,8 +2,9 @@ import React, { useEffect, useMemo, useState } from "react";
 import { ArrowRight, Target, Play, Square, BarChart3, Activity, AlarmClockCheck, CheckCircle2, Circle, Maximize2, X, Pause, RotateCcw } from "lucide-react";
 import { Link } from "react-router-dom";
 import { cn } from "../lib/utils";
-import { TaskService, FocusService, isTauriAvailable } from "../lib/dataService";
+import { FocusService, isTauriAvailable } from "../lib/dataService";
 import type { LegacyTask, FocusSession } from "../lib/dataService";
+import { fetchDashboardStats, modifyTask } from "../utils/apiBridge";
 
 type Task = {
   id: string;
@@ -226,8 +227,8 @@ export function Dashboard() {
 
   // Load tasks from dataService
   useEffect(() => {
-    TaskService.getAll().then((loaded) => {
-      setTasks(loaded as unknown as Task[]);
+    fetchDashboardStats().then((stats) => {
+      setTasks(stats.tasks as unknown as Task[]);
     });
     FocusService.getAll().then((sessions) => {
       const mapped: AttendanceMap = {};
@@ -265,7 +266,7 @@ export function Dashboard() {
       setTimeLeft(getCountdown(EXAM_DATE_ISO));
     }, 30_000);
     const syncTasks = () => {
-      TaskService.getAll().then((loaded) => setTasks(loaded as unknown as Task[]));
+      fetchDashboardStats().then((stats) => setTasks(stats.tasks as unknown as Task[]));
     };
     window.addEventListener("focus", syncTasks);
     return () => { clearInterval(countdownTimer); window.removeEventListener("focus", syncTasks); };
@@ -315,7 +316,7 @@ export function Dashboard() {
       // Persist via TaskService
       const changedTask = updated.find(t => t.id === taskId);
       if (changedTask) {
-        TaskService.update(changedTask as unknown as LegacyTask).catch(console.warn);
+        modifyTask(taskId, changedTask as unknown as LegacyTask).catch(console.warn);
       }
       return updated;
     });

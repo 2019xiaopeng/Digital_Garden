@@ -40,6 +40,28 @@ type FetchQuizQuestionsOptions = {
   subject?: string;
 };
 
+export type NotesFsNode = {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  children: NotesFsNode[];
+};
+
+export type ResourceItem = {
+  id: string;
+  name: string;
+  path: string;
+  file_type: string;
+  subject: string;
+  size_bytes: number;
+  created_at: string;
+};
+
+export type DashboardStats = {
+  tasks: LegacyTask[];
+  dueCount: number;
+};
+
 function isTauriRuntime(): boolean {
   if (typeof window === "undefined") return false;
   const win = window as Window & { __TAURI__?: unknown; __TAURI_INTERNALS__?: unknown };
@@ -49,6 +71,17 @@ function isTauriRuntime(): boolean {
 async function getInvoke() {
   const mod = await import("@tauri-apps/api/core");
   return mod.invoke;
+}
+
+export async function invokeDesktop<T = unknown>(
+  command: string,
+  args?: Record<string, unknown>
+): Promise<T> {
+  if (!isTauriRuntime()) {
+    throw new Error("局域网模式下仅支持跨端阅读，请在桌面端进行文件管理");
+  }
+  const invoke = await getInvoke();
+  return await invoke<T>(command, args);
 }
 
 function getLanBaseUrl(): string {
@@ -266,4 +299,67 @@ export async function readLocalResourceText(path: string): Promise<string> {
   }
   const invoke = await getInvoke();
   return await invoke<string>("read_local_file_text", { path });
+}
+
+export async function fetchDashboardStats(): Promise<DashboardStats> {
+  const [tasks, dueRows] = await Promise.all([
+    fetchTasks(),
+    fetchQuizQuestions({ mode: "due" }).catch(() => []),
+  ]);
+
+  return {
+    tasks,
+    dueCount: dueRows.length,
+  };
+}
+
+export async function fetchNotesTree(): Promise<NotesFsNode[]> {
+  if (isTauriRuntime()) {
+    const invoke = await getInvoke();
+    return await invoke<NotesFsNode[]>("scan_notes_directory");
+  }
+
+  const response = await fetch(`${getLanBaseUrl()}/api/notes/tree`);
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`HTTP 请求失败 (${response.status}): ${text || response.statusText}`);
+  }
+
+  const data = (await response.json()) as NotesFsNode[];
+  return Array.isArray(data) ? data : [];
+}
+
+export async function fetchNoteContent(relativePath: string): Promise<string> {
+  if (!relativePath.trim()) {
+    throw new Error("文件路径不能为空");
+  }
+
+  if (isTauriRuntime()) {
+    const invoke = await getInvoke();
+    return await invoke<string>("read_file_content", { path: relativePath });
+  }
+
+  const response = await fetch(`${getLanBaseUrl()}/api/notes/file?path=${encodeURIComponent(relativePath)}`);
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`HTTP 请求失败 (${response.status}): ${text || response.statusText}`);
+  }
+
+  return await response.text();
+}
+
+export async function fetchResources(): Promise<ResourceItem[]> {
+  if (isTauriRuntime()) {
+    const invoke = await getInvoke();
+    return await invoke<ResourceItem[]>("get_resources");
+  }
+
+  const response = await fetch(`${getLanBaseUrl()}/api/resources`);
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`HTTP 请求失败 (${response.status}): ${text || response.statusText}`);
+  }
+
+  const data = (await response.json()) as ResourceItem[];
+  return Array.isArray(data) ? data : [];
 }

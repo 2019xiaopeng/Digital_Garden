@@ -17,7 +17,7 @@
 - Tasks 已完成 Tauri/HTTP 双模桥接：`fetchTasks/addTask/modifyTask/removeTask`
 - Axum 已新增 Tasks REST：`GET/POST /api/tasks`、`PUT/DELETE /api/tasks/{id}`
 - Tasks 番茄钟在 Web 端已具备 Fullscreen API 优雅降级（不支持时自动回退页面内全屏）
-- Phase 3 最终冲刺范围已确认：优先修复 Dashboard 在 Web 端残留 `invoke` 导致的白屏，并完成 Notes/Resources 跨端阅读闭环（本轮为文档确认）
+- Phase 3 最终冲刺已完成：Dashboard 消除 Web 端原生调用白屏风险，Notes/Resources 跨端阅读闭环落地
 
 **功能来源分类标记**：
 - 🟢 **已完成** — 代码与 UI 均已就位，日常可用
@@ -257,10 +257,10 @@
 
 **局域网服务现状**：已从空壳升级为可运行 Axum 服务，包含 `/api/ping`、`/api/quiz/all`、`/api/quiz/due` 与静态页面托管。
 
-**Phase 3 最终冲刺（待实现）**：
-- 首页（Dashboard/Home）完成双模降级，Web 端不再直接依赖原生 `invoke`。
-- Axum 增补阅读接口：`/api/notes/tree`、`/api/notes/file`、`/api/resources`。
-- `apiBridge.ts` 扩展 Dashboard/Notes/Resources 统一桥接方法。
+**Phase 3 最终冲刺（已完成）**：
+- 首页（Dashboard/Home）已完成双模桥接，Web 端不再直接依赖原生 `invoke`。
+- Axum 已增补阅读接口：`/api/notes/tree`、`/api/notes/file`、`/api/resources`。
+- `apiBridge.ts` 已扩展 Dashboard/Notes/Resources 统一桥接方法。
 - Notes/Resources 在 Web 端默认“只读模式”，文件管理能力禁用并提供明确提示。
 
 ---
