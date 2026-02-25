@@ -5,6 +5,7 @@ import { cn } from "../lib/utils";
 import { isTauriAvailable } from "../lib/dataService";
 import { extractBilibiliVideoUrl, openExternalUrl } from "../lib/videoBookmark";
 import { open } from "@tauri-apps/plugin-dialog";
+import { invoke } from "@tauri-apps/api/core";
 
 type ResourceItem = {
   id: number;
@@ -19,7 +20,6 @@ type ResourceItem = {
 
 type VideoBookmark = {
   id: string;
-  url: string;
   bvid: string;
   title: string;
   pic: string;
@@ -28,11 +28,14 @@ type VideoBookmark = {
   createdAt: string;
 };
 
-type LegacyVideoBookmark = {
+type DbVideoBookmark = {
   id: string;
-  url: string;
   bvid: string;
-  createdAt: string;
+  title: string;
+  pic: string;
+  owner_name: string;
+  duration: number;
+  created_at: string;
 };
 
 type BilibiliApiResponse = {
@@ -62,27 +65,29 @@ export function Resources() {
   const [subjectFilter, setSubjectFilter] = useState("all");
   const [bilibiliInput, setBilibiliInput] = useState("");
   const [bookmarkToast, setBookmarkToast] = useState<string | null>(null);
-  const [videoBookmarks, setVideoBookmarks] = useState<VideoBookmark[]>(() => {
-    try {
-      const raw = localStorage.getItem("eva.video-bookmarks.v1");
-      if (!raw) return [];
-      const parsed = JSON.parse(raw) as Array<VideoBookmark | LegacyVideoBookmark>;
-      return parsed.map((item) => {
-        if ("title" in item) return item as VideoBookmark;
-        const legacy = item as LegacyVideoBookmark;
-        return {
-          ...legacy,
-          title: legacy.bvid,
-          pic: "",
-          ownerName: "未知UP主",
-          duration: 0,
-        };
-      });
-    } catch {
-      return [];
-    }
-  });
+  const [videoBookmarks, setVideoBookmarks] = useState<VideoBookmark[]>([]);
   const navigate = useNavigate();
+
+  React.useEffect(() => {
+    const loadBookmarks = async () => {
+      if (!isTauriAvailable()) return;
+      try {
+        const rows = await invoke<DbVideoBookmark[]>("get_video_bookmarks");
+        setVideoBookmarks(rows.map((row) => ({
+          id: row.id,
+          bvid: row.bvid,
+          title: row.title,
+          pic: row.pic,
+          ownerName: row.owner_name,
+          duration: row.duration,
+          createdAt: row.created_at,
+        })));
+      } catch (error) {
+        console.error("[Resources] failed to load video bookmarks:", error);
+      }
+    };
+    loadBookmarks();
+  }, []);
 
   const toggleSelection = (id: number) => {
     setSelectedIds(prev => 
@@ -213,7 +218,6 @@ export function Resources() {
     const bookmark: VideoBookmark = metadata || {
       id: `video-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       bvid,
-      url: `https://www.bilibili.com/video/${bvid}`,
       title: bvid,
       pic: "",
       ownerName: "未知UP主",
@@ -221,23 +225,46 @@ export function Resources() {
       createdAt: new Date().toISOString(),
     };
 
-    setVideoBookmarks((prev) => {
-      const next = [bookmark, ...prev];
-      localStorage.setItem("eva.video-bookmarks.v1", JSON.stringify(next));
-      return next;
-    });
+    try {
+      const payload: DbVideoBookmark = {
+        id: bookmark.id,
+        bvid: bookmark.bvid,
+        title: bookmark.title,
+        pic: bookmark.pic,
+        owner_name: bookmark.ownerName,
+        duration: bookmark.duration,
+        created_at: bookmark.createdAt,
+      };
+      const saved = await invoke<DbVideoBookmark>("add_video_bookmark", { bookmark: payload });
+      setVideoBookmarks((prev) => [{
+        id: saved.id,
+        bvid: saved.bvid,
+        title: saved.title,
+        pic: saved.pic,
+        ownerName: saved.owner_name,
+        duration: saved.duration,
+        createdAt: saved.created_at,
+      }, ...prev]);
+    } catch (error: any) {
+      setBookmarkToast(`保存书签失败：${error?.message || String(error)}`);
+      setTimeout(() => setBookmarkToast(null), 2200);
+      return;
+    }
 
     setBookmarkToast(metadata ? "已添加视频书签" : "已添加书签（元数据获取失败）");
     setTimeout(() => setBookmarkToast(null), 1400);
     setBilibiliInput("");
   };
 
-  const removeVideoBookmark = (id: string) => {
-    setVideoBookmarks((prev) => {
-      const next = prev.filter((x) => x.id !== id);
-      localStorage.setItem("eva.video-bookmarks.v1", JSON.stringify(next));
-      return next;
-    });
+  const removeVideoBookmark = async (id: string) => {
+    try {
+      await invoke("delete_video_bookmark", { id });
+      setVideoBookmarks((prev) => prev.filter((x) => x.id !== id));
+    } catch (error) {
+      console.error("[Resources] delete video bookmark failed:", error);
+      setBookmarkToast("删除书签失败");
+      setTimeout(() => setBookmarkToast(null), 1500);
+    }
   };
 
   const subjects = useMemo(() => {
@@ -347,12 +374,12 @@ export function Resources() {
                 <div className="min-w-0">
                   <div className="text-sm font-semibold text-gray-900 dark:text-white truncate">{item.title}</div>
                   <div className="text-xs text-gray-500 dark:text-gray-400 truncate">{item.ownerName} · {formatDuration(item.duration)} · {item.bvid}</div>
-                  <div className="text-[11px] text-gray-400 dark:text-gray-500 truncate">{item.url}</div>
+                  <div className="text-[11px] text-gray-400 dark:text-gray-500 truncate">{`https://www.bilibili.com/video/${item.bvid}`}</div>
                 </div>
               </div>
               <div className="flex items-center gap-2">
                 <button
-                  onClick={() => openExternalUrl(item.url)}
+                  onClick={() => openExternalUrl(`https://www.bilibili.com/video/${item.bvid}`)}
                   className="px-3 py-1.5 rounded-lg text-xs font-semibold text-[#88B5D3] hover:bg-[#88B5D3]/10"
                 >
                   打开

@@ -5,10 +5,10 @@
 // This placeholder keeps architecture intent explicit without enabling server runtime yet.
 #[allow(dead_code)]
 fn start_lan_server() {
-  // TODO: start lightweight LAN HTTP server for iPad/other device access on same Wi-Fi.
-  // Recommended: Axum (routing + static/file responses + middleware ergonomics).
+    // TODO: start lightweight LAN HTTP server for iPad/other device access on same Wi-Fi.
+    // Recommended: Axum (routing + static/file responses + middleware ergonomics).
 }
 
 fn main() {
-  app_lib::run();
+    app_lib::run();
 }

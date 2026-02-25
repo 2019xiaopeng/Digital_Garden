@@ -27,7 +27,7 @@ export const defaultSettings: AppSettings = {
   defaultPomodoroMinutes: 25,
   autoFullscreenPomodoro: false,
   animationLevel: "normal",
-  docRoot: "~/Documents/EVA_Knowledge_Base",
+  docRoot: "",
 };
 
 export function getSettings(): AppSettings {

@@ -1,10 +1,10 @@
-use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use std::path::{Component, Path, PathBuf};
 use chrono::{Local, Utc};
-use tauri::{Manager, State};
+use serde::{Deserialize, Serialize};
+use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{Manager, State};
 use tokio::fs;
 use tokio::sync::Mutex;
 
@@ -33,12 +33,12 @@ pub struct Task {
 #[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
 pub struct DailyLog {
     pub id: String,
-    pub date: String,        // YYYY-MM-DD
+    pub date: String, // YYYY-MM-DD
     pub title: String,
-    pub content: String,     // Markdown content
-    pub mood: String,        // "happy" | "sad" | "neutral" | "focused"
-    pub sync_rate: i32,      // 0-100
-    pub tags: String,        // comma-separated
+    pub content: String, // Markdown content
+    pub mood: String,    // "happy" | "sad" | "neutral" | "focused"
+    pub sync_rate: i32,  // 0-100
+    pub tags: String,    // comma-separated
     pub auto_generated: bool,
     pub created_at: String,
     pub updated_at: String,
@@ -79,6 +79,17 @@ pub struct BilibiliMetadata {
     pub pic: String,
     pub owner_name: String,
     pub duration: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
+pub struct VideoBookmark {
+    pub id: String,
+    pub bvid: String,
+    pub title: String,
+    pub pic: String,
+    pub owner_name: String,
+    pub duration: i64,
+    pub created_at: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -133,7 +144,8 @@ pub struct AppDb {
 async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, String> {
     // Ensure parent directory exists
     if let Some(parent) = std::path::Path::new(db_path).parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create db directory: {}", e))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create db directory: {}", e))?;
     }
 
     let db_url = format!("sqlite:{}?mode=rwc", db_path);
@@ -160,7 +172,7 @@ async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, String> {
             timer_duration INTEGER DEFAULT 25,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
-        )"
+        )",
     )
     .execute(&pool)
     .await
@@ -178,7 +190,7 @@ async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, String> {
             auto_generated INTEGER DEFAULT 0,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
-        )"
+        )",
     )
     .execute(&pool)
     .await
@@ -192,11 +204,26 @@ async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, String> {
             checked_out_at TEXT,
             total_focus_seconds INTEGER DEFAULT 0,
             active_task_id TEXT
-        )"
+        )",
     )
     .execute(&pool)
     .await
     .map_err(|e| format!("Failed to create focus_sessions table: {}", e))?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS video_bookmarks (
+            id TEXT PRIMARY KEY,
+            bvid TEXT NOT NULL,
+            title TEXT NOT NULL,
+            pic TEXT DEFAULT '',
+            owner_name TEXT DEFAULT '',
+            duration INTEGER DEFAULT 0,
+            created_at TEXT NOT NULL
+        )",
+    )
+    .execute(&pool)
+    .await
+    .map_err(|e| format!("Failed to create video_bookmarks table: {}", e))?;
 
     // Create index for date-based queries
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_tasks_date ON tasks(date)")
@@ -208,6 +235,10 @@ async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, String> {
         .await
         .ok();
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_focus_sessions_date ON focus_sessions(date)")
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_video_bookmarks_created_at ON video_bookmarks(created_at DESC)")
         .execute(&pool)
         .await
         .ok();
@@ -232,7 +263,10 @@ async fn get_tasks(db: State<'_, Arc<Mutex<AppDb>>>) -> Result<Vec<Task>, String
 }
 
 #[tauri::command]
-async fn get_tasks_by_date(date: String, db: State<'_, Arc<Mutex<AppDb>>>) -> Result<Vec<Task>, String> {
+async fn get_tasks_by_date(
+    date: String,
+    db: State<'_, Arc<Mutex<AppDb>>>,
+) -> Result<Vec<Task>, String> {
     let db = db.lock().await;
     let rows = sqlx::query_as::<_, Task>(
         "SELECT id, title, description, status, priority, date, start_time, duration, tags, repeat_type, timer_type, timer_duration, created_at, updated_at FROM tasks WHERE date = ? ORDER BY start_time ASC"
@@ -307,7 +341,10 @@ async fn delete_task(id: String, db: State<'_, Arc<Mutex<AppDb>>>) -> Result<(),
 }
 
 #[tauri::command]
-async fn batch_create_tasks(tasks: Vec<Task>, db: State<'_, Arc<Mutex<AppDb>>>) -> Result<usize, String> {
+async fn batch_create_tasks(
+    tasks: Vec<Task>,
+    db: State<'_, Arc<Mutex<AppDb>>>,
+) -> Result<usize, String> {
     let db = db.lock().await;
     let mut count = 0;
     for task in &tasks {
@@ -330,7 +367,9 @@ async fn batch_create_tasks(tasks: Vec<Task>, db: State<'_, Arc<Mutex<AppDb>>>) 
         .bind(&task.updated_at)
         .execute(&db.db)
         .await;
-        if result.is_ok() { count += 1; }
+        if result.is_ok() {
+            count += 1;
+        }
     }
     Ok(count)
 }
@@ -465,9 +504,13 @@ async fn resolve_log_path_by_id(logs_dir: &Path, id: &str) -> Result<Option<Path
         return Ok(Some(direct));
     }
 
-    let mut entries = fs::read_dir(logs_dir)
-        .await
-        .map_err(|e| format!("Failed to read logs dir {}: {}", logs_dir.to_string_lossy(), e))?;
+    let mut entries = fs::read_dir(logs_dir).await.map_err(|e| {
+        format!(
+            "Failed to read logs dir {}: {}",
+            logs_dir.to_string_lossy(),
+            e
+        )
+    })?;
     while let Some(entry) = entries
         .next_entry()
         .await
@@ -497,13 +540,21 @@ async fn resolve_log_path_by_id(logs_dir: &Path, id: &str) -> Result<Option<Path
 async fn get_daily_logs(app: tauri::AppHandle) -> Result<Vec<DailyLog>, String> {
     let root = PathBuf::from(ensure_workspace_dirs(&app).await?);
     let logs_dir = root.join("Logs");
-    fs::create_dir_all(&logs_dir)
-        .await
-        .map_err(|e| format!("Failed to ensure logs dir {}: {}", logs_dir.to_string_lossy(), e))?;
+    fs::create_dir_all(&logs_dir).await.map_err(|e| {
+        format!(
+            "Failed to ensure logs dir {}: {}",
+            logs_dir.to_string_lossy(),
+            e
+        )
+    })?;
 
-    let mut entries = fs::read_dir(&logs_dir)
-        .await
-        .map_err(|e| format!("Failed to read logs dir {}: {}", logs_dir.to_string_lossy(), e))?;
+    let mut entries = fs::read_dir(&logs_dir).await.map_err(|e| {
+        format!(
+            "Failed to read logs dir {}: {}",
+            logs_dir.to_string_lossy(),
+            e
+        )
+    })?;
 
     let mut logs: Vec<DailyLog> = Vec::new();
     while let Some(entry) = entries
@@ -535,9 +586,13 @@ async fn get_daily_logs(app: tauri::AppHandle) -> Result<Vec<DailyLog>, String> 
 async fn create_daily_log(app: tauri::AppHandle, mut log: DailyLog) -> Result<DailyLog, String> {
     let root = PathBuf::from(ensure_workspace_dirs(&app).await?);
     let logs_dir = root.join("Logs");
-    fs::create_dir_all(&logs_dir)
-        .await
-        .map_err(|e| format!("Failed to ensure logs dir {}: {}", logs_dir.to_string_lossy(), e))?;
+    fs::create_dir_all(&logs_dir).await.map_err(|e| {
+        format!(
+            "Failed to ensure logs dir {}: {}",
+            logs_dir.to_string_lossy(),
+            e
+        )
+    })?;
 
     let normalized_date = normalize_log_date(&log.date);
     log.date = normalized_date.clone();
@@ -546,7 +601,11 @@ async fn create_daily_log(app: tauri::AppHandle, mut log: DailyLog) -> Result<Da
     let mut file_path = logs_dir.join(format!("{}.md", stem));
     let mut suffix = 1usize;
     while fs::metadata(&file_path).await.is_ok() {
-        stem = format!("{}-{}", build_log_stem(&normalized_date, &log.title), suffix);
+        stem = format!(
+            "{}-{}",
+            build_log_stem(&normalized_date, &log.title),
+            suffix
+        );
         file_path = logs_dir.join(format!("{}.md", stem));
         suffix += 1;
     }
@@ -558,9 +617,13 @@ async fn create_daily_log(app: tauri::AppHandle, mut log: DailyLog) -> Result<Da
     log.updated_at = now_iso();
 
     let markdown = daily_log_to_markdown(&log);
-    fs::write(&file_path, markdown)
-        .await
-        .map_err(|e| format!("Failed to write log file {}: {}", file_path.to_string_lossy(), e))?;
+    fs::write(&file_path, markdown).await.map_err(|e| {
+        format!(
+            "Failed to write log file {}: {}",
+            file_path.to_string_lossy(),
+            e
+        )
+    })?;
 
     Ok(log)
 }
@@ -573,17 +636,25 @@ async fn update_daily_log(app: tauri::AppHandle, mut log: DailyLog) -> Result<Da
 
     let root = PathBuf::from(ensure_workspace_dirs(&app).await?);
     let logs_dir = root.join("Logs");
-    fs::create_dir_all(&logs_dir)
-        .await
-        .map_err(|e| format!("Failed to ensure logs dir {}: {}", logs_dir.to_string_lossy(), e))?;
+    fs::create_dir_all(&logs_dir).await.map_err(|e| {
+        format!(
+            "Failed to ensure logs dir {}: {}",
+            logs_dir.to_string_lossy(),
+            e
+        )
+    })?;
 
     let existing_path = resolve_log_path_by_id(&logs_dir, &log.id)
         .await?
         .ok_or_else(|| format!("Daily log not found for id {}", log.id))?;
 
-    let existing_raw = fs::read_to_string(&existing_path)
-        .await
-        .map_err(|e| format!("Failed to read existing log file {}: {}", existing_path.to_string_lossy(), e))?;
+    let existing_raw = fs::read_to_string(&existing_path).await.map_err(|e| {
+        format!(
+            "Failed to read existing log file {}: {}",
+            existing_path.to_string_lossy(),
+            e
+        )
+    })?;
     let fallback_stem = existing_path
         .file_stem()
         .and_then(|s| s.to_str())
@@ -602,9 +673,13 @@ async fn update_daily_log(app: tauri::AppHandle, mut log: DailyLog) -> Result<Da
     log.updated_at = now_iso();
 
     let markdown = daily_log_to_markdown(&log);
-    fs::write(&existing_path, markdown)
-        .await
-        .map_err(|e| format!("Failed to update log file {}: {}", existing_path.to_string_lossy(), e))?;
+    fs::write(&existing_path, markdown).await.map_err(|e| {
+        format!(
+            "Failed to update log file {}: {}",
+            existing_path.to_string_lossy(),
+            e
+        )
+    })?;
 
     Ok(log)
 }
@@ -613,14 +688,22 @@ async fn update_daily_log(app: tauri::AppHandle, mut log: DailyLog) -> Result<Da
 async fn delete_daily_log(app: tauri::AppHandle, id: String) -> Result<(), String> {
     let root = PathBuf::from(ensure_workspace_dirs(&app).await?);
     let logs_dir = root.join("Logs");
-    fs::create_dir_all(&logs_dir)
-        .await
-        .map_err(|e| format!("Failed to ensure logs dir {}: {}", logs_dir.to_string_lossy(), e))?;
+    fs::create_dir_all(&logs_dir).await.map_err(|e| {
+        format!(
+            "Failed to ensure logs dir {}: {}",
+            logs_dir.to_string_lossy(),
+            e
+        )
+    })?;
 
     if let Some(path) = resolve_log_path_by_id(&logs_dir, &id).await? {
-        fs::remove_file(&path)
-            .await
-            .map_err(|e| format!("Failed to delete log file {}: {}", path.to_string_lossy(), e))?;
+        fs::remove_file(&path).await.map_err(|e| {
+            format!(
+                "Failed to delete log file {}: {}",
+                path.to_string_lossy(),
+                e
+            )
+        })?;
     }
 
     Ok(())
@@ -643,7 +726,10 @@ async fn get_focus_sessions(db: State<'_, Arc<Mutex<AppDb>>>) -> Result<Vec<Focu
 }
 
 #[tauri::command]
-async fn upsert_focus_session(session: FocusSession, db: State<'_, Arc<Mutex<AppDb>>>) -> Result<FocusSession, String> {
+async fn upsert_focus_session(
+    session: FocusSession,
+    db: State<'_, Arc<Mutex<AppDb>>>,
+) -> Result<FocusSession, String> {
     let db = db.lock().await;
     sqlx::query(
         "INSERT INTO focus_sessions (id, date, checked_in_at, checked_out_at, total_focus_seconds, active_task_id) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET checked_in_at=excluded.checked_in_at, checked_out_at=excluded.checked_out_at, total_focus_seconds=excluded.total_focus_seconds, active_task_id=excluded.active_task_id"
@@ -661,6 +747,57 @@ async fn upsert_focus_session(session: FocusSession, db: State<'_, Arc<Mutex<App
 }
 
 // ═══════════════════════════════════════════════════════════
+// Video Bookmark Commands (SQLite)
+// ═══════════════════════════════════════════════════════════
+
+#[tauri::command]
+async fn get_video_bookmarks(
+    db: State<'_, Arc<Mutex<AppDb>>>,
+) -> Result<Vec<VideoBookmark>, String> {
+    let db = db.lock().await;
+    let rows = sqlx::query_as::<_, VideoBookmark>(
+        "SELECT id, bvid, title, pic, owner_name, duration, created_at FROM video_bookmarks ORDER BY created_at DESC"
+    )
+    .fetch_all(&db.db)
+    .await
+    .map_err(|e| format!("Failed to fetch video bookmarks: {}", e))?;
+    Ok(rows)
+}
+
+#[tauri::command]
+async fn add_video_bookmark(
+    bookmark: VideoBookmark,
+    db: State<'_, Arc<Mutex<AppDb>>>,
+) -> Result<VideoBookmark, String> {
+    let db = db.lock().await;
+    sqlx::query(
+        "INSERT INTO video_bookmarks (id, bvid, title, pic, owner_name, duration, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+    )
+    .bind(&bookmark.id)
+    .bind(&bookmark.bvid)
+    .bind(&bookmark.title)
+    .bind(&bookmark.pic)
+    .bind(&bookmark.owner_name)
+    .bind(bookmark.duration)
+    .bind(&bookmark.created_at)
+    .execute(&db.db)
+    .await
+    .map_err(|e| format!("Failed to add video bookmark: {}", e))?;
+    Ok(bookmark)
+}
+
+#[tauri::command]
+async fn delete_video_bookmark(id: String, db: State<'_, Arc<Mutex<AppDb>>>) -> Result<(), String> {
+    let db = db.lock().await;
+    sqlx::query("DELETE FROM video_bookmarks WHERE id = ?")
+        .bind(id)
+        .execute(&db.db)
+        .await
+        .map_err(|e| format!("Failed to delete video bookmark: {}", e))?;
+    Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════
 // Markdown Import Command
 // ═══════════════════════════════════════════════════════════
 
@@ -671,7 +808,7 @@ async fn parse_markdown_plan(content: String) -> Result<ImportReport, String> {
 
     for line in content.lines() {
         let trimmed = line.trim();
-        
+
         // Parse date headers: ## 2026-03-01 or ## YYYY-MM-DD ...
         if trimmed.starts_with("## ") || trimmed.starts_with("# ") {
             let header = trimmed.trim_start_matches('#').trim();
@@ -680,9 +817,12 @@ async fn parse_markdown_plan(content: String) -> Result<ImportReport, String> {
                 current_date = date;
             }
         }
-        
+
         // Parse task lines: - [ ] or - [x]
-        if trimmed.starts_with("- [ ] ") || trimmed.starts_with("- [x] ") || trimmed.starts_with("- [X] ") {
+        if trimmed.starts_with("- [ ] ")
+            || trimmed.starts_with("- [x] ")
+            || trimmed.starts_with("- [X] ")
+        {
             let is_done = trimmed.starts_with("- [x] ") || trimmed.starts_with("- [X] ");
             let rest = &trimmed[6..];
             let mut start_time: Option<String> = None;
@@ -697,7 +837,7 @@ async fn parse_markdown_plan(content: String) -> Result<ImportReport, String> {
                     }
                 }
             }
-            
+
             // Extract @date
             let mut task_date = current_date.clone();
             let mut task_text = rest_text.clone();
@@ -720,7 +860,9 @@ async fn parse_markdown_plan(content: String) -> Result<ImportReport, String> {
 
             if task_text.ends_with(')') {
                 if let Some(open_idx) = task_text.rfind('(') {
-                    let level = task_text[open_idx + 1..task_text.len() - 1].trim().to_lowercase();
+                    let level = task_text[open_idx + 1..task_text.len() - 1]
+                        .trim()
+                        .to_lowercase();
                     match level.as_str() {
                         "high" => {
                             priority = "high".to_string();
@@ -738,7 +880,7 @@ async fn parse_markdown_plan(content: String) -> Result<ImportReport, String> {
                     }
                 }
             }
-            
+
             for part in task_text.split_whitespace() {
                 if part.starts_with('#') {
                     let tag = part.trim_start_matches('#').to_lowercase();
@@ -749,11 +891,13 @@ async fn parse_markdown_plan(content: String) -> Result<ImportReport, String> {
                         _ => tags.push(tag),
                     }
                 } else {
-                    if !clean_title.is_empty() { clean_title.push(' '); }
+                    if !clean_title.is_empty() {
+                        clean_title.push(' ');
+                    }
                     clean_title.push_str(part);
                 }
             }
-            
+
             if !clean_title.is_empty() {
                 tasks.push(ImportedTask {
                     title: clean_title,
@@ -764,7 +908,11 @@ async fn parse_markdown_plan(content: String) -> Result<ImportReport, String> {
                     },
                     priority,
                     tags,
-                    status: if is_done { "done".to_string() } else { "todo".to_string() },
+                    status: if is_done {
+                        "done".to_string()
+                    } else {
+                        "todo".to_string()
+                    },
                     start_time,
                     duration: None,
                 });
@@ -854,18 +1002,24 @@ fn infer_import_durations(tasks: &mut Vec<ImportedTask>) {
 fn extract_iso_date(s: &str) -> Option<String> {
     // Match YYYY-MM-DD pattern
     let chars: Vec<char> = s.chars().collect();
-    if chars.len() < 10 { return None; }
-    
+    if chars.len() < 10 {
+        return None;
+    }
+
     for i in 0..=chars.len().saturating_sub(10) {
         if chars.len() >= i + 10
-            && chars[i].is_ascii_digit() && chars[i+1].is_ascii_digit()
-            && chars[i+2].is_ascii_digit() && chars[i+3].is_ascii_digit()
-            && chars[i+4] == '-'
-            && chars[i+5].is_ascii_digit() && chars[i+6].is_ascii_digit()
-            && chars[i+7] == '-'
-            && chars[i+8].is_ascii_digit() && chars[i+9].is_ascii_digit()
+            && chars[i].is_ascii_digit()
+            && chars[i + 1].is_ascii_digit()
+            && chars[i + 2].is_ascii_digit()
+            && chars[i + 3].is_ascii_digit()
+            && chars[i + 4] == '-'
+            && chars[i + 5].is_ascii_digit()
+            && chars[i + 6].is_ascii_digit()
+            && chars[i + 7] == '-'
+            && chars[i + 8].is_ascii_digit()
+            && chars[i + 9].is_ascii_digit()
         {
-            return Some(chars[i..i+10].iter().collect());
+            return Some(chars[i..i + 10].iter().collect());
         }
     }
     None
@@ -873,7 +1027,9 @@ fn extract_iso_date(s: &str) -> Option<String> {
 
 fn chrono_today() -> String {
     let now = std::time::SystemTime::now();
-    let since_epoch = now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let since_epoch = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
     let secs = since_epoch.as_secs() as i64;
     let days = secs / 86400;
     // Simple date calculation
@@ -881,7 +1037,9 @@ fn chrono_today() -> String {
     let mut remaining = days;
     loop {
         let days_in_year = if is_leap(y) { 366 } else { 365 };
-        if remaining < days_in_year { break; }
+        if remaining < days_in_year {
+            break;
+        }
         remaining -= days_in_year;
         y += 1;
     }
@@ -892,7 +1050,10 @@ fn chrono_today() -> String {
     };
     let mut m = 0;
     for (i, &md) in month_days.iter().enumerate() {
-        if remaining < md { m = i + 1; break; }
+        if remaining < md {
+            m = i + 1;
+            break;
+        }
         remaining -= md;
     }
     let d = remaining + 1;
@@ -910,7 +1071,7 @@ fn is_leap(y: i32) -> bool {
 #[tauri::command]
 async fn ai_proxy(request: AiProxyRequest) -> Result<AiProxyResponse, String> {
     let client = reqwest::Client::new();
-    
+
     let body = serde_json::json!({
         "model": request.model,
         "messages": [
@@ -931,10 +1092,16 @@ async fn ai_proxy(request: AiProxyRequest) -> Result<AiProxyResponse, String> {
         .map_err(|e| format!("AI API request failed: {}", e))?;
 
     let status = response.status();
-    let response_text = response.text().await.map_err(|e| format!("Failed to read AI response: {}", e))?;
+    let response_text = response
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read AI response: {}", e))?;
 
     if !status.is_success() {
-        return Err(format!("AI API returned error {}: {}", status, response_text));
+        return Err(format!(
+            "AI API returned error {}: {}",
+            status, response_text
+        ));
     }
 
     let json: serde_json::Value = serde_json::from_str(&response_text)
@@ -1003,19 +1170,33 @@ async fn fetch_bilibili_metadata(bvid: String) -> Result<BilibiliMetadata, Strin
     };
 
     if !status.is_success() {
-        log::error!("[Bilibili] HTTP {} bvid={} body={}", status, clean_bvid, body);
-        println!("[Bilibili] HTTP {} bvid={} body={}", status, clean_bvid, body);
+        log::error!(
+            "[Bilibili] HTTP {} bvid={} body={}",
+            status,
+            clean_bvid,
+            body
+        );
+        println!(
+            "[Bilibili] HTTP {} bvid={} body={}",
+            status, clean_bvid, body
+        );
         return Err(format!("Bilibili HTTP {} body: {}", status, body));
     }
 
     let payload = match serde_json::from_str::<BilibiliApiResponse>(&body) {
         Ok(json) => {
-            println!("[Bilibili] parse json ok code={} message={}", json.code, json.message);
+            println!(
+                "[Bilibili] parse json ok code={} message={}",
+                json.code, json.message
+            );
             json
         }
         Err(err) => {
             println!("[Bilibili] parse json error detail={:?}", err);
-            return Err(format!("Bilibili response parse error: {:?} | raw body: {}", err, body));
+            return Err(format!(
+                "Bilibili response parse error: {:?} | raw body: {}",
+                err, body
+            ));
         }
     };
 
@@ -1029,10 +1210,7 @@ async fn fetch_bilibili_metadata(bvid: String) -> Result<BilibiliMetadata, Strin
         );
         println!(
             "[Bilibili] API code error code={} msg={} bvid={} raw={}",
-            payload.code,
-            payload.message,
-            clean_bvid,
-            body
+            payload.code, payload.message, clean_bvid, body
         );
         return Err(format!(
             "Bilibili API error {}: {} | raw body: {}",
@@ -1046,10 +1224,7 @@ async fn fetch_bilibili_metadata(bvid: String) -> Result<BilibiliMetadata, Strin
 
     println!(
         "[Bilibili] success bvid={} title={} owner={} duration={}",
-        data.bvid,
-        data.title,
-        data.owner.name,
-        data.duration
+        data.bvid, data.title, data.owner.name, data.duration
     );
 
     Ok(BilibiliMetadata {
@@ -1115,9 +1290,13 @@ async fn ensure_workspace_dirs(app: &tauri::AppHandle) -> Result<String, String>
     ];
 
     for dir in required {
-        fs::create_dir_all(&dir)
-            .await
-            .map_err(|e| format!("Failed to create workspace dir {}: {}", dir.to_string_lossy(), e))?;
+        fs::create_dir_all(&dir).await.map_err(|e| {
+            format!(
+                "Failed to create workspace dir {}: {}",
+                dir.to_string_lossy(),
+                e
+            )
+        })?;
     }
 
     Ok(root.to_string_lossy().to_string())
@@ -1134,9 +1313,13 @@ async fn ensure_workspace_dirs_at(root: &str) -> Result<String, String> {
     ];
 
     for dir in required {
-        fs::create_dir_all(&dir)
-            .await
-            .map_err(|e| format!("Failed to create workspace dir {}: {}", dir.to_string_lossy(), e))?;
+        fs::create_dir_all(&dir).await.map_err(|e| {
+            format!(
+                "Failed to create workspace dir {}: {}",
+                dir.to_string_lossy(),
+                e
+            )
+        })?;
     }
 
     Ok(root_path.to_string_lossy().to_string())
@@ -1165,19 +1348,28 @@ async fn initialize_workspace_at(root_path: String) -> Result<String, String> {
 #[tauri::command]
 async fn get_notes_dir(app: tauri::AppHandle) -> Result<String, String> {
     let root = ensure_workspace_dirs(&app).await?;
-    Ok(PathBuf::from(root).join("Notes").to_string_lossy().to_string())
+    Ok(PathBuf::from(root)
+        .join("Notes")
+        .to_string_lossy()
+        .to_string())
 }
 
 #[tauri::command]
 async fn get_logs_dir(app: tauri::AppHandle) -> Result<String, String> {
     let root = ensure_workspace_dirs(&app).await?;
-    Ok(PathBuf::from(root).join("Logs").to_string_lossy().to_string())
+    Ok(PathBuf::from(root)
+        .join("Logs")
+        .to_string_lossy()
+        .to_string())
 }
 
 #[tauri::command]
 async fn get_resources_dir(app: tauri::AppHandle) -> Result<String, String> {
     let root = ensure_workspace_dirs(&app).await?;
-    Ok(PathBuf::from(root).join("Resources").to_string_lossy().to_string())
+    Ok(PathBuf::from(root)
+        .join("Resources")
+        .to_string_lossy()
+        .to_string())
 }
 
 #[derive(Debug, Serialize)]
@@ -1189,28 +1381,45 @@ struct CopiedFileResult {
 
 /// Copy a file into the Notes directory (preserving name), return the dest path
 #[tauri::command]
-async fn copy_file_to_notes(app: tauri::AppHandle, source_path: String, relative_dir: String) -> Result<String, String> {
+async fn copy_file_to_notes(
+    app: tauri::AppHandle,
+    source_path: String,
+    relative_dir: String,
+) -> Result<String, String> {
     let root = PathBuf::from(ensure_workspace_dirs(&app).await?);
     let base = root.join("Notes");
     let relative = sanitize_relative_path(&relative_dir)?;
     let target_dir = base.join(relative);
-    fs::create_dir_all(&target_dir)
-        .await
-        .map_err(|e| format!("Failed to create directory {}: {}", target_dir.to_string_lossy(), e))?;
+    fs::create_dir_all(&target_dir).await.map_err(|e| {
+        format!(
+            "Failed to create directory {}: {}",
+            target_dir.to_string_lossy(),
+            e
+        )
+    })?;
 
     let file_name = std::path::Path::new(&source_path)
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("unknown");
     let dest = target_dir.join(file_name);
-    fs::copy(&source_path, &dest)
-        .await
-        .map_err(|e| format!("Failed to copy {} -> {}: {}", source_path, dest.to_string_lossy(), e))?;
+    fs::copy(&source_path, &dest).await.map_err(|e| {
+        format!(
+            "Failed to copy {} -> {}: {}",
+            source_path,
+            dest.to_string_lossy(),
+            e
+        )
+    })?;
     Ok(dest.to_string_lossy().to_string())
 }
 
 #[tauri::command]
-async fn copy_files_to_notes(app: tauri::AppHandle, source_paths: Vec<String>, relative_dir: String) -> Result<Vec<CopiedFileResult>, String> {
+async fn copy_files_to_notes(
+    app: tauri::AppHandle,
+    source_paths: Vec<String>,
+    relative_dir: String,
+) -> Result<Vec<CopiedFileResult>, String> {
     if source_paths.is_empty() {
         return Err("No source files provided".to_string());
     }
@@ -1220,18 +1429,28 @@ async fn copy_files_to_notes(app: tauri::AppHandle, source_paths: Vec<String>, r
     let relative = sanitize_relative_path(&relative_dir)?;
     let target_dir = base.join(relative);
 
-    fs::create_dir_all(&target_dir)
-        .await
-        .map_err(|e| format!("Failed to create directory {}: {}", target_dir.to_string_lossy(), e))?;
+    fs::create_dir_all(&target_dir).await.map_err(|e| {
+        format!(
+            "Failed to create directory {}: {}",
+            target_dir.to_string_lossy(),
+            e
+        )
+    })?;
 
     let mut copied = Vec::new();
 
     for (index, source_path) in source_paths.into_iter().enumerate() {
-        let metadata = fs::metadata(&source_path)
-            .await
-            .map_err(|e| format!("Source file metadata error [index={} path={}]: {}", index, source_path, e))?;
+        let metadata = fs::metadata(&source_path).await.map_err(|e| {
+            format!(
+                "Source file metadata error [index={} path={}]: {}",
+                index, source_path, e
+            )
+        })?;
         if !metadata.is_file() {
-            return Err(format!("Source path is not a file [index={} path={}]", index, source_path));
+            return Err(format!(
+                "Source path is not a file [index={} path={}]",
+                index, source_path
+            ));
         }
 
         let file_name = Path::new(&source_path)
@@ -1241,9 +1460,15 @@ async fn copy_files_to_notes(app: tauri::AppHandle, source_paths: Vec<String>, r
             .to_string();
 
         let dest = target_dir.join(&file_name);
-        fs::copy(&source_path, &dest)
-            .await
-            .map_err(|e| format!("Failed to copy [index={} source={} dest={}]: {}", index, source_path, dest.to_string_lossy(), e))?;
+        fs::copy(&source_path, &dest).await.map_err(|e| {
+            format!(
+                "Failed to copy [index={} source={} dest={}]: {}",
+                index,
+                source_path,
+                dest.to_string_lossy(),
+                e
+            )
+        })?;
 
         copied.push(CopiedFileResult {
             source_path,
@@ -1256,7 +1481,10 @@ async fn copy_files_to_notes(app: tauri::AppHandle, source_paths: Vec<String>, r
 }
 
 #[tauri::command]
-async fn batch_delete_notes_files(app: tauri::AppHandle, absolute_paths: Vec<String>) -> Result<usize, String> {
+async fn batch_delete_notes_files(
+    app: tauri::AppHandle,
+    absolute_paths: Vec<String>,
+) -> Result<usize, String> {
     if absolute_paths.is_empty() {
         return Ok(0);
     }
@@ -1273,17 +1501,26 @@ async fn batch_delete_notes_files(app: tauri::AppHandle, absolute_paths: Vec<Str
             ));
         }
 
-        let metadata = fs::metadata(&candidate)
-            .await
-            .map_err(|e| format!("Failed to stat file [index={} path={}]: {}", index, raw_path, e))?;
+        let metadata = fs::metadata(&candidate).await.map_err(|e| {
+            format!(
+                "Failed to stat file [index={} path={}]: {}",
+                index, raw_path, e
+            )
+        })?;
 
         if !metadata.is_file() {
-            return Err(format!("Target is not a file [index={} path={}]", index, raw_path));
+            return Err(format!(
+                "Target is not a file [index={} path={}]",
+                index, raw_path
+            ));
         }
 
-        fs::remove_file(&candidate)
-            .await
-            .map_err(|e| format!("Failed to delete file [index={} path={}]: {}", index, raw_path, e))?;
+        fs::remove_file(&candidate).await.map_err(|e| {
+            format!(
+                "Failed to delete file [index={} path={}]: {}",
+                index, raw_path, e
+            )
+        })?;
         deleted += 1;
     }
 
@@ -1291,7 +1528,11 @@ async fn batch_delete_notes_files(app: tauri::AppHandle, absolute_paths: Vec<Str
 }
 
 #[tauri::command]
-async fn batch_move_notes_items(app: tauri::AppHandle, from_relatives: Vec<String>, target_relative_dir: String) -> Result<usize, String> {
+async fn batch_move_notes_items(
+    app: tauri::AppHandle,
+    from_relatives: Vec<String>,
+    target_relative_dir: String,
+) -> Result<usize, String> {
     if from_relatives.is_empty() {
         return Ok(0);
     }
@@ -1301,9 +1542,13 @@ async fn batch_move_notes_items(app: tauri::AppHandle, from_relatives: Vec<Strin
     let target_rel = sanitize_relative_path(&target_relative_dir)?;
     let target_dir = base.join(target_rel);
 
-    fs::create_dir_all(&target_dir)
-        .await
-        .map_err(|e| format!("Failed to create target dir {}: {}", target_dir.to_string_lossy(), e))?;
+    fs::create_dir_all(&target_dir).await.map_err(|e| {
+        format!(
+            "Failed to create target dir {}: {}",
+            target_dir.to_string_lossy(),
+            e
+        )
+    })?;
 
     let mut moved = 0usize;
 
@@ -1313,19 +1558,24 @@ async fn batch_move_notes_items(app: tauri::AppHandle, from_relatives: Vec<Strin
         let file_name = src
             .file_name()
             .and_then(|n| n.to_str())
-            .ok_or_else(|| format!("Invalid source file name [index={} relative={}]", index, rel))?
+            .ok_or_else(|| {
+                format!(
+                    "Invalid source file name [index={} relative={}]",
+                    index, rel
+                )
+            })?
             .to_string();
         let dest = target_dir.join(file_name);
 
-        fs::rename(&src, &dest)
-            .await
-            .map_err(|e| format!(
+        fs::rename(&src, &dest).await.map_err(|e| {
+            format!(
                 "Failed to move item [index={} from={} to={}]: {}",
                 index,
                 src.to_string_lossy(),
                 dest.to_string_lossy(),
                 e
-            ))?;
+            )
+        })?;
         moved += 1;
     }
 
@@ -1333,7 +1583,11 @@ async fn batch_move_notes_items(app: tauri::AppHandle, from_relatives: Vec<Strin
 }
 
 #[tauri::command]
-async fn copy_files_to_resources(app: tauri::AppHandle, source_paths: Vec<String>, relative_dir: String) -> Result<Vec<CopiedFileResult>, String> {
+async fn copy_files_to_resources(
+    app: tauri::AppHandle,
+    source_paths: Vec<String>,
+    relative_dir: String,
+) -> Result<Vec<CopiedFileResult>, String> {
     if source_paths.is_empty() {
         return Err("No source files provided".to_string());
     }
@@ -1343,18 +1597,28 @@ async fn copy_files_to_resources(app: tauri::AppHandle, source_paths: Vec<String
     let relative = sanitize_relative_path(&relative_dir)?;
     let target_dir = base.join(relative);
 
-    fs::create_dir_all(&target_dir)
-        .await
-        .map_err(|e| format!("Failed to create directory {}: {}", target_dir.to_string_lossy(), e))?;
+    fs::create_dir_all(&target_dir).await.map_err(|e| {
+        format!(
+            "Failed to create directory {}: {}",
+            target_dir.to_string_lossy(),
+            e
+        )
+    })?;
 
     let mut copied = Vec::new();
 
     for (index, source_path) in source_paths.into_iter().enumerate() {
-        let metadata = fs::metadata(&source_path)
-            .await
-            .map_err(|e| format!("Source file metadata error [index={} path={}]: {}", index, source_path, e))?;
+        let metadata = fs::metadata(&source_path).await.map_err(|e| {
+            format!(
+                "Source file metadata error [index={} path={}]: {}",
+                index, source_path, e
+            )
+        })?;
         if !metadata.is_file() {
-            return Err(format!("Source path is not a file [index={} path={}]", index, source_path));
+            return Err(format!(
+                "Source path is not a file [index={} path={}]",
+                index, source_path
+            ));
         }
 
         let file_name = Path::new(&source_path)
@@ -1364,9 +1628,15 @@ async fn copy_files_to_resources(app: tauri::AppHandle, source_paths: Vec<String
             .to_string();
 
         let dest = target_dir.join(&file_name);
-        fs::copy(&source_path, &dest)
-            .await
-            .map_err(|e| format!("Failed to copy [index={} source={} dest={}]: {}", index, source_path, dest.to_string_lossy(), e))?;
+        fs::copy(&source_path, &dest).await.map_err(|e| {
+            format!(
+                "Failed to copy [index={} source={} dest={}]: {}",
+                index,
+                source_path,
+                dest.to_string_lossy(),
+                e
+            )
+        })?;
 
         copied.push(CopiedFileResult {
             source_path,
@@ -1380,7 +1650,11 @@ async fn copy_files_to_resources(app: tauri::AppHandle, source_paths: Vec<String
 
 /// Write text content to a file in the Notes directory
 #[tauri::command]
-async fn write_notes_file(app: tauri::AppHandle, relative_path: String, content: String) -> Result<String, String> {
+async fn write_notes_file(
+    app: tauri::AppHandle,
+    relative_path: String,
+    content: String,
+) -> Result<String, String> {
     let root = PathBuf::from(ensure_workspace_dirs(&app).await?);
     let rel = sanitize_relative_path(&relative_path)?;
     let full_path = root.join("Notes").join(rel);
@@ -1397,13 +1671,20 @@ async fn write_notes_file(app: tauri::AppHandle, relative_path: String, content:
 
 /// Create a folder in the Notes directory
 #[tauri::command]
-async fn create_notes_folder(app: tauri::AppHandle, relative_path: String) -> Result<String, String> {
+async fn create_notes_folder(
+    app: tauri::AppHandle,
+    relative_path: String,
+) -> Result<String, String> {
     let root = PathBuf::from(ensure_workspace_dirs(&app).await?);
     let rel = sanitize_relative_path(&relative_path)?;
     let full_path = root.join("Notes").join(rel);
-    fs::create_dir_all(&full_path)
-        .await
-        .map_err(|e| format!("Failed to create folder {}: {}", full_path.to_string_lossy(), e))?;
+    fs::create_dir_all(&full_path).await.map_err(|e| {
+        format!(
+            "Failed to create folder {}: {}",
+            full_path.to_string_lossy(),
+            e
+        )
+    })?;
     Ok(full_path.to_string_lossy().to_string())
 }
 
@@ -1414,11 +1695,19 @@ async fn delete_notes_item(app: tauri::AppHandle, relative_path: String) -> Resu
     let rel = sanitize_relative_path(&relative_path)?;
     let full_path = root.join("Notes").join(rel);
     let path = full_path.as_path();
-    if fs::metadata(path).await.map(|m| m.is_dir()).unwrap_or(false) {
+    if fs::metadata(path)
+        .await
+        .map(|m| m.is_dir())
+        .unwrap_or(false)
+    {
         fs::remove_dir_all(path)
             .await
             .map_err(|e| format!("Failed to delete folder: {}", e))?;
-    } else if fs::metadata(path).await.map(|m| m.is_file()).unwrap_or(false) {
+    } else if fs::metadata(path)
+        .await
+        .map(|m| m.is_file())
+        .unwrap_or(false)
+    {
         fs::remove_file(path)
             .await
             .map_err(|e| format!("Failed to delete file: {}", e))?;
@@ -1428,7 +1717,11 @@ async fn delete_notes_item(app: tauri::AppHandle, relative_path: String) -> Resu
 
 /// Move (rename) a file or folder within Notes directory
 #[tauri::command]
-async fn move_notes_item(app: tauri::AppHandle, from_relative: String, to_relative: String) -> Result<(), String> {
+async fn move_notes_item(
+    app: tauri::AppHandle,
+    from_relative: String,
+    to_relative: String,
+) -> Result<(), String> {
     let root = PathBuf::from(ensure_workspace_dirs(&app).await?);
     let base = root.join("Notes");
     let src = base.join(sanitize_relative_path(&from_relative)?);
@@ -1439,9 +1732,14 @@ async fn move_notes_item(app: tauri::AppHandle, from_relative: String, to_relati
             .await
             .map_err(|e| format!("Failed to create dest dir: {}", e))?;
     }
-    fs::rename(&src, &dest)
-        .await
-        .map_err(|e| format!("Failed to move {} -> {}: {}", src.to_string_lossy(), dest.to_string_lossy(), e))?;
+    fs::rename(&src, &dest).await.map_err(|e| {
+        format!(
+            "Failed to move {} -> {}: {}",
+            src.to_string_lossy(),
+            dest.to_string_lossy(),
+            e
+        )
+    })?;
     Ok(())
 }
 
@@ -1452,6 +1750,10 @@ async fn move_notes_item(app: tauri::AppHandle, from_relative: String, to_relati
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec!["--minimized"]),
+        ))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_http::init())
@@ -1466,7 +1768,8 @@ pub fn run() {
             }
         })
         .setup(|app| {
-            let tray_show = MenuItem::with_id(app, "tray_show", "显示 EVA 终端", true, None::<&str>)?;
+            let tray_show =
+                MenuItem::with_id(app, "tray_show", "显示 EVA 终端", true, None::<&str>)?;
             let tray_quit = MenuItem::with_id(app, "tray_quit", "退出系统", true, None::<&str>)?;
             let tray_menu = Menu::with_items(app, &[&tray_show, &tray_quit])?;
 
@@ -1536,7 +1839,7 @@ pub fn run() {
 
                 let db_dir = format!("{}/Database", workspace_root);
                 let db_path = format!("{}/eva.db", db_dir);
-                
+
                 match init_db(&db_path).await {
                     Ok(pool) => {
                         let db_state = Arc::new(Mutex::new(AppDb { db: pool }));
@@ -1564,6 +1867,9 @@ pub fn run() {
             delete_daily_log,
             get_focus_sessions,
             upsert_focus_session,
+            get_video_bookmarks,
+            add_video_bookmark,
+            delete_video_bookmark,
             parse_markdown_plan,
             ai_proxy,
             fetch_bilibili_metadata,

@@ -19,6 +19,14 @@
     "fs:allow-remove",
     "fs:allow-copy-file",
     "fs:allow-rename",
+    "fs:allow-document-read",
+    "fs:allow-document-write",
+    {
+      "identifier": "fs:scope",
+      "allow": [
+        "$DOCUMENT/**"
+      ]
+    },
     "http:default",
     "http:allow-fetch",
     "http:allow-fetch-cancel",

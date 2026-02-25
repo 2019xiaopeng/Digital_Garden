@@ -22,9 +22,9 @@ import {
   UserCircle2,
 } from "lucide-react";
 import { bellUrl, getSettings, updateSettings, type AppSettings } from "../lib/settings";
-import { isTauriAvailable } from "../lib/dataService";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
+import { documentDir, join } from "@tauri-apps/api/path";
 
 type TabKey =
   | "general"
@@ -82,21 +82,48 @@ export function Settings() {
   const [actionError, setActionError] = useState<string | null>(null);
 
   useEffect(() => {
-    const loaded = getSettings();
-    setSettings(loaded);
-    setInitialDocRoot(loaded.docRoot);
+    let mounted = true;
+    const initDocRoot = async () => {
+      try {
+        const loaded = getSettings();
+        const baseDir = await documentDir();
+        const realPath = await join(baseDir, "EVA_Knowledge_Base");
+        const current = (loaded.docRoot || "").trim();
+        const shouldNormalize = !current || current.startsWith("~/") || current.startsWith("~\\");
+
+        if (shouldNormalize) {
+          const next = { ...loaded, docRoot: realPath };
+          if (mounted) {
+            setSettings(next);
+            setInitialDocRoot(realPath);
+          }
+          updateSettings(next);
+          return;
+        }
+
+        if (mounted) {
+          setSettings(loaded);
+          setInitialDocRoot(current);
+        }
+      } catch (error) {
+        console.error("[Settings] Failed to initialize absolute docRoot:", error);
+        const loaded = getSettings();
+        if (mounted) {
+          setSettings(loaded);
+          setInitialDocRoot((loaded.docRoot || "").trim());
+        }
+      }
+    };
+
+    initDocRoot();
+    return () => {
+      mounted = false;
+    };
   }, []);
 
   useEffect(() => {
     let mounted = true;
     const loadAutostart = async () => {
-      if (!isTauriAvailable()) {
-        if (mounted) {
-          setAutoStartEnabled(false);
-          setAutoStartLoading(false);
-        }
-        return;
-      }
       try {
         const enabled = await isEnabled();
         if (mounted) setAutoStartEnabled(enabled);
@@ -117,7 +144,7 @@ export function Settings() {
     localStorage.setItem("eva.ai.apiKey", settings.aiApiKey);
     localStorage.setItem("eva.ai.model", aiModel);
 
-    if (isTauriAvailable() && settings.docRoot.trim() && settings.docRoot !== initialDocRoot) {
+    if (settings.docRoot.trim() && settings.docRoot !== initialDocRoot) {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
         await invoke("initialize_workspace_at", { rootPath: settings.docRoot.trim() });
@@ -131,17 +158,17 @@ export function Settings() {
     setTimeout(() => setSaved(false), 1200);
   };
 
-  const toggleAutoStart = async () => {
-    if (!isTauriAvailable() || autoStartLoading) return;
+  const handleAutoStartChange = async (nextEnabled: boolean) => {
+    if (autoStartLoading) return;
     setAutoStartLoading(true);
     setActionError(null);
     try {
-      if (autoStartEnabled) {
-        await disable();
-        setAutoStartEnabled(false);
-      } else {
+      if (nextEnabled) {
         await enable();
         setAutoStartEnabled(true);
+      } else {
+        await disable();
+        setAutoStartEnabled(false);
       }
     } catch (error) {
       console.error("[Settings] Failed to toggle autostart:", error);
@@ -151,8 +178,7 @@ export function Settings() {
     }
   };
 
-  const pickDocRoot = async () => {
-    if (!isTauriAvailable()) return;
+  const handleChangeRoot = async () => {
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
       const picked = await open({ directory: true, multiple: false, title: "选择文档根目录" });
@@ -171,13 +197,19 @@ export function Settings() {
     }
   };
 
-  const openLocalDataDir = async () => {
-    if (!isTauriAvailable()) return;
+  const handleOpenRoot = async () => {
     setActionError(null);
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      const root = await invoke<string>("get_workspace_root");
-      await revealItemInDir(root);
+      const target = settings.docRoot?.trim();
+      if (!target) {
+        setActionError("当前未配置文档根目录");
+        return;
+      }
+      try {
+        await revealItemInDir(target);
+      } catch {
+        await openPath(target);
+      }
     } catch (error) {
       console.error("[Settings] Failed to open local workspace root:", error);
       setActionError(`打开根目录失败：${error instanceof Error ? error.message : String(error)}`);
@@ -203,14 +235,16 @@ export function Settings() {
           <p className="font-semibold text-gray-900 dark:text-white">开机自启动</p>
           <p className="text-sm text-gray-500 dark:text-gray-400">登录系统时自动启动 EVA 终端</p>
         </div>
-        <button
-          type="button"
-          onClick={toggleAutoStart}
-          disabled={!isTauriAvailable() || autoStartLoading}
-          className={`relative inline-flex h-7 w-12 items-center rounded-full transition-colors ${autoStartEnabled ? "bg-[#88B5D3]" : "bg-gray-300 dark:bg-gray-600"} ${(!isTauriAvailable() || autoStartLoading) ? "opacity-60 cursor-not-allowed" : ""}`}
-        >
-          <span className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${autoStartEnabled ? "translate-x-6" : "translate-x-1"}`} />
-        </button>
+        <label className="relative inline-flex h-7 w-12 items-center cursor-pointer select-none">
+          <input
+            type="checkbox"
+            className="sr-only peer"
+            checked={autoStartEnabled}
+            onChange={(e) => handleAutoStartChange(e.target.checked)}
+          />
+          <span className="absolute inset-0 rounded-full bg-gray-300 dark:bg-gray-600 transition-colors peer-checked:bg-[#88B5D3]" />
+          <span className={`relative inline-block h-5 w-5 rounded-full bg-white transition-transform ${autoStartEnabled ? "translate-x-6" : "translate-x-1"}`} />
+        </label>
       </div>
     </section>
   );
@@ -303,22 +337,25 @@ export function Settings() {
       <div className="glass-card rounded-2xl p-5 space-y-4">
         <div>
           <label className="text-xs font-semibold text-gray-500">文档根目录</label>
-          <div className="mt-1.5 flex items-center gap-2 rounded-xl border border-gray-200/80 dark:border-[#30435c] bg-gray-50 dark:bg-[#0f1826]/60 px-4 py-2.5">
-            <FolderOpen className="w-4 h-4 text-gray-400 flex-shrink-0" />
-            <span className="flex-1 text-sm text-gray-900 dark:text-white truncate">{settings.docRoot || "未设置"}</span>
+          <div className="mt-1.5 flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleOpenRoot}
+              className="flex-1 flex items-center gap-2 rounded-xl border border-gray-200/80 dark:border-[#30435c] bg-gray-50 dark:bg-[#0f1826]/60 px-4 py-2.5 text-left hover:bg-gray-100 dark:hover:bg-[#152338] transition-colors cursor-pointer"
+              title="在资源管理器中打开当前目录"
+            >
+              <FolderOpen className="w-4 h-4 text-gray-400 flex-shrink-0" />
+              <span className="flex-1 text-sm text-gray-900 dark:text-white truncate">{settings.docRoot || "未设置"}</span>
+            </button>
+            <button onClick={handleChangeRoot} className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-[#88B5D3] hover:bg-[#6f9fbe] text-white text-sm font-semibold shadow-sm transition-colors">
+              <FolderSearch className="w-4 h-4" /> 更改目录
+            </button>
           </div>
         </div>
         <div className="flex flex-wrap gap-3">
-          {isTauriAvailable() && (
-            <button onClick={pickDocRoot} className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-[#88B5D3] hover:bg-[#6f9fbe] text-white text-sm font-semibold shadow-sm transition-colors">
-              <FolderSearch className="w-4 h-4" /> 更改根目录
-            </button>
-          )}
-          {isTauriAvailable() && (
-            <button onClick={openLocalDataDir} className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl border border-emerald-300/60 text-emerald-600 dark:text-emerald-300 hover:bg-emerald-500/10 text-sm font-semibold transition-colors">
-              <ExternalLink className="w-4 h-4" /> 在资源管理器中打开
-            </button>
-          )}
+          <button onClick={handleOpenRoot} className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl border border-emerald-300/60 text-emerald-600 dark:text-emerald-300 hover:bg-emerald-500/10 text-sm font-semibold transition-colors">
+            <ExternalLink className="w-4 h-4" /> 在资源管理器中打开
+          </button>
         </div>
       </div>
       <div className="glass-card rounded-2xl p-5">
