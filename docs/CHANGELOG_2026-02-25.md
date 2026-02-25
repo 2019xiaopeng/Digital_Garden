@@ -106,3 +106,20 @@
   - `create_question`
   - `get_questions`
 - 已注册到 `invoke_handler`，为 Quiz 页面重构与 AI 生成入库打通后端基础
+
+### 10) Phase 2：练功房“录题 - 刷题 - 判题”闭环落地
+- `Quiz.tsx` 已移除硬编码占位题，改为真实题库渲染
+- 新增「录入新题」Modal：
+  - 科目（408/数一/英一/政治）
+  - 题型（当前为单选题）
+  - 题干、A/B/C/D 选项、正确答案、解析
+  - 提交后调用 `create_question` 入库并自动刷新列表
+- 刷题面板已对接 `get_questions`，支持按科目切换拉取/刷新
+- 题干与解析支持 Markdown + LaTeX 渲染：`react-markdown + remark-math + rehype-katex`
+- 新增后端命令 `answer_question(id, is_correct)`：
+  - `review_count + 1`
+  - 若答对则 `correct_count + 1`
+  - 更新 `next_review`
+- 前端判题反馈：
+  - 答对选项标绿、答错选项标红
+  - 答题后自动展开解析区并静默落盘刷题记录

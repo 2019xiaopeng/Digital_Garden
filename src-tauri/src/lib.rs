@@ -110,6 +110,23 @@ pub struct Question {
     pub ease_factor: f64,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
+pub struct AiSession {
+    pub id: String,
+    pub title: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
+pub struct AiMessage {
+    pub id: String,
+    pub session_id: String,
+    pub role: String,
+    pub content: String,
+    pub created_at: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct BilibiliApiOwner {
     name: String,
@@ -172,6 +189,11 @@ async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, String> {
         .connect(&db_url)
         .await
         .map_err(|e| format!("Failed to connect to database: {}", e))?;
+
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&pool)
+        .await
+        .map_err(|e| format!("Failed to enable foreign keys: {}", e))?;
 
     // Create tables
     sqlx::query(
@@ -262,6 +284,32 @@ async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, String> {
     .await
     .map_err(|e| format!("Failed to create questions table: {}", e))?;
 
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS ai_sessions (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )",
+    )
+    .execute(&pool)
+    .await
+    .map_err(|e| format!("Failed to create ai_sessions table: {}", e))?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS ai_messages (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(session_id) REFERENCES ai_sessions(id) ON DELETE CASCADE
+        )",
+    )
+    .execute(&pool)
+    .await
+    .map_err(|e| format!("Failed to create ai_messages table: {}", e))?;
+
     // Create index for date-based queries
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_tasks_date ON tasks(date)")
         .execute(&pool)
@@ -284,6 +332,14 @@ async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, String> {
         .await
         .ok();
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_questions_next_review ON questions(next_review)")
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_ai_sessions_updated_at ON ai_sessions(updated_at DESC)")
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_ai_messages_session_id ON ai_messages(session_id)")
         .execute(&pool)
         .await
         .ok();
@@ -984,6 +1040,182 @@ async fn delete_resource(
         .map_err(|e| format!("Failed to create question: {}", e))?;
         Ok(question)
     }
+
+#[tauri::command]
+async fn answer_question(
+    id: String,
+    is_correct: bool,
+    db: State<'_, Arc<Mutex<AppDb>>>,
+) -> Result<(), String> {
+    let db = db.lock().await;
+
+    let next_review_expr = if is_correct {
+        "datetime('now', '+2 day')"
+    } else {
+        "datetime('now', '+1 day')"
+    };
+
+    let sql = format!(
+        "UPDATE questions
+         SET review_count = review_count + 1,
+             correct_count = correct_count + ?,
+             next_review = {}
+         WHERE id = ?",
+        next_review_expr
+    );
+
+    sqlx::query(&sql)
+        .bind(if is_correct { 1 } else { 0 })
+        .bind(&id)
+        .execute(&db.db)
+        .await
+        .map_err(|e| format!("Failed to update question answer stats: {}", e))?;
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_ai_sessions(db: State<'_, Arc<Mutex<AppDb>>>) -> Result<Vec<AiSession>, String> {
+    let db = db.lock().await;
+    let rows = sqlx::query_as::<_, AiSession>(
+        "SELECT id, title, created_at, updated_at FROM ai_sessions ORDER BY updated_at DESC",
+    )
+    .fetch_all(&db.db)
+    .await
+    .map_err(|e| format!("Failed to fetch ai sessions: {}", e))?;
+    Ok(rows)
+}
+
+#[tauri::command]
+async fn create_ai_session(
+    title: Option<String>,
+    db: State<'_, Arc<Mutex<AppDb>>>,
+) -> Result<String, String> {
+    let db = db.lock().await;
+    let id = format!(
+        "ai-session-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| format!("SystemTime error: {}", e))?
+            .as_nanos()
+    );
+    let final_title = title
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "新对话".to_string());
+
+    sqlx::query(
+        "INSERT INTO ai_sessions (id, title, created_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+    )
+    .bind(&id)
+    .bind(final_title)
+    .execute(&db.db)
+    .await
+    .map_err(|e| format!("Failed to create ai session: {}", e))?;
+
+    Ok(id)
+}
+
+#[tauri::command]
+async fn update_ai_session_title(
+    session_id: String,
+    title: String,
+    db: State<'_, Arc<Mutex<AppDb>>>,
+) -> Result<(), String> {
+    let db = db.lock().await;
+    let final_title = title.trim();
+    if final_title.is_empty() {
+        return Err("Title cannot be empty".to_string());
+    }
+
+    sqlx::query("UPDATE ai_sessions SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+        .bind(final_title)
+        .bind(session_id)
+        .execute(&db.db)
+        .await
+        .map_err(|e| format!("Failed to update ai session title: {}", e))?;
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn delete_ai_session(session_id: String, db: State<'_, Arc<Mutex<AppDb>>>) -> Result<(), String> {
+    let db = db.lock().await;
+    sqlx::query("DELETE FROM ai_sessions WHERE id = ?")
+        .bind(session_id)
+        .execute(&db.db)
+        .await
+        .map_err(|e| format!("Failed to delete ai session: {}", e))?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_ai_messages(
+    session_id: String,
+    db: State<'_, Arc<Mutex<AppDb>>>,
+) -> Result<Vec<AiMessage>, String> {
+    let db = db.lock().await;
+    let rows = sqlx::query_as::<_, AiMessage>(
+        "SELECT id, session_id, role, content, created_at FROM ai_messages WHERE session_id = ? ORDER BY created_at ASC",
+    )
+    .bind(session_id)
+    .fetch_all(&db.db)
+    .await
+    .map_err(|e| format!("Failed to fetch ai messages: {}", e))?;
+    Ok(rows)
+}
+
+#[tauri::command]
+async fn add_ai_message(
+    session_id: String,
+    role: String,
+    content: String,
+    db: State<'_, Arc<Mutex<AppDb>>>,
+) -> Result<String, String> {
+    let db = db.lock().await;
+    let normalized_role = match role.trim().to_lowercase().as_str() {
+        "user" => "user",
+        "assistant" | "model" => "assistant",
+        _ => return Err("Invalid role. Expected user or assistant".to_string()),
+    };
+
+    let id = format!(
+        "ai-msg-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| format!("SystemTime error: {}", e))?
+            .as_nanos()
+    );
+
+    let mut tx = db
+        .db
+        .begin()
+        .await
+        .map_err(|e| format!("Failed to begin ai message tx: {}", e))?;
+
+    sqlx::query(
+        "INSERT INTO ai_messages (id, session_id, role, content, created_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
+    )
+    .bind(&id)
+    .bind(&session_id)
+    .bind(normalized_role)
+    .bind(&content)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| format!("Failed to add ai message: {}", e))?;
+
+    sqlx::query("UPDATE ai_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+        .bind(&session_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Failed to touch ai session updated_at: {}", e))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| format!("Failed to commit ai message tx: {}", e))?;
+
+    Ok(id)
+}
 
 /// Recursively copy an entire folder into Resources/ and return all copied file entries.
 #[tauri::command]
@@ -2294,6 +2526,13 @@ pub fn run() {
             delete_resource,
             get_questions,
             create_question,
+            answer_question,
+            get_ai_sessions,
+            create_ai_session,
+            update_ai_session_title,
+            delete_ai_session,
+            get_ai_messages,
+            add_ai_message,
             write_notes_file,
             create_notes_folder,
             delete_notes_item,

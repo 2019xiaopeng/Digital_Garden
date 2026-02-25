@@ -1,23 +1,209 @@
-import { CheckCircle2, XCircle, HelpCircle, RefreshCw, Sparkles, ArrowLeft } from "lucide-react";
-import React, { useState, useEffect } from "react";
+import { CheckCircle2, XCircle, HelpCircle, RefreshCw, Sparkles, ArrowLeft, Plus, X } from "lucide-react";
+import React, { useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { cn } from "../lib/utils";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
+import { isTauriAvailable } from "../lib/dataService";
+import "katex/dist/katex.min.css";
 
-const options = [
-  { id: "A", text: "O(1)" },
-  { id: "B", text: "O(log n)" },
-  { id: "C", text: "O(n)" },
-  { id: "D", text: "O(n log n)" },
-];
+type Subject = "408" | "数一" | "英一" | "政治";
+
+type Question = {
+  id: string;
+  subject: string;
+  type: string;
+  stem: string;
+  options: string | null;
+  answer: string;
+  explanation: string;
+  source_files: string;
+  difficulty: number;
+  created_at: string;
+  next_review: string | null;
+  review_count: number;
+  correct_count: number;
+  ease_factor: number;
+};
+
+type NewQuestionForm = {
+  subject: Subject;
+  type: "choice";
+  stem: string;
+  optionA: string;
+  optionB: string;
+  optionC: string;
+  optionD: string;
+  answer: "A" | "B" | "C" | "D";
+  explanation: string;
+};
+
+const emptyForm: NewQuestionForm = {
+  subject: "408",
+  type: "choice",
+  stem: "",
+  optionA: "",
+  optionB: "",
+  optionC: "",
+  optionD: "",
+  answer: "A",
+  explanation: "",
+};
 
 export function Quiz() {
+  const [activeSubject, setActiveSubject] = useState<Subject>("408");
+  const [questions, setQuestions] = useState<Question[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [currentIndex, setCurrentIndex] = useState(0);
   const [selected, setSelected] = useState<string | null>(null);
+  const [isSubmittingAnswer, setIsSubmittingAnswer] = useState(false);
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [createForm, setCreateForm] = useState<NewQuestionForm>(emptyForm);
+  const [isCreating, setIsCreating] = useState(false);
   const location = useLocation();
   const navigate = useNavigate();
   const isGenerated = new URLSearchParams(location.search).get("generated") === "true";
-  const subjects = ["408", "数一", "英一", "政治"];
-  
-  const correctAnswer = "B";
+  const subjects: Subject[] = ["408", "数一", "英一", "政治"];
+
+  const parseOptions = (optionsJson: string | null): Array<{ id: string; text: string }> => {
+    if (!optionsJson) {
+      return [
+        { id: "A", text: "" },
+        { id: "B", text: "" },
+        { id: "C", text: "" },
+        { id: "D", text: "" },
+      ];
+    }
+
+    try {
+      const parsed = JSON.parse(optionsJson) as string[];
+      const letters = ["A", "B", "C", "D"];
+      return letters.map((letter, index) => ({
+        id: letter,
+        text: parsed[index] || "",
+      }));
+    } catch {
+      return [
+        { id: "A", text: "" },
+        { id: "B", text: "" },
+        { id: "C", text: "" },
+        { id: "D", text: "" },
+      ];
+    }
+  };
+
+  const loadQuestions = async (subject: Subject) => {
+    if (!isTauriAvailable()) {
+      setQuestions([]);
+      setLoadError("当前环境不支持本地数据库命令，请在 Tauri 桌面端使用。");
+      return;
+    }
+
+    setIsLoading(true);
+    setLoadError(null);
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const rows = await invoke<Question[]>("get_questions");
+      const filtered = rows.filter((item) => item.subject === subject && item.type === "choice");
+      setQuestions(filtered);
+      setCurrentIndex(0);
+      setSelected(null);
+    } catch (err: any) {
+      setLoadError(err?.message || String(err));
+      setQuestions([]);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  React.useEffect(() => {
+    loadQuestions(activeSubject);
+  }, [activeSubject]);
+
+  const currentQuestion = questions[currentIndex] || null;
+  const options = useMemo(() => parseOptions(currentQuestion?.options || null), [currentQuestion?.options]);
+  const correctAnswer = (currentQuestion?.answer || "").toUpperCase();
+  const hasAnswered = selected !== null;
+  const isCurrentCorrect = selected !== null && selected === correctAnswer;
+
+  const submitCreateQuestion = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!createForm.stem.trim()) return;
+    if (!createForm.optionA.trim() || !createForm.optionB.trim() || !createForm.optionC.trim() || !createForm.optionD.trim()) return;
+
+    if (!isTauriAvailable()) {
+      setLoadError("当前环境不支持本地数据库命令，请在 Tauri 桌面端使用。\n");
+      return;
+    }
+
+    setIsCreating(true);
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const id = `q-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      await invoke("create_question", {
+        question: {
+          id,
+          subject: createForm.subject,
+          type: createForm.type,
+          stem: createForm.stem.trim(),
+          options: JSON.stringify([
+            createForm.optionA.trim(),
+            createForm.optionB.trim(),
+            createForm.optionC.trim(),
+            createForm.optionD.trim(),
+          ]),
+          answer: createForm.answer,
+          explanation: createForm.explanation.trim(),
+          source_files: "[]",
+          difficulty: 2,
+          created_at: new Date().toISOString(),
+          next_review: null,
+          review_count: 0,
+          correct_count: 0,
+          ease_factor: 2.5,
+        },
+      });
+
+      setShowCreateModal(false);
+      setCreateForm(emptyForm);
+      setActiveSubject(createForm.subject);
+      await loadQuestions(createForm.subject);
+    } catch (err: any) {
+      setLoadError(err?.message || String(err));
+    } finally {
+      setIsCreating(false);
+    }
+  };
+
+  const handleAnswer = async (optionId: string) => {
+    if (!currentQuestion || hasAnswered || isSubmittingAnswer) return;
+    setSelected(optionId);
+
+    if (!isTauriAvailable()) return;
+
+    setIsSubmittingAnswer(true);
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("answer_question", {
+        id: currentQuestion.id,
+        isCorrect: optionId === correctAnswer,
+      });
+    } catch (err: any) {
+      setLoadError(err?.message || String(err));
+    } finally {
+      setIsSubmittingAnswer(false);
+    }
+  };
+
+  const goNext = () => {
+    if (questions.length === 0) return;
+    const next = (currentIndex + 1) % questions.length;
+    setCurrentIndex(next);
+    setSelected(null);
+  };
 
   return (
     <div className="min-h-[calc(100vh-8rem)] flex flex-col items-center justify-center animate-in fade-in zoom-in-95 duration-700 ease-out py-10">
@@ -42,93 +228,212 @@ export function Quiz() {
           {isGenerated ? "AI 生成练功房" : "练功房"}
         </h1>
         <p className="text-lg text-gray-600 dark:text-gray-400 font-medium">
-          {isGenerated ? "基于所选资源生成的专属测试题" : "今日随机题 · 数据结构"}
+          {isGenerated ? "基于所选资源生成的专属测试题" : "录题 - 刷题 - 判题闭环"}
         </p>
-        <div className="flex flex-wrap items-center justify-center gap-2 mt-4">
+        <div className="flex flex-wrap items-center justify-center gap-2 mt-4 mb-4">
           {subjects.map(subject => (
-            <span
+            <button
               key={subject}
-              className="text-[11px] font-semibold px-3 py-1 rounded-full border border-gray-200 dark:border-gray-700 text-gray-500 dark:text-gray-300 bg-white/80 dark:bg-gray-900/70"
+              onClick={() => setActiveSubject(subject)}
+              className={cn(
+                "text-[11px] font-semibold px-3 py-1 rounded-full border transition-colors",
+                activeSubject === subject
+                  ? "border-[#88B5D3] bg-[#88B5D3]/15 text-[#88B5D3]"
+                  : "border-gray-200 dark:border-gray-700 text-gray-500 dark:text-gray-300 bg-white/80 dark:bg-gray-900/70"
+              )}
             >
               {subject}
-            </span>
+            </button>
           ))}
         </div>
+        <button
+          onClick={() => setShowCreateModal(true)}
+          className="inline-flex items-center gap-2 text-sm font-semibold text-white bg-[#88B5D3] hover:bg-[#75a0be] px-4 py-2 rounded-xl transition-colors"
+        >
+          <Plus className="w-4 h-4" /> 录入新题
+        </button>
       </div>
 
-      <div className="w-full max-w-2xl glass-card rounded-[2rem] p-8 md:p-12 relative overflow-hidden">
+      <div className="w-full max-w-4xl glass-card rounded-[2rem] p-8 md:p-12 relative overflow-hidden">
         <div className="absolute top-0 left-0 w-full h-2 bg-gradient-to-r from-indigo-500 to-emerald-500" />
-        
-        <div className="flex items-center justify-between mb-8">
-          <span className="text-[10px] font-bold text-indigo-600 dark:text-indigo-300 bg-indigo-50 dark:bg-indigo-500/10 px-3 py-1.5 rounded-full uppercase tracking-widest">Question 1 of 10</span>
-          <span className="text-xs font-bold text-gray-500 dark:text-gray-400 bg-gray-100 dark:bg-gray-800 px-3 py-1.5 rounded-full uppercase tracking-widest">Hard</span>
-        </div>
 
-        <h2 className="text-2xl md:text-3xl font-semibold text-gray-900 dark:text-white mb-10 leading-relaxed tracking-tight">
-          在一棵含有 n 个节点的 AVL 树中，查找一个元素的最坏时间复杂度是多少？
-        </h2>
-
-        <div className="space-y-4">
-          {options.map((option) => {
-            const isSelected = selected === option.id;
-            const isCorrect = option.id === correctAnswer;
-            const showResult = selected !== null;
-            
-            let stateClass = "bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800 hover:border-indigo-300 dark:hover:border-indigo-400 hover:bg-indigo-50/50 dark:hover:bg-indigo-500/10 text-gray-700 dark:text-gray-200";
-            
-            if (showResult) {
-              if (isCorrect) {
-                stateClass = "bg-emerald-50 dark:bg-emerald-500/10 border-emerald-500 text-emerald-900 dark:text-emerald-200";
-              } else if (isSelected) {
-                stateClass = "bg-red-50 dark:bg-red-500/10 border-red-500 text-red-900 dark:text-red-200";
-              } else {
-                stateClass = "bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800 text-gray-400 dark:text-gray-600 opacity-50";
-              }
-            }
-
-            return (
-              <button
-                key={option.id}
-                onClick={() => !showResult && setSelected(option.id)}
-                disabled={showResult}
-                className={cn(
-                  "w-full flex items-center p-5 rounded-2xl border-2 transition-all duration-300 text-left font-medium text-lg",
-                  stateClass,
-                  !showResult && "active:scale-[0.98]"
-                )}
-              >
-                <div className={cn(
-                  "w-10 h-10 rounded-xl flex items-center justify-center mr-5 font-bold text-lg transition-colors",
-                  showResult && isCorrect ? "bg-emerald-500 text-white" : 
-                  showResult && isSelected ? "bg-red-500 text-white" : 
-                  "bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-300"
-                )}>
-                  {option.id}
-                </div>
-                <span className="flex-1">{option.text}</span>
-                
-                {showResult && isCorrect && <CheckCircle2 className="w-6 h-6 text-emerald-500 ml-4" />}
-                {showResult && isSelected && !isCorrect && <XCircle className="w-6 h-6 text-red-500 ml-4" />}
-              </button>
-            );
-          })}
-        </div>
-
-        {selected && (
-          <div className="mt-10 pt-8 border-t border-gray-200/60 dark:border-gray-800 flex items-center justify-between animate-in slide-in-from-bottom-4 fade-in duration-500">
-            <p className="text-sm font-medium text-gray-600 dark:text-gray-300">
-              {selected === correctAnswer ? "🎉 回答正确！AVL 树是严格平衡的二叉搜索树。" : "💡 回答错误。AVL 树的高度始终保持在 O(log n)。"}
-            </p>
-            <button 
-              onClick={() => setSelected(null)}
-              className="flex items-center gap-2 bg-gray-900 dark:bg-white hover:bg-gray-800 dark:hover:bg-gray-200 text-white dark:text-gray-900 px-6 py-3 rounded-xl font-semibold text-sm transition-all shadow-sm hover:shadow-md active:scale-95"
-            >
-              <RefreshCw className="w-4 h-4" />
-              下一题
-            </button>
+        {loadError && (
+          <div className="mb-6 text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/20 rounded-xl px-4 py-3">
+            {loadError}
           </div>
         )}
+
+        {isLoading ? (
+          <div className="py-20 text-center text-gray-500 dark:text-gray-400">题库加载中...</div>
+        ) : !currentQuestion ? (
+          <div className="py-20 text-center text-gray-500 dark:text-gray-400">
+            当前科目暂无题目，请先点击「录入新题」添加。
+          </div>
+        ) : (
+          <>
+            <div className="flex items-center justify-between mb-8">
+              <span className="text-[10px] font-bold text-indigo-600 dark:text-indigo-300 bg-indigo-50 dark:bg-indigo-500/10 px-3 py-1.5 rounded-full uppercase tracking-widest">
+                Question {currentIndex + 1} of {questions.length}
+              </span>
+              <span className="text-xs font-bold text-gray-500 dark:text-gray-400 bg-gray-100 dark:bg-gray-800 px-3 py-1.5 rounded-full uppercase tracking-widest">
+                {currentQuestion.subject} · 单选题
+              </span>
+            </div>
+
+            <div className="text-gray-900 dark:text-white mb-8">
+              <div className="prose prose-base dark:prose-invert max-w-none">
+                <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
+                  {currentQuestion.stem}
+                </ReactMarkdown>
+              </div>
+            </div>
+
+            <div className="space-y-4">
+              {options.map((option) => {
+                const isSelected = selected === option.id;
+                const isCorrect = option.id === correctAnswer;
+
+                let stateClass = "bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800 hover:border-indigo-300 dark:hover:border-indigo-400 hover:bg-indigo-50/50 dark:hover:bg-indigo-500/10 text-gray-700 dark:text-gray-200";
+                if (hasAnswered) {
+                  if (isCorrect) {
+                    stateClass = "bg-emerald-50 dark:bg-emerald-500/10 border-emerald-500 text-emerald-900 dark:text-emerald-200";
+                  } else if (isSelected) {
+                    stateClass = "bg-red-50 dark:bg-red-500/10 border-red-500 text-red-900 dark:text-red-200";
+                  } else {
+                    stateClass = "bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800 text-gray-400 dark:text-gray-600 opacity-60";
+                  }
+                }
+
+                return (
+                  <button
+                    key={option.id}
+                    onClick={() => handleAnswer(option.id)}
+                    disabled={hasAnswered || isSubmittingAnswer}
+                    className={cn(
+                      "w-full flex items-center p-5 rounded-2xl border-2 transition-all duration-300 text-left font-medium text-lg",
+                      stateClass,
+                      !hasAnswered && "active:scale-[0.98]"
+                    )}
+                  >
+                    <div className={cn(
+                      "w-10 h-10 rounded-xl flex items-center justify-center mr-5 font-bold text-lg transition-colors",
+                      hasAnswered && isCorrect ? "bg-emerald-500 text-white" :
+                      hasAnswered && isSelected ? "bg-red-500 text-white" :
+                      "bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-300"
+                    )}>
+                      {option.id}
+                    </div>
+                    <span className="flex-1 whitespace-pre-wrap">{option.text}</span>
+
+                    {hasAnswered && isCorrect && <CheckCircle2 className="w-6 h-6 text-emerald-500 ml-4" />}
+                    {hasAnswered && isSelected && !isCorrect && <XCircle className="w-6 h-6 text-red-500 ml-4" />}
+                  </button>
+                );
+              })}
+            </div>
+
+            {hasAnswered && (
+              <div className="mt-8 border-t border-gray-200/60 dark:border-gray-800 pt-6 animate-in slide-in-from-bottom-3 fade-in duration-400">
+                <p className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-4">
+                  {isCurrentCorrect ? "🎉 回答正确，已记录本次刷题结果。" : `💡 回答错误，正确答案是 ${correctAnswer}。已记录本次刷题结果。`}
+                </p>
+                <div className="bg-gray-50/70 dark:bg-[#0f1826]/55 border border-gray-200 dark:border-gray-800 rounded-2xl p-4">
+                  <div className="text-xs font-semibold text-gray-500 dark:text-gray-400 mb-2">解析</div>
+                  <div className="prose prose-sm dark:prose-invert max-w-none">
+                    <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
+                      {currentQuestion.explanation || "暂无解析"}
+                    </ReactMarkdown>
+                  </div>
+                </div>
+                <div className="mt-5 flex justify-end">
+                  <button
+                    onClick={goNext}
+                    className="flex items-center gap-2 bg-gray-900 dark:bg-white hover:bg-gray-800 dark:hover:bg-gray-200 text-white dark:text-gray-900 px-6 py-3 rounded-xl font-semibold text-sm transition-all shadow-sm hover:shadow-md active:scale-95"
+                  >
+                    <RefreshCw className="w-4 h-4" />
+                    下一题
+                  </button>
+                </div>
+              </div>
+            )}
+          </>
+        )}
       </div>
+
+      {showCreateModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6">
+          <div className="absolute inset-0 bg-black/45 backdrop-blur-sm" onClick={() => setShowCreateModal(false)} />
+          <div className="relative w-full max-w-2xl bg-white dark:bg-[#0b1320] rounded-3xl border border-gray-200 dark:border-gray-800 shadow-2xl max-h-[90vh] overflow-y-auto">
+            <div className="sticky top-0 z-10 bg-white/95 dark:bg-[#0b1320]/95 backdrop-blur border-b border-gray-100 dark:border-gray-800 px-6 py-4 flex items-center justify-between">
+              <h3 className="text-lg font-semibold text-gray-900 dark:text-white">录入新题</h3>
+              <button onClick={() => setShowCreateModal(false)} className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <form onSubmit={submitCreateQuestion} className="p-6 space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <select
+                  value={createForm.subject}
+                  onChange={(e) => setCreateForm((prev) => ({ ...prev, subject: e.target.value as Subject }))}
+                  className="px-3 py-2 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900"
+                >
+                  {subjects.map((subject) => (
+                    <option key={subject} value={subject}>{subject}</option>
+                  ))}
+                </select>
+                <select
+                  value={createForm.type}
+                  onChange={(e) => setCreateForm((prev) => ({ ...prev, type: e.target.value as "choice" }))}
+                  className="px-3 py-2 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900"
+                >
+                  <option value="choice">单选题</option>
+                </select>
+                <select
+                  value={createForm.answer}
+                  onChange={(e) => setCreateForm((prev) => ({ ...prev, answer: e.target.value as "A" | "B" | "C" | "D" }))}
+                  className="px-3 py-2 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900"
+                >
+                  <option value="A">正确答案：A</option>
+                  <option value="B">正确答案：B</option>
+                  <option value="C">正确答案：C</option>
+                  <option value="D">正确答案：D</option>
+                </select>
+              </div>
+
+              <textarea
+                value={createForm.stem}
+                onChange={(e) => setCreateForm((prev) => ({ ...prev, stem: e.target.value }))}
+                placeholder="题干（支持 Markdown / LaTeX）"
+                className="w-full min-h-28 px-3 py-2 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900"
+                required
+              />
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <input value={createForm.optionA} onChange={(e) => setCreateForm((prev) => ({ ...prev, optionA: e.target.value }))} placeholder="选项 A" className="px-3 py-2 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900" required />
+                <input value={createForm.optionB} onChange={(e) => setCreateForm((prev) => ({ ...prev, optionB: e.target.value }))} placeholder="选项 B" className="px-3 py-2 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900" required />
+                <input value={createForm.optionC} onChange={(e) => setCreateForm((prev) => ({ ...prev, optionC: e.target.value }))} placeholder="选项 C" className="px-3 py-2 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900" required />
+                <input value={createForm.optionD} onChange={(e) => setCreateForm((prev) => ({ ...prev, optionD: e.target.value }))} placeholder="选项 D" className="px-3 py-2 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900" required />
+              </div>
+
+              <textarea
+                value={createForm.explanation}
+                onChange={(e) => setCreateForm((prev) => ({ ...prev, explanation: e.target.value }))}
+                placeholder="解析（支持 Markdown / LaTeX）"
+                className="w-full min-h-24 px-3 py-2 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900"
+              />
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button type="button" onClick={() => setShowCreateModal(false)} className="px-4 py-2 rounded-xl border border-gray-200 dark:border-gray-700">
+                  取消
+                </button>
+                <button type="submit" disabled={isCreating} className="px-4 py-2 rounded-xl bg-[#88B5D3] hover:bg-[#75a0be] text-white disabled:opacity-60">
+                  {isCreating ? "提交中..." : "保存题目"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
