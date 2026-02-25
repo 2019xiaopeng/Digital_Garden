@@ -7,6 +7,7 @@ import { cn } from "../lib/utils";
 import { ThemedPromptDialog } from "../components/ThemedPromptDialog";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { isTauriAvailable, AiService } from "../lib/dataService";
+import { open } from "@tauri-apps/plugin-dialog";
 import { getSettings } from "../lib/settings";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -41,8 +42,6 @@ export function Notes() {
   const [activeNodeId, setActiveNodeId] = useState<string | null>(null);
   const [selectionAnchorId, setSelectionAnchorId] = useState<string | null>(null);
   const [viewingFile, setViewingFile] = useState<TreeNode | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const directoryInputRef = useRef<HTMLInputElement>(null);
   
   // Resizable pane state
   const [leftWidth, setLeftWidth] = useState(300);
@@ -55,7 +54,7 @@ export function Notes() {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [isAiLoading, setIsAiLoading] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
-  const [promptMode, setPromptMode] = useState<null | "create-folder" | "rename">(null);
+  const [promptMode, setPromptMode] = useState<null | "create-folder" | "rename" | "move">(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
   // Drag-and-drop state
@@ -65,12 +64,16 @@ export function Notes() {
   // File preview state
   const [fileContent, setFileContent] = useState<string | null>(null);
   const [isLoadingContent, setIsLoadingContent] = useState(false);
+  const [uploadToast, setUploadToast] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const { selected_knowledge_files, setSelectedKnowledgeFiles } = useKnowledgeSelection();
 
   const activeSession = chatSessions.find(session => session.id === activeSessionId) || null;
   const chatHistory = activeSession?.messages || [];
 
-  const directoryInputProps = { webkitdirectory: "true" } as React.HTMLAttributes<HTMLInputElement>;
+  const showUploadToast = (type: "success" | "error", message: string) => {
+    setUploadToast({ type, message });
+    window.setTimeout(() => setUploadToast(null), 1800);
+  };
 
   // Persist tree data to localStorage
   useEffect(() => {
@@ -230,174 +233,217 @@ export function Notes() {
     return path.join("/");
   };
 
-  const handleFileUpload = async (e?: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async () => {
     const targetFolderId = selectedNode?.type === "folder" ? selectedNode.id : null;
 
-    if (isTauriAvailable() && !e) {
-      try {
-        const { open } = await import("@tauri-apps/plugin-dialog");
-        const { invoke } = await import("@tauri-apps/api/core");
-        const picked = await open({ multiple: true, filters: [{ name: "All", extensions: ["*"] }] });
-        const list = Array.isArray(picked) ? picked : picked ? [picked] : [];
-        if (list.length === 0) return;
-        const relativeDir = getRelativeDir(treeData, targetFolderId);
-
-        // Copy files first, then update tree with destination path
-        for (const srcPath of list) {
-          try {
-            const destPath = await invoke("copy_file_to_notes", { sourcePath: String(srcPath), relativeDir });
-            setTreeData(prev => {
-              const name = String(srcPath).split(/[\\/]/).pop() || "";
-              const newFile: TreeNode = {
-                id: `uploaded-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-                name,
-                type: "file",
-                path: String(destPath),
-              };
-              return addNodeToFolder(prev, targetFolderId, newFile);
-            });
-          } catch (err) {
-            console.error(`[Notes] Failed to copy file ${String(srcPath)}:`, err);
-          }
-        }
-        return;
-      } catch (err) {
-        console.error("[Notes] Tauri file pick failed:", err);
-      }
-    }
-
-    // Web fallback: read file content via FileReader
-    if (!e) return;
     try {
-      const files = e.target.files;
-      if (!files || files.length === 0) return;
+      const { invoke } = await import("@tauri-apps/api/core");
+      const picked = await open({
+        multiple: true,
+        filters: [{ name: "Documents", extensions: ["md", "pdf", "txt", "json", "csv"] }],
+      });
+      const list = Array.isArray(picked) ? picked : picked ? [picked] : [];
+      if (list.length === 0) return;
+
+      const relativeDir = getRelativeDir(treeData, targetFolderId);
+
+      type CopiedFileResult = { source_path: string; file_name: string; dest_path: string };
+      const copied = await invoke<CopiedFileResult[]>("copy_files_to_notes", {
+        sourcePaths: list.map((p) => String(p)),
+        relativeDir,
+      });
 
       setTreeData(prev => {
         let updated = prev;
-        Array.from(files).forEach((file: File) => {
+        copied.forEach((item) => {
           const newFile: TreeNode = {
-            id: `uploaded-${Date.now()}-${file.name}-${Math.random().toString(36).slice(2, 8)}`,
-            name: file.name,
+            id: `uploaded-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            name: item.file_name,
             type: "file",
+            path: item.dest_path,
           };
           updated = addNodeToFolder(updated, targetFolderId, newFile);
         });
         return updated;
       });
 
-      // Store file content in localStorage for web mode
-      for (const file of Array.from(files)) {
-        const reader = new FileReader();
-        reader.onload = () => {
-          localStorage.setItem(`eva:file:${file.name}`, reader.result as string);
-        };
-        if (file.name.endsWith(".md") || file.name.endsWith(".txt")) {
-          reader.readAsText(file);
-        }
-      }
-    } catch (err) {
-      console.error("[Notes] Web file upload failed:", err);
-    } finally {
-      e.target.value = "";
-      if (fileInputRef.current) {
-        fileInputRef.current.value = "";
-      }
+      showUploadToast("success", `上传成功：${copied.length} 个文件`);
+      return;
+    } catch (err: any) {
+      console.error("[Notes] copy_files_to_notes failed:", err);
+      showUploadToast("error", `上传失败：${err?.message || String(err)}`);
     }
   };
 
-  const handleFolderUpload = async (e?: React.ChangeEvent<HTMLInputElement>) => {
-    if (isTauriAvailable() && !e) {
-      try {
-        const { open } = await import("@tauri-apps/plugin-dialog");
-        const picked = await open({ directory: true, multiple: false });
-        if (picked && typeof picked === "string") {
-          const folderName = picked.split(/[\\/]/).pop() || "新目录";
-          const newFolder: TreeNode = {
-            id: `folder-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-            name: folderName,
-            type: "folder",
-            children: [],
-          };
-          const targetFolderId = selectedNode?.type === "folder" ? selectedNode.id : null;
-          setTreeData(prev => addNodeToFolder(prev, targetFolderId, newFolder));
-        }
-        return;
-      } catch (err) {
-        console.error("[Notes] Tauri folder pick failed:", err);
-      }
-    }
-    if (!e) return;
+  const handleFolderUpload = async () => {
     try {
-      const files = e.target.files;
-      if (!files || files.length === 0) return;
-      setTreeData(prev => {
-        let updated = prev;
-        Array.from(files).forEach((file: File) => {
-          const relativePath = (file as any).webkitRelativePath || file.name;
-          const parts = relativePath.split("/").filter(Boolean);
-          updated = addFilePathToTree(updated, parts);
-        });
-        return updated;
-      });
-    } catch (err) {
-      console.error("[Notes] Web folder upload failed:", err);
-    } finally {
-      e.target.value = "";
-      if (directoryInputRef.current) {
-        directoryInputRef.current.value = "";
+      const picked = await open({ directory: true, multiple: false });
+      if (picked && typeof picked === "string") {
+        const folderName = picked.split(/[\\/]/).pop() || "新目录";
+        const newFolder: TreeNode = {
+          id: `folder-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          name: folderName,
+          type: "folder",
+          children: [],
+        };
+        const targetFolderId = selectedNode?.type === "folder" ? selectedNode.id : null;
+        setTreeData(prev => addNodeToFolder(prev, targetFolderId, newFolder));
+        showUploadToast("success", "已导入文件夹节点");
       }
+    } catch (err: any) {
+      console.error("[Notes] Tauri folder pick failed:", err);
+      showUploadToast("error", `选择文件夹失败：${err?.message || String(err)}`);
     }
   };
 
-  const handleRenameNode = (nextName?: string) => {
-    if (!selectedNode) return;
+  const handleRenameNode = async (nextName?: string) => {
+    if (!selectedNode || selectedNodeIds.length !== 1) return;
     if (!nextName) {
       setPromptMode("rename");
       return;
     }
-    setTreeData(prev => updateNodeName(prev, selectedNode.id, nextName));
-    if (viewingFile?.id === selectedNode.id) {
-      setViewingFile({ ...viewingFile, name: nextName });
+
+    const trimmedName = nextName.trim();
+    if (!trimmedName || trimmedName === selectedNode.name) return;
+
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const fromPath = getRelativePath(treeData, selectedNode.id);
+      if (fromPath) {
+        const parent = fromPath.includes("/") ? fromPath.slice(0, fromPath.lastIndexOf("/")) : "";
+        const toPath = parent ? `${parent}/${trimmedName}` : trimmedName;
+        await invoke("move_notes_item", { fromRelative: fromPath, toRelative: toPath });
+      }
+
+      setTreeData(prev => updateNodeName(prev, selectedNode.id, trimmedName));
+      if (viewingFile?.id === selectedNode.id) {
+        setViewingFile({ ...viewingFile, name: trimmedName });
+      }
+      showUploadToast("success", "重命名完成");
+    } catch (err: any) {
+      console.error("[Notes] Failed to rename on disk:", err);
+      showUploadToast("error", `重命名失败：${err?.message || String(err)}`);
     }
   };
 
   const handleDeleteNode = () => {
-    if (!selectedNode) return;
+    if (selectedNodeIds.length === 0) return;
     setShowDeleteConfirm(true);
   };
   const confirmDeleteNode = async () => {
-    if (!selectedNode) return;
-    // Delete from disk
-    if (isTauriAvailable()) {
-      try {
-        const { invoke } = await import("@tauri-apps/api/core");
-        // Build relative path from tree ancestors
-        const buildPath = (nodes: TreeNode[], targetId: string, trail: string[]): string[] | null => {
-          for (const n of nodes) {
-            if (n.id === targetId) return [...trail, n.name];
-            if (n.children) {
-              const found = buildPath(n.children, targetId, [...trail, n.name]);
-              if (found) return found;
-            }
-          }
-          return null;
-        };
-        const pathParts = buildPath(treeData, selectedNode.id, []);
-        if (pathParts) {
-          await invoke("delete_notes_item", { relativePath: pathParts.join("/") });
+    if (selectedNodeIds.length === 0) return;
+
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+
+      if (selectedNodeIds.length > 1) {
+        const selectedNodes = selectedNodeIds
+          .map(id => findNode(treeData, id))
+          .filter((node): node is TreeNode => !!node);
+
+        const nonFiles = selectedNodes.filter(n => n.type !== "file");
+        if (nonFiles.length > 0) {
+          showUploadToast("error", "批量删除当前仅支持文件，请取消文件夹后重试");
+          return;
         }
-      } catch (err) {
-        console.error("[Notes] Failed to delete from disk:", err);
+
+        const absolutePaths = selectedNodes
+          .map(n => n.path)
+          .filter((p): p is string => !!p);
+
+        if (absolutePaths.length !== selectedNodes.length) {
+          showUploadToast("error", "部分文件缺失绝对路径，无法执行批量删除");
+          return;
+        }
+
+        await invoke<number>("batch_delete_notes_files", { absolutePaths });
+        setTreeData(prev => selectedNodeIds.reduce((acc, id) => removeNode(acc, id), prev));
+        if (viewingFile && selectedNodeIds.includes(viewingFile.id)) {
+          setViewingFile(null);
+        }
+        showUploadToast("success", `已删除 ${selectedNodeIds.length} 个文件`);
+      } else {
+        const onlyId = selectedNodeIds[0];
+        const rel = getRelativePath(treeData, onlyId);
+        if (rel) {
+          await invoke("delete_notes_item", { relativePath: rel });
+        }
+        setTreeData(prev => removeNode(prev, onlyId));
+        if (viewingFile?.id === onlyId) {
+          setViewingFile(null);
+        }
+        showUploadToast("success", "删除成功");
       }
+    } catch (err: any) {
+      console.error("[Notes] Failed to delete from disk:", err);
+      showUploadToast("error", `删除失败：${err?.message || String(err)}`);
+      return;
     }
-    setTreeData(prev => removeNode(prev, selectedNode.id));
-    if (viewingFile?.id === selectedNode.id) {
-      setViewingFile(null);
-    }
+
     setActiveNodeId(null);
     setSelectedNodeIds([]);
     setSelectionAnchorId(null);
     setShowDeleteConfirm(false);
+  };
+
+  const handleMoveSelected = (targetRelativeDir?: string) => {
+    if (!targetRelativeDir) {
+      setPromptMode("move");
+      return;
+    }
+
+    const run = async () => {
+      try {
+        const normalizedTarget = targetRelativeDir.trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+        const targetFolder = normalizedTarget ? findFolderByRelativePath(treeData, normalizedTarget) : null;
+        if (normalizedTarget && !targetFolder) {
+          showUploadToast("error", "目标目录不存在，请先在知识库中创建该文件夹");
+          return;
+        }
+
+        const selectedNodes = selectedNodeIds
+          .map(id => findNode(treeData, id))
+          .filter((node): node is TreeNode => !!node);
+
+        const nonFiles = selectedNodes.filter(n => n.type !== "file");
+        if (nonFiles.length > 0) {
+          showUploadToast("error", "批量归档当前仅支持文件");
+          return;
+        }
+
+        const fromRelatives = selectedNodes
+          .map(node => getRelativePath(treeData, node.id))
+          .filter((v): v is string => !!v);
+
+        if (fromRelatives.length === 0) return;
+
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke<number>("batch_move_notes_items", {
+          fromRelatives,
+          targetRelativeDir: normalizedTarget,
+        });
+
+        const targetFolderId = targetFolder?.id || null;
+
+        setTreeData(prev => {
+          let updated = prev;
+          for (const id of selectedNodeIds) {
+            updated = moveNodeToFolder(updated, id, targetFolderId);
+          }
+          return updated;
+        });
+
+        if (targetFolderId) {
+          setExpandedFolders(prev => new Set(prev).add(targetFolderId));
+        }
+        showUploadToast("success", `已归档 ${fromRelatives.length} 个文件`);
+      } catch (err: any) {
+        console.error("[Notes] Failed to batch move files:", err);
+        showUploadToast("error", `归档失败：${err?.message || String(err)}`);
+      }
+    };
+
+    run();
   };
 
   // --- Drag-and-drop handlers ---
@@ -439,6 +485,14 @@ export function Notes() {
     e.preventDefault();
     e.stopPropagation();
     setDropTargetId(null);
+
+    const externalPaths = extractDroppedFilePaths(e);
+    if (externalPaths.length > 0) {
+      await copyDroppedFilesToFolder(externalPaths, targetFolderId);
+      setDraggedNodeId(null);
+      return;
+    }
+
     if (!draggedNodeId || draggedNodeId === targetFolderId) return;
 
     // Prevent dropping a folder into itself or its descendants
@@ -486,6 +540,14 @@ export function Notes() {
     e.preventDefault();
     e.stopPropagation();
     setDropTargetId(null);
+
+    const externalPaths = extractDroppedFilePaths(e);
+    if (externalPaths.length > 0) {
+      await copyDroppedFilesToFolder(externalPaths, null);
+      setDraggedNodeId(null);
+      return;
+    }
+
     if (!draggedNodeId) return;
 
     // Move to root on disk
@@ -527,6 +589,74 @@ export function Notes() {
     };
     const parts = walk(nodes, []);
     return parts ? parts.join("/") : null;
+  };
+
+  const findFolderByRelativePath = (nodes: TreeNode[], relative: string): TreeNode | null => {
+    const normalized = relative.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+    if (!normalized) return null;
+
+    const parts = normalized.split("/").filter(Boolean);
+    let currentNodes = nodes;
+    let found: TreeNode | null = null;
+
+    for (const part of parts) {
+      const next = currentNodes.find(n => n.type === "folder" && n.name === part) || null;
+      if (!next) return null;
+      found = next;
+      currentNodes = next.children || [];
+    }
+
+    return found;
+  };
+
+  const extractDroppedFilePaths = (e: React.DragEvent): string[] => {
+    const result: string[] = [];
+
+    for (const file of Array.from(e.dataTransfer.files || [])) {
+      const p = (file as any)?.path as string | undefined;
+      if (p) result.push(p);
+    }
+
+    if (result.length === 0) {
+      for (const item of Array.from(e.dataTransfer.items || [])) {
+        const file = item.getAsFile();
+        const p = (file as any)?.path as string | undefined;
+        if (p) result.push(p);
+      }
+    }
+
+    return Array.from(new Set(result));
+  };
+
+  const copyDroppedFilesToFolder = async (sourcePaths: string[], targetFolderId: string | null) => {
+    if (sourcePaths.length === 0) return;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const relativeDir = getRelativeDir(treeData, targetFolderId);
+      type CopiedFileResult = { source_path: string; file_name: string; dest_path: string };
+      const copied = await invoke<CopiedFileResult[]>("copy_files_to_notes", {
+        sourcePaths,
+        relativeDir,
+      });
+
+      setTreeData(prev => {
+        let updated = prev;
+        copied.forEach((item) => {
+          const newFile: TreeNode = {
+            id: `uploaded-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            name: item.file_name,
+            type: "file",
+            path: item.dest_path,
+          };
+          updated = addNodeToFolder(updated, targetFolderId, newFile);
+        });
+        return updated;
+      });
+      showUploadToast("success", `拖拽导入成功：${copied.length} 个文件`);
+    } catch (err: any) {
+      console.error("[Notes] External drop copy failed:", err);
+      showUploadToast("error", `拖拽导入失败：${err?.message || String(err)}`);
+    }
   };
 
   const handleMouseDown = (e: React.MouseEvent) => {
@@ -851,33 +981,18 @@ export function Notes() {
             <div className="flex items-center ml-2 gap-1">
               <button 
                 className="p-1.5 text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-800 rounded-lg transition-colors"
-                onClick={() => isTauriAvailable() ? handleFileUpload() : fileInputRef.current?.click()}
+                onClick={handleFileUpload}
                 title="上传本地文件"
               >
                 <Upload className="w-4 h-4" />
               </button>
-              <input 
-                type="file" 
-                ref={fileInputRef} 
-                className="hidden" 
-                multiple 
-                onChange={handleFileUpload} 
-              />
               <button 
                 className="p-1.5 text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-800 rounded-lg transition-colors"
-                onClick={() => isTauriAvailable() ? handleFolderUpload() : directoryInputRef.current?.click()}
+                onClick={handleFolderUpload}
                 title="上传文件夹"
               >
                 <Folder className="w-4 h-4" />
               </button>
-              <input 
-                type="file" 
-                ref={directoryInputRef} 
-                className="hidden" 
-                multiple 
-                onChange={handleFolderUpload}
-                {...directoryInputProps}
-              />
               <button 
                 onClick={() => handleCreateFolder()}
                 className="p-1.5 text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-800 rounded-lg transition-colors" 
@@ -897,11 +1012,22 @@ export function Notes() {
                 <Edit2 className="w-4 h-4" />
               </button>
               <button 
-                onClick={handleDeleteNode}
-                disabled={!selectedNode || selectedNodeIds.length !== 1}
+                onClick={() => handleMoveSelected()}
+                disabled={selectedNodeIds.length === 0}
                 className={cn(
                   "p-1.5 rounded-lg transition-colors",
-                  selectedNode && selectedNodeIds.length === 1 ? "text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-800" : "text-gray-300 dark:text-gray-700 cursor-not-allowed"
+                  selectedNodeIds.length > 0 ? "text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-800" : "text-gray-300 dark:text-gray-700 cursor-not-allowed"
+                )}
+                title="批量归档"
+              >
+                <Folder className="w-4 h-4" />
+              </button>
+              <button 
+                onClick={handleDeleteNode}
+                disabled={selectedNodeIds.length === 0}
+                className={cn(
+                  "p-1.5 rounded-lg transition-colors",
+                  selectedNodeIds.length > 0 ? "text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-800" : "text-gray-300 dark:text-gray-700 cursor-not-allowed"
                 )}
                 title="删除"
               >
@@ -1042,8 +1168,8 @@ export function Notes() {
       {/* Prompt Dialogs - rendered unconditionally */}
       <ConfirmDialog
         open={showDeleteConfirm}
-        title={`确定删除「${selectedNode?.name || ""}」？`}
-        description={selectedNode?.type === "folder" ? "该文件夹及其所有子文件将一并删除。" : "删除后将无法恢复。"}
+        title={selectedNodeIds.length > 1 ? `确定批量删除这 ${selectedNodeIds.length} 个项目？` : `确定删除「${selectedNode?.name || ""}」？`}
+        description={selectedNodeIds.length > 1 ? "仅会删除已选择文件，删除后无法恢复。" : (selectedNode?.type === "folder" ? "该文件夹及其所有子文件将一并删除。" : "删除后将无法恢复。")}
         confirmText="删除"
         variant="danger"
         onConfirm={confirmDeleteNode}
@@ -1069,6 +1195,17 @@ export function Notes() {
         onCancel={() => setPromptMode(null)}
         onConfirm={(value) => {
           handleRenameNode(value);
+          setPromptMode(null);
+        }}
+      />
+      <ThemedPromptDialog
+        open={promptMode === "move"}
+        title="请输入目标文件夹路径"
+        placeholder="例如：数学/错题集"
+        confirmText="归档"
+        onCancel={() => setPromptMode(null)}
+        onConfirm={(value) => {
+          handleMoveSelected(value);
           setPromptMode(null);
         }}
       />
@@ -1179,6 +1316,20 @@ export function Notes() {
                 );
               })()}
             </div>
+          </div>
+        </div>
+      )}
+      {uploadToast && (
+        <div className="absolute bottom-4 right-4 z-50">
+          <div
+            className={cn(
+              "px-3 py-2 rounded-lg text-xs shadow-lg border",
+              uploadToast.type === "success"
+                ? "bg-emerald-500/95 text-white border-emerald-400"
+                : "bg-red-500/95 text-white border-red-400"
+            )}
+          >
+            {uploadToast.message}
           </div>
         </div>
       )}

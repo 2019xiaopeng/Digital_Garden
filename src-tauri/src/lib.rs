@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::path::{Component, Path, PathBuf};
 use tauri::{Manager, State};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -68,6 +69,36 @@ pub struct AiProxyResponse {
     pub content: String,
     pub model: String,
     pub usage: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct BilibiliMetadata {
+    pub bvid: String,
+    pub title: String,
+    pub pic: String,
+    pub owner_name: String,
+    pub duration: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct BilibiliApiOwner {
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct BilibiliApiData {
+    bvid: String,
+    title: String,
+    pic: String,
+    duration: i64,
+    owner: BilibiliApiOwner,
+}
+
+#[derive(Debug, Deserialize)]
+struct BilibiliApiResponse {
+    code: i32,
+    message: String,
+    data: Option<BilibiliApiData>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -699,6 +730,79 @@ async fn ai_proxy(request: AiProxyRequest) -> Result<AiProxyResponse, String> {
     })
 }
 
+#[tauri::command]
+async fn fetch_bilibili_metadata(bvid: String) -> Result<BilibiliMetadata, String> {
+    let clean_bvid = bvid.trim().to_uppercase();
+    if !clean_bvid.starts_with("BV") {
+        return Err("Invalid bvid: must start with BV".to_string());
+    }
+
+    let url = format!(
+        "https://api.bilibili.com/x/web-interface/view?bvid={}",
+        clean_bvid
+    );
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(&url)
+        .header(
+            reqwest::header::USER_AGENT,
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        )
+        .header(reqwest::header::REFERER, "https://www.bilibili.com")
+        .send()
+        .await
+        .map_err(|e| format!("Failed to request bilibili api: {}", e))?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read bilibili response body: {}", e))?;
+
+    if !status.is_success() {
+        log::error!("[Bilibili] HTTP {} bvid={} body={}", status, clean_bvid, body);
+        println!("[Bilibili] HTTP {} bvid={} body={}", status, clean_bvid, body);
+        return Err(format!("Bilibili HTTP {} body: {}", status, body));
+    }
+
+    let payload = serde_json::from_str::<BilibiliApiResponse>(&body)
+        .map_err(|e| format!("Failed to parse bilibili response: {} | raw body: {}", e, body))?;
+
+    if payload.code != 0 {
+        log::error!(
+            "[Bilibili] API code error code={} msg={} bvid={} raw={}",
+            payload.code,
+            payload.message,
+            clean_bvid,
+            body
+        );
+        println!(
+            "[Bilibili] API code error code={} msg={} bvid={} raw={}",
+            payload.code,
+            payload.message,
+            clean_bvid,
+            body
+        );
+        return Err(format!(
+            "Bilibili API error {}: {} | raw body: {}",
+            payload.code, payload.message, body
+        ));
+    }
+
+    let data = payload
+        .data
+        .ok_or_else(|| "Bilibili API returned empty data".to_string())?;
+
+    Ok(BilibiliMetadata {
+        bvid: data.bvid,
+        title: data.title,
+        pic: data.pic,
+        owner_name: data.owner.name,
+        duration: data.duration,
+    })
+}
+
 // ═══════════════════════════════════════════════════════════
 // Read file content (for MD import)
 // ═══════════════════════════════════════════════════════════
@@ -714,50 +818,80 @@ async fn read_file_content(path: String) -> Result<String, String> {
 // Knowledge base file operations
 // ═══════════════════════════════════════════════════════════
 
-fn workspace_root_dir() -> String {
-    format!("{}/Documents/EVA_Knowledge_Base", dirs_next_home())
+fn workspace_root_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let document_dir = app
+        .path()
+        .document_dir()
+        .map_err(|e| format!("Failed to resolve document_dir: {}", e))?;
+
+    Ok(document_dir.join("EVA_Knowledge_Base"))
 }
 
-async fn ensure_workspace_dirs() -> Result<String, String> {
-    let root = workspace_root_dir();
+fn sanitize_relative_path(relative: &str) -> Result<PathBuf, String> {
+    let trimmed = relative.trim().replace('\\', "/");
+    if trimmed.is_empty() {
+        return Ok(PathBuf::new());
+    }
+
+    let mut out = PathBuf::new();
+    for component in Path::new(&trimmed).components() {
+        match component {
+            Component::Normal(seg) => out.push(seg),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(format!("Invalid relative path: {}", relative));
+            }
+        }
+    }
+    Ok(out)
+}
+
+async fn ensure_workspace_dirs(app: &tauri::AppHandle) -> Result<String, String> {
+    let root = workspace_root_path(app)?;
     let required = [
         root.clone(),
-        format!("{}/Database", root),
-        format!("{}/Logs", root),
-        format!("{}/Notes", root),
-        format!("{}/Resources", root),
+        root.join("Database"),
+        root.join("Logs"),
+        root.join("Notes"),
+        root.join("Resources"),
     ];
 
     for dir in required {
         fs::create_dir_all(&dir)
             .await
-            .map_err(|e| format!("Failed to create workspace dir {}: {}", dir, e))?;
+            .map_err(|e| format!("Failed to create workspace dir {}: {}", dir.to_string_lossy(), e))?;
     }
 
-    Ok(root)
+    Ok(root.to_string_lossy().to_string())
 }
 
 async fn ensure_workspace_dirs_at(root: &str) -> Result<String, String> {
+    let root_path = PathBuf::from(root);
     let required = [
-        root.to_string(),
-        format!("{}/Database", root),
-        format!("{}/Logs", root),
-        format!("{}/Notes", root),
-        format!("{}/Resources", root),
+        root_path.clone(),
+        root_path.join("Database"),
+        root_path.join("Logs"),
+        root_path.join("Notes"),
+        root_path.join("Resources"),
     ];
 
     for dir in required {
         fs::create_dir_all(&dir)
             .await
-            .map_err(|e| format!("Failed to create workspace dir {}: {}", dir, e))?;
+            .map_err(|e| format!("Failed to create workspace dir {}: {}", dir.to_string_lossy(), e))?;
     }
 
-    Ok(root.to_string())
+    Ok(root_path.to_string_lossy().to_string())
 }
 
 #[tauri::command]
-async fn initialize_workspace() -> Result<String, String> {
-    ensure_workspace_dirs().await
+async fn initialize_workspace(app: tauri::AppHandle) -> Result<String, String> {
+    ensure_workspace_dirs(&app).await
+}
+
+#[tauri::command]
+async fn get_workspace_root(app: tauri::AppHandle) -> Result<String, String> {
+    ensure_workspace_dirs(&app).await
 }
 
 #[tauri::command]
@@ -771,70 +905,257 @@ async fn initialize_workspace_at(root_path: String) -> Result<String, String> {
 
 /// Get the Notes directory path, creating it if needed
 #[tauri::command]
-async fn get_notes_dir() -> Result<String, String> {
-    let root = ensure_workspace_dirs().await?;
-    let notes_dir = format!("{}/Notes", root);
-    Ok(notes_dir)
+async fn get_notes_dir(app: tauri::AppHandle) -> Result<String, String> {
+    let root = ensure_workspace_dirs(&app).await?;
+    Ok(PathBuf::from(root).join("Notes").to_string_lossy().to_string())
+}
+
+#[tauri::command]
+async fn get_logs_dir(app: tauri::AppHandle) -> Result<String, String> {
+    let root = ensure_workspace_dirs(&app).await?;
+    Ok(PathBuf::from(root).join("Logs").to_string_lossy().to_string())
+}
+
+#[tauri::command]
+async fn get_resources_dir(app: tauri::AppHandle) -> Result<String, String> {
+    let root = ensure_workspace_dirs(&app).await?;
+    Ok(PathBuf::from(root).join("Resources").to_string_lossy().to_string())
+}
+
+#[derive(Debug, Serialize)]
+struct CopiedFileResult {
+    source_path: String,
+    file_name: String,
+    dest_path: String,
 }
 
 /// Copy a file into the Notes directory (preserving name), return the dest path
 #[tauri::command]
-async fn copy_file_to_notes(source_path: String, relative_dir: String) -> Result<String, String> {
-    let root = ensure_workspace_dirs().await?;
-    let base = format!("{}/Notes", root);
-    let target_dir = if relative_dir.is_empty() {
-        base.clone()
-    } else {
-        format!("{}/{}", base, relative_dir)
-    };
+async fn copy_file_to_notes(app: tauri::AppHandle, source_path: String, relative_dir: String) -> Result<String, String> {
+    let root = PathBuf::from(ensure_workspace_dirs(&app).await?);
+    let base = root.join("Notes");
+    let relative = sanitize_relative_path(&relative_dir)?;
+    let target_dir = base.join(relative);
     fs::create_dir_all(&target_dir)
         .await
-        .map_err(|e| format!("Failed to create directory {}: {}", target_dir, e))?;
+        .map_err(|e| format!("Failed to create directory {}: {}", target_dir.to_string_lossy(), e))?;
 
     let file_name = std::path::Path::new(&source_path)
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("unknown");
-    let dest = format!("{}/{}", target_dir, file_name);
+    let dest = target_dir.join(file_name);
     fs::copy(&source_path, &dest)
         .await
-        .map_err(|e| format!("Failed to copy {} -> {}: {}", source_path, dest, e))?;
-    Ok(dest)
+        .map_err(|e| format!("Failed to copy {} -> {}: {}", source_path, dest.to_string_lossy(), e))?;
+    Ok(dest.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+async fn copy_files_to_notes(app: tauri::AppHandle, source_paths: Vec<String>, relative_dir: String) -> Result<Vec<CopiedFileResult>, String> {
+    if source_paths.is_empty() {
+        return Err("No source files provided".to_string());
+    }
+
+    let root = PathBuf::from(ensure_workspace_dirs(&app).await?);
+    let base = root.join("Notes");
+    let relative = sanitize_relative_path(&relative_dir)?;
+    let target_dir = base.join(relative);
+
+    fs::create_dir_all(&target_dir)
+        .await
+        .map_err(|e| format!("Failed to create directory {}: {}", target_dir.to_string_lossy(), e))?;
+
+    let mut copied = Vec::new();
+
+    for (index, source_path) in source_paths.into_iter().enumerate() {
+        let metadata = fs::metadata(&source_path)
+            .await
+            .map_err(|e| format!("Source file metadata error [index={} path={}]: {}", index, source_path, e))?;
+        if !metadata.is_file() {
+            return Err(format!("Source path is not a file [index={} path={}]", index, source_path));
+        }
+
+        let file_name = Path::new(&source_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        let dest = target_dir.join(&file_name);
+        fs::copy(&source_path, &dest)
+            .await
+            .map_err(|e| format!("Failed to copy [index={} source={} dest={}]: {}", index, source_path, dest.to_string_lossy(), e))?;
+
+        copied.push(CopiedFileResult {
+            source_path,
+            file_name,
+            dest_path: dest.to_string_lossy().to_string(),
+        });
+    }
+
+    Ok(copied)
+}
+
+#[tauri::command]
+async fn batch_delete_notes_files(app: tauri::AppHandle, absolute_paths: Vec<String>) -> Result<usize, String> {
+    if absolute_paths.is_empty() {
+        return Ok(0);
+    }
+
+    let notes_root = PathBuf::from(ensure_workspace_dirs(&app).await?).join("Notes");
+    let mut deleted = 0usize;
+
+    for (index, raw_path) in absolute_paths.into_iter().enumerate() {
+        let candidate = PathBuf::from(&raw_path);
+        if !candidate.starts_with(&notes_root) {
+            return Err(format!(
+                "Refused to delete outside Notes root [index={} path={}]",
+                index, raw_path
+            ));
+        }
+
+        let metadata = fs::metadata(&candidate)
+            .await
+            .map_err(|e| format!("Failed to stat file [index={} path={}]: {}", index, raw_path, e))?;
+
+        if !metadata.is_file() {
+            return Err(format!("Target is not a file [index={} path={}]", index, raw_path));
+        }
+
+        fs::remove_file(&candidate)
+            .await
+            .map_err(|e| format!("Failed to delete file [index={} path={}]: {}", index, raw_path, e))?;
+        deleted += 1;
+    }
+
+    Ok(deleted)
+}
+
+#[tauri::command]
+async fn batch_move_notes_items(app: tauri::AppHandle, from_relatives: Vec<String>, target_relative_dir: String) -> Result<usize, String> {
+    if from_relatives.is_empty() {
+        return Ok(0);
+    }
+
+    let root = PathBuf::from(ensure_workspace_dirs(&app).await?);
+    let base = root.join("Notes");
+    let target_rel = sanitize_relative_path(&target_relative_dir)?;
+    let target_dir = base.join(target_rel);
+
+    fs::create_dir_all(&target_dir)
+        .await
+        .map_err(|e| format!("Failed to create target dir {}: {}", target_dir.to_string_lossy(), e))?;
+
+    let mut moved = 0usize;
+
+    for (index, rel) in from_relatives.into_iter().enumerate() {
+        let src_rel = sanitize_relative_path(&rel)?;
+        let src = base.join(&src_rel);
+        let file_name = src
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| format!("Invalid source file name [index={} relative={}]", index, rel))?
+            .to_string();
+        let dest = target_dir.join(file_name);
+
+        fs::rename(&src, &dest)
+            .await
+            .map_err(|e| format!(
+                "Failed to move item [index={} from={} to={}]: {}",
+                index,
+                src.to_string_lossy(),
+                dest.to_string_lossy(),
+                e
+            ))?;
+        moved += 1;
+    }
+
+    Ok(moved)
+}
+
+#[tauri::command]
+async fn copy_files_to_resources(app: tauri::AppHandle, source_paths: Vec<String>, relative_dir: String) -> Result<Vec<CopiedFileResult>, String> {
+    if source_paths.is_empty() {
+        return Err("No source files provided".to_string());
+    }
+
+    let root = PathBuf::from(ensure_workspace_dirs(&app).await?);
+    let base = root.join("Resources");
+    let relative = sanitize_relative_path(&relative_dir)?;
+    let target_dir = base.join(relative);
+
+    fs::create_dir_all(&target_dir)
+        .await
+        .map_err(|e| format!("Failed to create directory {}: {}", target_dir.to_string_lossy(), e))?;
+
+    let mut copied = Vec::new();
+
+    for (index, source_path) in source_paths.into_iter().enumerate() {
+        let metadata = fs::metadata(&source_path)
+            .await
+            .map_err(|e| format!("Source file metadata error [index={} path={}]: {}", index, source_path, e))?;
+        if !metadata.is_file() {
+            return Err(format!("Source path is not a file [index={} path={}]", index, source_path));
+        }
+
+        let file_name = Path::new(&source_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        let dest = target_dir.join(&file_name);
+        fs::copy(&source_path, &dest)
+            .await
+            .map_err(|e| format!("Failed to copy [index={} source={} dest={}]: {}", index, source_path, dest.to_string_lossy(), e))?;
+
+        copied.push(CopiedFileResult {
+            source_path,
+            file_name,
+            dest_path: dest.to_string_lossy().to_string(),
+        });
+    }
+
+    Ok(copied)
 }
 
 /// Write text content to a file in the Notes directory
 #[tauri::command]
-async fn write_notes_file(relative_path: String, content: String) -> Result<String, String> {
-    let root = ensure_workspace_dirs().await?;
-    let full_path = format!("{}/Notes/{}", root, relative_path);
-    if let Some(parent) = std::path::Path::new(&full_path).parent() {
+async fn write_notes_file(app: tauri::AppHandle, relative_path: String, content: String) -> Result<String, String> {
+    let root = PathBuf::from(ensure_workspace_dirs(&app).await?);
+    let rel = sanitize_relative_path(&relative_path)?;
+    let full_path = root.join("Notes").join(rel);
+    if let Some(parent) = full_path.parent() {
         fs::create_dir_all(parent)
             .await
             .map_err(|e| format!("Failed to create dir: {}", e))?;
     }
-    fs::write(&full_path, &content)
+    fs::write(&full_path, content)
         .await
-        .map_err(|e| format!("Failed to write {}: {}", full_path, e))?;
-    Ok(full_path)
+        .map_err(|e| format!("Failed to write {}: {}", full_path.to_string_lossy(), e))?;
+    Ok(full_path.to_string_lossy().to_string())
 }
 
 /// Create a folder in the Notes directory
 #[tauri::command]
-async fn create_notes_folder(relative_path: String) -> Result<String, String> {
-    let root = ensure_workspace_dirs().await?;
-    let full_path = format!("{}/Notes/{}", root, relative_path);
+async fn create_notes_folder(app: tauri::AppHandle, relative_path: String) -> Result<String, String> {
+    let root = PathBuf::from(ensure_workspace_dirs(&app).await?);
+    let rel = sanitize_relative_path(&relative_path)?;
+    let full_path = root.join("Notes").join(rel);
     fs::create_dir_all(&full_path)
         .await
-        .map_err(|e| format!("Failed to create folder {}: {}", full_path, e))?;
-    Ok(full_path)
+        .map_err(|e| format!("Failed to create folder {}: {}", full_path.to_string_lossy(), e))?;
+    Ok(full_path.to_string_lossy().to_string())
 }
 
 /// Delete a file or folder from Notes directory
 #[tauri::command]
-async fn delete_notes_item(relative_path: String) -> Result<(), String> {
-    let root = ensure_workspace_dirs().await?;
-    let full_path = format!("{}/Notes/{}", root, relative_path);
-    let path = std::path::Path::new(&full_path);
+async fn delete_notes_item(app: tauri::AppHandle, relative_path: String) -> Result<(), String> {
+    let root = PathBuf::from(ensure_workspace_dirs(&app).await?);
+    let rel = sanitize_relative_path(&relative_path)?;
+    let full_path = root.join("Notes").join(rel);
+    let path = full_path.as_path();
     if fs::metadata(path).await.map(|m| m.is_dir()).unwrap_or(false) {
         fs::remove_dir_all(path)
             .await
@@ -849,20 +1170,20 @@ async fn delete_notes_item(relative_path: String) -> Result<(), String> {
 
 /// Move (rename) a file or folder within Notes directory
 #[tauri::command]
-async fn move_notes_item(from_relative: String, to_relative: String) -> Result<(), String> {
-    let root = ensure_workspace_dirs().await?;
-    let base = format!("{}/Notes", root);
-    let src = format!("{}/{}", base, from_relative);
-    let dest = format!("{}/{}", base, to_relative);
+async fn move_notes_item(app: tauri::AppHandle, from_relative: String, to_relative: String) -> Result<(), String> {
+    let root = PathBuf::from(ensure_workspace_dirs(&app).await?);
+    let base = root.join("Notes");
+    let src = base.join(sanitize_relative_path(&from_relative)?);
+    let dest = base.join(sanitize_relative_path(&to_relative)?);
     // Ensure destination parent directory exists
-    if let Some(parent) = std::path::Path::new(&dest).parent() {
+    if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)
             .await
             .map_err(|e| format!("Failed to create dest dir: {}", e))?;
     }
     fs::rename(&src, &dest)
         .await
-        .map_err(|e| format!("Failed to move {} -> {}: {}", src, dest, e))?;
+        .map_err(|e| format!("Failed to move {} -> {}: {}", src.to_string_lossy(), dest.to_string_lossy(), e))?;
     Ok(())
 }
 
@@ -943,7 +1264,7 @@ pub fn run() {
             // Initialize SQLite database
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                let workspace_root = match ensure_workspace_dirs().await {
+                let workspace_root = match ensure_workspace_dirs(&app_handle).await {
                     Ok(root) => {
                         log::info!("Workspace initialized at: {}", root);
                         root
@@ -986,11 +1307,19 @@ pub fn run() {
             upsert_focus_session,
             parse_markdown_plan,
             ai_proxy,
+            fetch_bilibili_metadata,
             initialize_workspace,
             initialize_workspace_at,
+            get_workspace_root,
             read_file_content,
             get_notes_dir,
+            get_logs_dir,
+            get_resources_dir,
             copy_file_to_notes,
+            copy_files_to_notes,
+            batch_delete_notes_files,
+            batch_move_notes_items,
+            copy_files_to_resources,
             write_notes_file,
             create_notes_folder,
             delete_notes_item,
@@ -998,15 +1327,4 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
-}
-
-fn dirs_next_home() -> String {
-    #[cfg(target_os = "windows")]
-    {
-        std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\Users\\Default".to_string())
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string())
-    }
 }

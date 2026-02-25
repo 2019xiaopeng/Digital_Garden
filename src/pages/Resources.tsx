@@ -1,9 +1,10 @@
 import { FileText, Image as ImageIcon, FileArchive, Download, Search, Filter, CheckSquare, Square, Swords, Upload, Folder } from "lucide-react";
-import React, { useMemo, useState, useRef } from "react";
+import React, { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { cn } from "../lib/utils";
 import { isTauriAvailable } from "../lib/dataService";
 import { extractBilibiliVideoUrl, openExternalUrl } from "../lib/videoBookmark";
+import { open } from "@tauri-apps/plugin-dialog";
 
 type ResourceItem = {
   id: number;
@@ -13,6 +14,7 @@ type ResourceItem = {
   date: string;
   subject: string;
   folder?: string;
+  path?: string;
 };
 
 type VideoBookmark = {
@@ -34,17 +36,11 @@ type LegacyVideoBookmark = {
 };
 
 type BilibiliApiResponse = {
-  code: number;
-  message: string;
-  data?: {
-    bvid: string;
-    title: string;
-    pic: string;
-    duration: number;
-    owner: {
-      name: string;
-    };
-  };
+  bvid: string;
+  title: string;
+  pic: string;
+  owner_name: string;
+  duration: number;
 };
 
 const initialResources: ResourceItem[] = [
@@ -87,9 +83,6 @@ export function Resources() {
     }
   });
   const navigate = useNavigate();
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const folderInputRef = useRef<HTMLInputElement>(null);
-  const directoryInputProps = { webkitdirectory: "true" } as React.HTMLAttributes<HTMLInputElement>;
 
   const toggleSelection = (id: number) => {
     setSelectedIds(prev => 
@@ -103,89 +96,55 @@ export function Resources() {
     navigate("/quiz?generated=true");
   };
 
-  const handleFileUpload = async (e?: React.ChangeEvent<HTMLInputElement>) => {
-    if (isTauriAvailable() && !e) {
-      try {
-        const { open } = await import("@tauri-apps/plugin-dialog");
-        const picked = await open({ multiple: true, filters: [{ name: "All", extensions: ["*"] }] });
-        const list = Array.isArray(picked) ? picked : picked ? [picked] : [];
-        if (list.length === 0) return;
-        const newResources: ResourceItem[] = list.map((path, index) => {
-          const name = String(path).split(/[\\/]/).pop() || `文件-${index + 1}`;
-          const ext = name.includes(".") ? name.split('.').pop()?.toLowerCase() || "unknown" : "unknown";
-          return {
-            id: Date.now() + index,
-            name,
-            size: "-",
-            type: ext,
-            date: new Date().toISOString().split('T')[0],
-            subject: "未分类"
-          };
-        });
-        setResources([...newResources, ...resources]);
-        return;
-      } catch {}
-    }
-    if (!e) return;
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
-    
-    const newResources: ResourceItem[] = Array.from(files).map((file: File, index) => ({
-      id: Date.now() + index,
-      name: file.name,
-      size: (file.size / (1024 * 1024)).toFixed(1) + " MB",
-      type: file.name.split('.').pop()?.toLowerCase() || "unknown",
-      date: new Date().toISOString().split('T')[0],
-      subject: "未分类"
-    }));
+  const handleFileUpload = async () => {
+    try {
+      const picked = await open({ multiple: true, filters: [{ name: "All", extensions: ["*"] }] });
+      const list = Array.isArray(picked) ? picked : picked ? [picked] : [];
+      if (list.length === 0) return;
 
-    setResources([...newResources, ...resources]);
-    if (fileInputRef.current) {
-      fileInputRef.current.value = '';
+      const { invoke } = await import("@tauri-apps/api/core");
+      type CopiedFileResult = { source_path: string; file_name: string; dest_path: string };
+      const copied = await invoke<CopiedFileResult[]>("copy_files_to_resources", {
+        sourcePaths: list.map((p) => String(p)),
+        relativeDir: "",
+      });
+
+      const newResources: ResourceItem[] = copied.map((item, index) => {
+        const ext = item.file_name.includes(".") ? item.file_name.split('.').pop()?.toLowerCase() || "unknown" : "unknown";
+        return {
+          id: Date.now() + index,
+          name: item.file_name,
+          size: "-",
+          type: ext,
+          date: new Date().toISOString().split('T')[0],
+          subject: "未分类",
+          path: item.dest_path,
+        };
+      });
+
+      setResources([...newResources, ...resources]);
+    } catch (error) {
+      console.error("[Resources] file upload failed:", error);
     }
   };
 
-  const handleFolderUpload = async (e?: React.ChangeEvent<HTMLInputElement>) => {
-    if (isTauriAvailable() && !e) {
-      try {
-        const { open } = await import("@tauri-apps/plugin-dialog");
-        const picked = await open({ directory: true, multiple: false });
-        if (!picked || typeof picked !== "string") return;
-        const folderName = picked.split(/[\\/]/).pop() || "本地目录";
-        const mockFolderEntry: ResourceItem = {
-          id: Date.now(),
-          name: `${folderName} (目录)`,
-          size: "-",
-          type: "folder",
-          date: new Date().toISOString().split('T')[0],
-          subject: "未分类",
-          folder: folderName,
-        };
-        setResources([mockFolderEntry, ...resources]);
-        return;
-      } catch {}
-    }
-    if (!e) return;
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
-
-    const newResources: ResourceItem[] = Array.from(files).map((file: File, index) => {
-      const relativePath = (file as any).webkitRelativePath || file.name;
-      const folderName = relativePath.split("/").filter(Boolean)[0] || "本地目录";
-      return {
-        id: Date.now() + index,
-        name: file.name,
-        size: (file.size / (1024 * 1024)).toFixed(1) + " MB",
-        type: file.name.split('.').pop()?.toLowerCase() || "unknown",
+  const handleFolderUpload = async () => {
+    try {
+      const picked = await open({ directory: true, multiple: false });
+      if (!picked || typeof picked !== "string") return;
+      const folderName = picked.split(/[\\/]/).pop() || "本地目录";
+      const mockFolderEntry: ResourceItem = {
+        id: Date.now(),
+        name: `${folderName} (目录)`,
+        size: "-",
+        type: "folder",
         date: new Date().toISOString().split('T')[0],
         subject: "未分类",
-        folder: folderName
+        folder: folderName,
       };
-    });
-
-    setResources([...newResources, ...resources]);
-    if (folderInputRef.current) {
-      folderInputRef.current.value = '';
+      setResources([mockFolderEntry, ...resources]);
+    } catch (error) {
+      console.error("[Resources] folder upload failed:", error);
     }
   };
 
@@ -208,43 +167,24 @@ export function Resources() {
   };
 
   const fetchBilibiliMetadata = async (bvid: string): Promise<VideoBookmark | null> => {
-    const apiUrl = `https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(bvid)}`;
-    const parsePayload = (payload: BilibiliApiResponse): VideoBookmark | null => {
-      if (!payload || payload.code !== 0 || !payload.data) return null;
+    if (!isTauriAvailable()) return null;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const payload = await invoke<BilibiliApiResponse>("fetch_bilibili_metadata", { bvid });
       return {
         id: `video-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        bvid: payload.data.bvid || bvid,
-        url: `https://www.bilibili.com/video/${payload.data.bvid || bvid}`,
-        title: payload.data.title || bvid,
-        pic: payload.data.pic || "",
-        ownerName: payload.data.owner?.name || "未知UP主",
-        duration: payload.data.duration || 0,
+        bvid: payload.bvid || bvid,
+        url: `https://www.bilibili.com/video/${payload.bvid || bvid}`,
+        title: payload.title || bvid,
+        pic: payload.pic || "",
+        ownerName: payload.owner_name || "未知UP主",
+        duration: payload.duration || 0,
         createdAt: new Date().toISOString(),
       };
-    };
-
-    try {
-      const resp = await fetch(apiUrl);
-      const json = (await resp.json()) as BilibiliApiResponse;
-      const parsed = parsePayload(json);
-      if (parsed) return parsed;
     } catch (error) {
-      console.error("[Resources] Web fetch bilibili metadata failed:", error);
+      console.error("[Resources] Rust metadata proxy failed:", error);
+      return null;
     }
-
-    if (isTauriAvailable()) {
-      try {
-        const { fetch: tauriFetch } = await import("@tauri-apps/plugin-http");
-        const resp = await tauriFetch(apiUrl, { method: "GET" });
-        const json = (await resp.json()) as BilibiliApiResponse;
-        const parsed = parsePayload(json);
-        if (parsed) return parsed;
-      } catch (error) {
-        console.error("[Resources] Tauri HTTP fetch bilibili metadata failed:", error);
-      }
-    }
-
-    return null;
   };
 
   const addVideoBookmark = async () => {
@@ -310,34 +250,19 @@ export function Resources() {
         
         <div className="flex flex-wrap items-center gap-3">
           <button 
-            onClick={() => isTauriAvailable() ? handleFileUpload() : fileInputRef.current?.click()}
+            onClick={handleFileUpload}
             className="flex items-center gap-2 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-800 text-gray-700 dark:text-gray-200 px-4 py-2.5 rounded-2xl text-sm font-semibold shadow-sm transition-all active:scale-95"
           >
             <Upload className="w-4 h-4" />
             上传文件
           </button>
-          <input 
-            type="file" 
-            ref={fileInputRef} 
-            className="hidden" 
-            multiple 
-            onChange={handleFileUpload} 
-          />
           <button 
-            onClick={() => isTauriAvailable() ? handleFolderUpload() : folderInputRef.current?.click()}
+            onClick={handleFolderUpload}
             className="flex items-center gap-2 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-800 text-gray-700 dark:text-gray-200 px-4 py-2.5 rounded-2xl text-sm font-semibold shadow-sm transition-all active:scale-95"
           >
             <Folder className="w-4 h-4" />
             上传目录
           </button>
-          <input 
-            type="file" 
-            ref={folderInputRef} 
-            className="hidden" 
-            multiple 
-            onChange={handleFolderUpload}
-            {...directoryInputProps}
-          />
           {selectedIds.length > 0 && (
             <button 
               onClick={handleGenerateQuiz}

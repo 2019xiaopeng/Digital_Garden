@@ -16,15 +16,26 @@ import { Tasks } from "./pages/Tasks";
 import { Settings } from "./pages/Settings";
 import { isTauriAvailable } from "./lib/dataService";
 import { KnowledgeSelectionProvider } from "./context/KnowledgeSelectionContext";
+import { getSettings, saveSettings } from "./lib/settings";
 
 export default function App() {
   useEffect(() => {
     if (!isTauriAvailable()) return;
 
+    const isAbsolutePath = (path: string) => {
+      if (!path) return false;
+      return /^[a-zA-Z]:[\\/]/.test(path) || path.startsWith("/");
+    };
+
     const initWorkspace = async () => {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
-        await invoke("initialize_workspace");
+        const root = await invoke<string>("get_workspace_root");
+        const current = getSettings();
+        const docRoot = (current.docRoot || "").trim();
+        if (!docRoot || docRoot.includes("~") || !isAbsolutePath(docRoot)) {
+          saveSettings({ ...current, docRoot: root });
+        }
       } catch (error) {
         console.error("[App] Failed to initialize EVA workspace directories:", error);
       }
