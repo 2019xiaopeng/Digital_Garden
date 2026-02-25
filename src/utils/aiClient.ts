@@ -1,56 +1,42 @@
 import { getSettings } from "../lib/settings";
 
-export type ChatCompletionMessage = {
+export type OpenAIChatMessage = {
   role: "system" | "user" | "assistant";
   content: string;
 };
 
 export type ChatCompletionOptions = {
-  messages: ChatCompletionMessage[];
+  messages: OpenAIChatMessage[];
   model?: string;
   temperature?: number;
   maxTokens?: number;
   signal?: AbortSignal;
-  onDelta?: (delta: string, fullText: string) => void;
-};
-
-export type ChatCompletionResult = {
-  content: string;
-  model: string;
 };
 
 const SILICONFLOW_ENDPOINT = "https://api.siliconflow.cn/v1/chat/completions";
 const DEFAULT_MODEL = "deepseek-ai/DeepSeek-V3.2";
 
-export function getAiRuntimeConfig() {
+function resolveApiKey(): string {
   const settings = getSettings();
-  const apiKey = settings.aiApiKey || localStorage.getItem("eva.ai.apiKey") || "";
-  const model = settings.aiModel || localStorage.getItem("eva.ai.model") || DEFAULT_MODEL;
-  return { apiKey, model };
+  const fromSettings = settings.aiApiKey?.trim();
+  if (fromSettings) return fromSettings;
+
+  const legacy = localStorage.getItem("eva.ai.api.key")?.trim();
+  if (legacy) return legacy;
+
+  const legacy2 = localStorage.getItem("eva.ai.apiKey")?.trim();
+  return legacy2 || "";
 }
 
-function collectDeltaText(payload: any): string {
-  const choice = payload?.choices?.[0];
-  const delta = choice?.delta || {};
-  const parts: string[] = [];
-
-  if (typeof delta.reasoning_content === "string") {
-    parts.push(delta.reasoning_content);
-  }
-  if (typeof delta.content === "string") {
-    parts.push(delta.content);
-  }
-
-  return parts.join("");
+function resolveModel(model?: string): string {
+  if (model?.trim()) return model.trim();
+  return localStorage.getItem("eva.ai.model")?.trim() || DEFAULT_MODEL;
 }
 
-export async function chatCompletion(options: ChatCompletionOptions): Promise<ChatCompletionResult> {
-  const runtime = getAiRuntimeConfig();
-  const apiKey = runtime.apiKey;
-  const model = options.model || runtime.model || DEFAULT_MODEL;
-
-  if (!apiKey.trim()) {
-    throw new Error("未配置 SiliconFlow API Key，请先到设置页填写。");
+export async function* chatCompletion(options: ChatCompletionOptions): AsyncGenerator<string, void, unknown> {
+  const apiKey = resolveApiKey();
+  if (!apiKey) {
+    throw new Error("未配置 SiliconFlow API Key，请先前往设置页保存。");
   }
 
   const response = await fetch(SILICONFLOW_ENDPOINT, {
@@ -60,28 +46,26 @@ export async function chatCompletion(options: ChatCompletionOptions): Promise<Ch
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model,
+      model: resolveModel(options.model),
       messages: options.messages,
-      stream: true,
       temperature: options.temperature ?? 0.7,
-      max_tokens: options.maxTokens ?? 2048,
+      max_tokens: options.maxTokens ?? 1024,
+      stream: true,
     }),
     signal: options.signal,
   });
 
   if (!response.ok) {
     const errText = await response.text().catch(() => "");
-    throw new Error(`SiliconFlow 请求失败（${response.status}）：${errText || response.statusText}`);
+    throw new Error(`SiliconFlow 请求失败 (${response.status}): ${errText || response.statusText}`);
   }
 
   if (!response.body) {
-    throw new Error("SiliconFlow 返回为空响应流");
+    throw new Error("SiliconFlow 返回为空（无可读流）");
   }
 
   const reader = response.body.getReader();
   const decoder = new TextDecoder("utf-8");
-
-  let fullText = "";
   let buffer = "";
 
   while (true) {
@@ -92,29 +76,32 @@ export async function chatCompletion(options: ChatCompletionOptions): Promise<Ch
     const lines = buffer.split("\n");
     buffer = lines.pop() || "";
 
-    for (const rawLine of lines) {
-      const line = rawLine.trim();
+    for (const raw of lines) {
+      const line = raw.trim();
       if (!line || !line.startsWith("data:")) continue;
 
-      const data = line.slice(5).trim();
-      if (data === "[DONE]") {
-        return { content: fullText, model };
+      const payload = line.slice(5).trim();
+      if (payload === "[DONE]") {
+        return;
       }
 
-      let payload: any;
       try {
-        payload = JSON.parse(data);
+        const parsed = JSON.parse(payload) as {
+          choices?: Array<{ delta?: { content?: string } }>;
+        };
+        const delta = parsed.choices?.[0]?.delta?.content;
+        if (delta) yield delta;
       } catch {
         continue;
       }
-
-      const deltaText = collectDeltaText(payload);
-      if (!deltaText) continue;
-
-      fullText += deltaText;
-      options.onDelta?.(deltaText, fullText);
     }
   }
+}
 
-  return { content: fullText, model };
+export async function chatCompletionToText(options: ChatCompletionOptions): Promise<string> {
+  let out = "";
+  for await (const chunk of chatCompletion(options)) {
+    out += chunk;
+  }
+  return out;
 }

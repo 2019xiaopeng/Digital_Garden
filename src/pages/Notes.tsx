@@ -8,11 +8,10 @@ import { ThemedPromptDialog } from "../components/ThemedPromptDialog";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { isTauriAvailable } from "../lib/dataService";
 import { open } from "@tauri-apps/plugin-dialog";
-import { getSettings, updateSettings } from "../lib/settings";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useKnowledgeSelection } from "../context/KnowledgeSelectionContext";
-import { chatCompletion, getAiRuntimeConfig } from "../utils/aiClient";
+import { chatCompletion } from "../utils/aiClient";
 
 // --- Types ---
 type TreeNode = {
@@ -52,7 +51,7 @@ export function Notes() {
 
   // AI Chat State
   const [chatInput, setChatInput] = useState("");
-  const [selectedModel, setSelectedModel] = useState(() => getSettings().aiModel || "deepseek-ai/DeepSeek-V3.2");
+  const [selectedModel, setSelectedModel] = useState<string>(() => localStorage.getItem("eva.ai.model") || "deepseek-ai/DeepSeek-V3.2");
   const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [isAiLoading, setIsAiLoading] = useState(false);
@@ -796,6 +795,11 @@ export function Notes() {
     }));
   };
 
+  const getModelLabel = (model: string) => {
+    const short = model.split("/").pop() || model;
+    return short.replace("DeepSeek-", "DeepSeek ");
+  };
+
   const buildSelectedFilesContext = async (): Promise<string> => {
     if (selected_knowledge_files.length === 0) return "";
 
@@ -835,59 +839,65 @@ export function Notes() {
       updateSessionMessages(activeSession.id, messages => [...messages, { role: 'user', text: userMsg }]);
     }
 
-    updateSessionMessages(currentSession.id, messages => [...messages, { role: 'model', text: "" }]);
-
     setIsAiLoading(true);
 
     try {
       const selectedContext = await buildSelectedFilesContext();
       const context = viewingFile ? `当前文件：${viewingFile.name}。` : "当前未选中文件。";
-      const runtime = getAiRuntimeConfig();
-      const modelToUse = selectedModel || runtime.model || "deepseek-ai/DeepSeek-V3.2";
 
-      const previousMessages = activeSession?.messages || [];
-      const transcript = [...previousMessages, { role: "user" as const, text: userMsg }]
-        .filter(m => m.text?.trim())
-        .map(m => ({
-          role: m.role === "model" ? "assistant" as const : "user" as const,
-          content: m.text,
-        }));
+      localStorage.setItem("eva.ai.model", selectedModel);
 
-      await chatCompletion({
-        model: modelToUse,
-        temperature: 0.7,
-        maxTokens: 1024,
+      updateSessionMessages(currentSession.id, messages => [...messages, { role: 'model', text: "" }]);
+
+      let streamed = "";
+      for await (const chunk of chatCompletion({
+        model: selectedModel,
         messages: [
           {
             role: "system",
             content: `你是EVA系统的知识库AI助手，简洁清晰地回答问题。${context}${selectedContext}`,
           },
-          ...transcript,
+          {
+            role: "user",
+            content: userMsg,
+          },
         ],
-        onDelta: (_delta, fullText) => {
-          updateSessionMessages(currentSession.id, (messages) => {
-            const next = [...messages];
-            for (let i = next.length - 1; i >= 0; i--) {
-              if (next[i].role === "model") {
-                next[i] = { ...next[i], text: fullText };
-                return next;
-              }
-            }
-            return [...next, { role: "model", text: fullText }];
-          });
-        },
-      });
+        temperature: 0.7,
+        maxTokens: 1024,
+      })) {
+        streamed += chunk;
+        updateSessionMessages(currentSession.id, messages => {
+          const next = [...messages];
+          const idx = next.length - 1;
+          if (idx >= 0 && next[idx].role === "model") {
+            next[idx] = { ...next[idx], text: next[idx].text + chunk };
+          }
+          return next;
+        });
+      }
+
+      if (!streamed.trim()) {
+        const modelLabel = getModelLabel(selectedModel);
+        updateSessionMessages(currentSession.id, messages => {
+          const next = [...messages];
+          const idx = next.length - 1;
+          if (idx >= 0 && next[idx].role === "model") {
+            next[idx] = { ...next[idx], text: `【${modelLabel}】本次未返回有效内容。` };
+          }
+          return next;
+        });
+      }
     } catch (error: any) {
       console.error("AI Error:", error);
-      updateSessionMessages(currentSession.id, (messages) => {
+      updateSessionMessages(currentSession.id, messages => {
         const next = [...messages];
-        for (let i = next.length - 1; i >= 0; i--) {
-          if (next[i].role === "model") {
-            next[i] = { ...next[i], text: `Error: ${error.message || "Failed to get response."}` };
-            return next;
-          }
+        const idx = next.length - 1;
+        const message = `调用 ${getModelLabel(selectedModel)} 失败: ${error.message || "Failed to get response."}`;
+        if (idx >= 0 && next[idx].role === "model" && next[idx].text === "") {
+          next[idx] = { ...next[idx], text: message };
+          return next;
         }
-        return [...next, { role: "model", text: `Error: ${error.message || "Failed to get response."}` }];
+        return [...messages, { role: "model", text: message }];
       });
     } finally {
       setIsAiLoading(false);
@@ -1230,17 +1240,11 @@ export function Notes() {
               <h3 className="font-semibold text-gray-900 dark:text-white">知识库 AI 助手</h3>
               <select
                 value={selectedModel}
-                onChange={(e) => {
-                  const next = e.target.value;
-                  setSelectedModel(next);
-                  updateSettings({ aiModel: next });
-                  localStorage.setItem("eva.ai.model", next);
-                }}
+                onChange={(e) => setSelectedModel(e.target.value)}
                 className="ml-2 text-xs font-medium bg-white/90 dark:bg-[#0f1826] border border-[#88B5D3]/30 rounded-lg px-2 py-1 text-gray-700 dark:text-gray-200 focus:outline-none"
               >
                 <option value="deepseek-ai/DeepSeek-V3.2">deepseek-ai/DeepSeek-V3.2</option>
                 <option value="deepseek-ai/DeepSeek-R1">deepseek-ai/DeepSeek-R1</option>
-                <option value="deepseek-ai/DeepSeek-V3">deepseek-ai/DeepSeek-V3</option>
               </select>
               {viewingFile && (
                 <span className="ml-auto text-xs bg-white/85 dark:bg-[#0f1826] border border-[#88B5D3]/20 text-[#88B5D3] px-2 py-1 rounded-md flex items-center gap-1">
@@ -1254,7 +1258,7 @@ export function Notes() {
                 <div className="h-full min-h-56 flex flex-col items-center justify-center text-center text-gray-500 dark:text-gray-400">
                   <Bot className="w-11 h-11 mb-3 text-[#88B5D3]/70" />
                   <p className="font-medium">当前暂无历史对话，开始提问吧</p>
-                  <p className="text-xs mt-1">已接入 SiliconFlow 流式输出，输入“你好”可测试连通性</p>
+                  <p className="text-xs mt-1">已支持 SiliconFlow 流式返回（DeepSeek 系列）</p>
                 </div>
               ) : chatHistory.map((msg, idx) => (
                 <div key={idx} className={cn("flex gap-4", msg.role === 'user' ? "flex-row-reverse" : "")}>

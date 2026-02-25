@@ -368,9 +368,15 @@ fn get_workspace_size() -> u64 { ... }           // 递归计算文件系统大�
 
 ---
 
-### 4.4 🔵 AI 生成功能增强
+### 4.4 🔵（部分🟢）AI 生成功能增强
 
-**目标**：充分发挥 DeepSeek / Kimi / MiniMax 三家 LLM 的能力，让 AI 成为考研复习的"副驾驶"。
+**目标**：以 SiliconFlow OpenAI 兼容接口为主，优先打通 DeepSeek-V3.2 流式能力，让 AI 成为考研复习的"副驾驶"。
+
+**当前状态（2026-02-25）**：
+- ✅ Settings 已支持 API Key 持久化与模型选择（默认 `deepseek-ai/DeepSeek-V3.2`）
+- ✅ 新增前端统一客户端 `src/utils/aiClient.ts`，支持 SiliconFlow 流式返回
+- ✅ 知识库 AI 对话已接入流式打字机渲染（最小连通测试：输入"你好"可返回）
+- 🟡 意图模式、题目生成、周复盘等高级能力仍待补齐
 
 **当前已有 AI 能力**（保留不变）：
 

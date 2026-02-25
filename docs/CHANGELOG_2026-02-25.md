@@ -64,3 +64,23 @@
 1. 将 Sync 页接入真实 LAN 服务状态与地址检测
 2. 将 Privacy 页接入真实存储统计与清理命令
 3. 将 Notes 搜索扩展为文件内容级全文检索
+
+---
+
+## AI 赋能阶段（SiliconFlow）补充记录
+
+### 4) Settings：AI 配置已激活
+- API Key 输入与模型选择已可持久化保存
+- 默认模型改为 `deepseek-ai/DeepSeek-V3.2`
+- 保留密码掩码与 👁️ 显示/隐藏
+
+### 5) 新增统一 AI 客户端（流式）
+- 新增 `src/utils/aiClient.ts`
+- 提供 `chatCompletion`（AsyncGenerator）与 `chatCompletionToText`
+- 兼容 OpenAI 协议，Endpoint：`https://api.siliconflow.cn/v1/chat/completions`
+- 支持 SSE 流式解析与增量输出
+
+### 6) Notes：最小连通测试已落地
+- 知识库 AI 面板已接入 `chatCompletion` 流式函数
+- 输入「你好」可看到流式打字机效果并得到 DeepSeek 回复
+- 模型下拉切换已与本地缓存联动

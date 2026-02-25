@@ -78,6 +78,7 @@ export function Settings() {
   const [saved, setSaved] = useState(false);
   const [initialDocRoot, setInitialDocRoot] = useState(getSettings().docRoot);
   const [showKeys, setShowKeys] = useState<Record<string, boolean>>({});
+  const [aiModel, setAiModel] = useState(() => localStorage.getItem("eva.ai.model") || "deepseek-ai/DeepSeek-V3.2");
   const [autoStartEnabled, setAutoStartEnabled] = useState(false);
   const [autoStartLoading, setAutoStartLoading] = useState(true);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -144,7 +145,8 @@ export function Settings() {
   const save = async () => {
     updateSettings(settings);
     localStorage.setItem("eva.ai.apiKey", settings.aiApiKey);
-    localStorage.setItem("eva.ai.model", settings.aiModel || "deepseek-ai/DeepSeek-V3.2");
+    localStorage.setItem("eva.ai.api.key", settings.aiApiKey);
+    localStorage.setItem("eva.ai.model", aiModel);
 
     if (settings.docRoot.trim() && settings.docRoot !== initialDocRoot) {
       try {
@@ -296,7 +298,7 @@ export function Settings() {
     return (
       <section className="space-y-5">
         <h2 className="text-xl font-bold text-gray-900 dark:text-white flex items-center gap-2"><Key className="w-4 h-4 text-purple-500" /> AI 助手配置</h2>
-        <p className="text-xs text-gray-500 dark:text-gray-400">分别配置三个大模型的 Key。闪电灵感与 AI 复盘将使用对应服务商的 Key 发起请求。</p>
+        <p className="text-xs text-gray-500 dark:text-gray-400">已支持硅基流动 OpenAI 兼容接口。默认模型为 DeepSeek-V3.2。</p>
         <div className="glass-card rounded-2xl p-5 space-y-5">
           {apiKeys.map(({ label, field, placeholder }) => (
             <div key={field}>
@@ -323,14 +325,9 @@ export function Settings() {
         </div>
         <div className="glass-card rounded-2xl p-5">
           <label className="text-xs font-semibold text-gray-500">默认模型选择</label>
-          <select
-            value={settings.aiModel || "deepseek-ai/DeepSeek-V3.2"}
-            onChange={(e) => setSettings({ ...settings, aiModel: e.target.value })}
-            className={selectClass}
-          >
+          <select value={aiModel} onChange={(e) => setAiModel(e.target.value)} className={selectClass}>
             <option value="deepseek-ai/DeepSeek-V3.2">deepseek-ai/DeepSeek-V3.2（推荐）</option>
             <option value="deepseek-ai/DeepSeek-R1">deepseek-ai/DeepSeek-R1</option>
-            <option value="deepseek-ai/DeepSeek-V3">deepseek-ai/DeepSeek-V3</option>
           </select>
         </div>
       </section>
