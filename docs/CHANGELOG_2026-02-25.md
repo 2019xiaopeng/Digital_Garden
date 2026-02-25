@@ -68,3 +68,21 @@
   - `invokeDesktop()`（桌面专属写操作统一入口）
 - Dashboard / Notes / Resources 已统一走桥接层，页面内不再直接依赖 `@tauri-apps/api/core`。
 - Web 端防御性降级已生效：文件管理动作改为禁用/只读提示，统一文案为“局域网模式下仅支持跨端阅读，请在桌面端进行文件管理”。
+
+---
+
+## Phase 4 系统收尾（Settings 去 Mock）
+
+### 已落地（本次）
+- `Settings -> 考研目标` 已从写死默认值改为真实持久化字段：
+  - `targetUniversity`
+  - `examDate`
+  - `targetScores`（政治/英语/数学/专业课）
+- 设置项已与本地设置存储双向绑定，重启后可自动回显。
+- `Settings -> 隐私与安全 -> 存储用量` 已接入 Rust 真实统计命令：
+  - `get_storage_usage()`
+  - 展示 SQLite、知识库/资源站、日志和总占用的真实字节换算结果。
+- 新增 Rust 维护命令并接入前端按钮：
+  - `clear_cache(cache_type)`
+  - `reset_all_data()`
+- 分类清理与一键清空已接真实调用，且加入前端确认拦截（重置为二次确认）。

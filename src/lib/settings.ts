@@ -14,6 +14,14 @@ export interface AppSettings {
   autoFullscreenPomodoro: boolean;
   animationLevel: "normal" | "reduced";
   docRoot: string;
+  targetUniversity: string;
+  examDate: string;
+  targetScores: {
+    politics: number;
+    english: number;
+    math: number;
+    major: number;
+  };
 }
 
 const SETTINGS_KEY = "eva.settings.v1";
@@ -32,6 +40,14 @@ export const defaultSettings: AppSettings = {
   autoFullscreenPomodoro: false,
   animationLevel: "normal",
   docRoot: "",
+  targetUniversity: "",
+  examDate: "2026-12-20",
+  targetScores: {
+    politics: 70,
+    english: 75,
+    math: 130,
+    major: 120,
+  },
 };
 
 export function getSettings(): AppSettings {

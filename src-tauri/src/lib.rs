@@ -2403,6 +2403,271 @@ async fn get_resources_dir(app: tauri::AppHandle) -> Result<String, String> {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+struct StorageStats {
+    db_bytes: u64,
+    notes_bytes: u64,
+    resources_bytes: u64,
+    logs_bytes: u64,
+    total_bytes: u64,
+}
+
+fn directory_size_bytes(path: &Path) -> u64 {
+    if !path.exists() {
+        return 0;
+    }
+
+    let metadata = match std::fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(_) => return 0,
+    };
+
+    if metadata.is_file() {
+        return metadata.len();
+    }
+
+    let mut total = 0u64;
+    let entries = match std::fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(_) => return 0,
+    };
+
+    for entry in entries.flatten() {
+        total = total.saturating_add(directory_size_bytes(&entry.path()));
+    }
+
+    total
+}
+
+fn clear_directory_contents(path: &Path) -> Result<usize, String> {
+    if !path.exists() {
+        return Ok(0);
+    }
+
+    let mut removed = 0usize;
+    let entries = std::fs::read_dir(path)
+        .map_err(|e| format!("Failed to read dir {}: {}", path.to_string_lossy(), e))?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Failed to read dir entry: {}", e))?;
+        let entry_path = entry.path();
+        let metadata = entry
+            .metadata()
+            .map_err(|e| format!("Failed to stat {}: {}", entry_path.to_string_lossy(), e))?;
+
+        if metadata.is_dir() {
+            std::fs::remove_dir_all(&entry_path)
+                .map_err(|e| format!("Failed to remove dir {}: {}", entry_path.to_string_lossy(), e))?;
+        } else {
+            std::fs::remove_file(&entry_path)
+                .map_err(|e| format!("Failed to remove file {}: {}", entry_path.to_string_lossy(), e))?;
+        }
+        removed += 1;
+    }
+
+    Ok(removed)
+}
+
+fn clear_temp_like_files(path: &Path) -> Result<usize, String> {
+    if !path.exists() {
+        return Ok(0);
+    }
+
+    let mut removed = 0usize;
+    let entries = std::fs::read_dir(path)
+        .map_err(|e| format!("Failed to read dir {}: {}", path.to_string_lossy(), e))?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Failed to read dir entry: {}", e))?;
+        let entry_path = entry.path();
+        let metadata = entry
+            .metadata()
+            .map_err(|e| format!("Failed to stat {}: {}", entry_path.to_string_lossy(), e))?;
+
+        if metadata.is_dir() {
+            removed += clear_temp_like_files(&entry_path)?;
+            continue;
+        }
+
+        let file_name = entry_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+
+        let ext = entry_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+
+        let is_temp_like = ["tmp", "cache", "bak", "old", "draft"].contains(&ext.as_str())
+            || file_name.ends_with(".tmp")
+            || file_name.ends_with(".cache");
+
+        if is_temp_like {
+            std::fs::remove_file(&entry_path)
+                .map_err(|e| format!("Failed to remove temp file {}: {}", entry_path.to_string_lossy(), e))?;
+            removed += 1;
+        }
+    }
+
+    Ok(removed)
+}
+
+fn prune_empty_directories(path: &Path, keep_root: bool) -> Result<usize, String> {
+    if !path.exists() {
+        return Ok(0);
+    }
+
+    let mut removed = 0usize;
+    let entries = std::fs::read_dir(path)
+        .map_err(|e| format!("Failed to read dir {}: {}", path.to_string_lossy(), e))?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Failed to read dir entry: {}", e))?;
+        let child = entry.path();
+        if child.is_dir() {
+            removed += prune_empty_directories(&child, false)?;
+        }
+    }
+
+    let has_children = std::fs::read_dir(path)
+        .map_err(|e| format!("Failed to read dir {}: {}", path.to_string_lossy(), e))?
+        .next()
+        .is_some();
+
+    if !keep_root && !has_children {
+        std::fs::remove_dir(path)
+            .map_err(|e| format!("Failed to remove empty dir {}: {}", path.to_string_lossy(), e))?;
+        removed += 1;
+    }
+
+    Ok(removed)
+}
+
+#[tauri::command]
+async fn get_storage_usage(app: tauri::AppHandle) -> Result<StorageStats, String> {
+    let root = PathBuf::from(ensure_workspace_dirs(&app).await?);
+    let db_path = root.join("Database").join("eva.db");
+    let notes_path = root.join("Notes");
+    let resources_path = root.join("Resources");
+    let logs_path = root.join("Logs");
+
+    let db_bytes = directory_size_bytes(&db_path);
+    let notes_bytes = directory_size_bytes(&notes_path);
+    let resources_bytes = directory_size_bytes(&resources_path);
+    let logs_bytes = directory_size_bytes(&logs_path);
+    let total_bytes = db_bytes
+        .saturating_add(notes_bytes)
+        .saturating_add(resources_bytes)
+        .saturating_add(logs_bytes);
+
+    Ok(StorageStats {
+        db_bytes,
+        notes_bytes,
+        resources_bytes,
+        logs_bytes,
+        total_bytes,
+    })
+}
+
+#[tauri::command]
+async fn clear_cache(app: tauri::AppHandle, cache_type: String) -> Result<String, String> {
+    let root = PathBuf::from(ensure_workspace_dirs(&app).await?);
+    let notes_path = root.join("Notes");
+    let resources_path = root.join("Resources");
+    let logs_path = root.join("Logs");
+
+    let cache_key = cache_type.trim().to_lowercase();
+    let mut removed_files = 0usize;
+    let mut removed_dirs = 0usize;
+
+    match cache_key.as_str() {
+        "drafts" | "tasks" | "logs" => {
+            removed_files += clear_directory_contents(&logs_path)?;
+        }
+        "tree" => {
+            removed_dirs += prune_empty_directories(&notes_path, true)?;
+            removed_dirs += prune_empty_directories(&resources_path, true)?;
+        }
+        "file" | "files" => {
+            removed_files += clear_temp_like_files(&notes_path)?;
+            removed_files += clear_temp_like_files(&resources_path)?;
+            removed_files += clear_temp_like_files(&logs_path)?;
+        }
+        "all" => {
+            removed_files += clear_temp_like_files(&notes_path)?;
+            removed_files += clear_temp_like_files(&resources_path)?;
+            removed_files += clear_temp_like_files(&logs_path)?;
+            removed_dirs += prune_empty_directories(&notes_path, true)?;
+            removed_dirs += prune_empty_directories(&resources_path, true)?;
+            removed_files += clear_directory_contents(&logs_path)?;
+        }
+        _ => {
+            return Err(format!(
+                "Unsupported cache_type: {} (allowed: drafts/tree/file/tasks/logs/all)",
+                cache_type
+            ));
+        }
+    }
+
+    Ok(format!(
+        "清理完成：删除文件 {} 个，清理空目录 {} 个。",
+        removed_files, removed_dirs
+    ))
+}
+
+#[tauri::command]
+async fn reset_all_data(
+    app: tauri::AppHandle,
+    db: State<'_, Arc<Mutex<AppDb>>>,
+) -> Result<String, String> {
+    {
+        let db = db.lock().await;
+        let mut tx = db
+            .db
+            .begin()
+            .await
+            .map_err(|e| format!("Failed to begin reset transaction: {}", e))?;
+
+        let delete_sql = [
+            "DELETE FROM ai_messages",
+            "DELETE FROM ai_sessions",
+            "DELETE FROM tasks",
+            "DELETE FROM focus_sessions",
+            "DELETE FROM video_bookmarks",
+            "DELETE FROM resources",
+            "DELETE FROM questions",
+        ];
+
+        for sql in delete_sql {
+            sqlx::query(sql)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| format!("Failed to execute `{}`: {}", sql, e))?;
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| format!("Failed to commit reset transaction: {}", e))?;
+    }
+
+    let root = PathBuf::from(ensure_workspace_dirs(&app).await?);
+    let notes_path = root.join("Notes");
+    let resources_path = root.join("Resources");
+    let logs_path = root.join("Logs");
+
+    let removed_notes = clear_directory_contents(&notes_path)?;
+    let removed_resources = clear_directory_contents(&resources_path)?;
+    let removed_logs = clear_directory_contents(&logs_path)?;
+
+    Ok(format!(
+        "系统重置完成：数据库已清空，Notes 删除 {} 项，Resources 删除 {} 项，Logs 删除 {} 项。",
+        removed_notes, removed_resources, removed_logs
+    ))
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct NotesFsNode {
     name: String,
     path: String,
@@ -2977,6 +3242,9 @@ pub fn run() {
             scan_notes_directory,
             get_logs_dir,
             get_resources_dir,
+            get_storage_usage,
+            clear_cache,
+            reset_all_data,
             copy_file_to_notes,
             copy_files_to_notes,
             batch_delete_notes_files,

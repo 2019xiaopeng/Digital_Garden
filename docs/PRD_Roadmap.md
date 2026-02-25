@@ -18,6 +18,7 @@
 - Axum 已新增 Tasks REST：`GET/POST /api/tasks`、`PUT/DELETE /api/tasks/{id}`
 - Tasks 番茄钟在 Web 端已具备 Fullscreen API 优雅降级（不支持时自动回退页面内全屏）
 - Phase 3 最终冲刺已完成：Dashboard 消除 Web 端原生调用白屏风险，Notes/Resources 跨端阅读闭环落地
+- Phase 4 系统收尾已启动：Settings 的考研目标与隐私面板去 Mock，接入真实持久化与本地清理命令
 
 **功能来源分类标记**：
 - 🟢 **已完成** — 代码与 UI 均已就位，日常可用
@@ -219,9 +220,9 @@
 
 ---
 
-### 3.7 系统设置 · Settings 🟢（部分 🟡）
+### 3.7 系统设置 · Settings 🟢
 
-**状态：10/10 标签页已有真实页面，其中 sync 已进入后端联调阶段**
+**状态：10/10 标签页已进入真实可用阶段（含 sync / exam / privacy）**
 
 | 标签页 | 说明 | 状态 |
 |--------|------|------|
@@ -233,8 +234,8 @@
 | 快捷键 (shortcut) | 静态快捷键列表展示 | 🟢 |
 | 关于 (about) | 版本信息 | 🟢 |
 | **同步与备份 (sync)** | **已接真实局域网 IP 与服务开关，支持本地服务启停** | 🟢 |
-| **考研目标 (exam)** | **骨架表单已落地，待接持久化后端** | 🟡 |
-| **隐私与安全 (privacy)** | **骨架面板已落地，待接真实统计与清理命令** | 🟡 |
+| **考研目标 (exam)** | **已接真实持久化字段（目标院校/考试日期/各科目标分）并支持回显** | 🟢 |
+| **隐私与安全 (privacy)** | **已接真实存储统计、分类清理与一键重置（含确认拦截）** | 🟢 |
 
 ---
 
@@ -254,6 +255,7 @@
 | 知识库操作 | 8 | copy/batch_copy/delete/batch_delete/move/batch_move/write/create_folder |
 | 资源操作 | 5 | get/add/delete + batch_copy_files + batch_copy_folder |
 | MD 导入 | 1 | parse_markdown_plan |
+| 系统维护 | 3 | get_storage_usage + clear_cache + reset_all_data |
 
 **局域网服务现状**：已从空壳升级为可运行 Axum 服务，包含 `/api/ping`、`/api/quiz/all`、`/api/quiz/due` 与静态页面托管。
 

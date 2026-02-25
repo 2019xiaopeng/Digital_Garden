@@ -1,4 +1,4 @@
-import { type ComponentType, useEffect, useState } from "react";
+import { type ComponentType, useCallback, useEffect, useMemo, useState } from "react";
 import {
   AlarmClock,
   Bell,
@@ -46,6 +46,14 @@ type NavItem = {
   icon: ComponentType<{ className?: string }>;
 };
 
+type StorageStats = {
+  db_bytes: number;
+  notes_bytes: number;
+  resources_bytes: number;
+  logs_bytes: number;
+  total_bytes: number;
+};
+
 const navItems: NavItem[] = [
   { key: "general", label: "通用设置", icon: Gauge },
   { key: "appearance", label: "外观与主题", icon: Palette },
@@ -84,6 +92,44 @@ export function Settings() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [localIp, setLocalIp] = useState("127.0.0.1");
   const [lanShareLoading, setLanShareLoading] = useState(false);
+  const [storageStats, setStorageStats] = useState<StorageStats | null>(null);
+  const [storageLoading, setStorageLoading] = useState(false);
+  const [maintenanceAction, setMaintenanceAction] = useState<string | null>(null);
+
+  const formatBytes = (bytes: number) => {
+    if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    let size = bytes;
+    let idx = 0;
+    while (size >= 1024 && idx < units.length - 1) {
+      size /= 1024;
+      idx += 1;
+    }
+    return `${size.toFixed(idx === 0 ? 0 : 1)} ${units[idx]}`;
+  };
+
+  const examCountdownDays = useMemo(() => {
+    if (!settings.examDate) return null;
+    const exam = new Date(`${settings.examDate}T00:00:00`);
+    if (Number.isNaN(exam.getTime())) return null;
+    const now = new Date();
+    const diffMs = exam.getTime() - now.getTime();
+    return Math.max(0, Math.ceil(diffMs / (1000 * 60 * 60 * 24)));
+  }, [settings.examDate]);
+
+  const loadStorageUsage = useCallback(async () => {
+    setStorageLoading(true);
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const stats = await invoke<StorageStats>("get_storage_usage");
+      setStorageStats(stats);
+    } catch (error) {
+      console.error("[Settings] Failed to load storage usage:", error);
+      setActionError(`读取存储用量失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setStorageLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -124,6 +170,10 @@ export function Settings() {
       mounted = false;
     };
   }, []);
+
+  useEffect(() => {
+    loadStorageUsage();
+  }, [loadStorageUsage]);
 
   useEffect(() => {
     let mounted = true;
@@ -234,6 +284,46 @@ export function Settings() {
       setActionError(`局域网共享切换失败：${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setLanShareLoading(false);
+    }
+  };
+
+  const handleClearCache = async (cacheType: string, label: string) => {
+    if (!window.confirm(`确认执行「${label}」？该操作会清理对应本地数据，且不可恢复。`)) {
+      return;
+    }
+    setMaintenanceAction(cacheType);
+    setActionError(null);
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const message = await invoke<string>("clear_cache", { cacheType });
+      setSaved(true);
+      setTimeout(() => setSaved(false), 1200);
+      setActionError(message);
+      await loadStorageUsage();
+    } catch (error) {
+      console.error("[Settings] Failed to clear cache:", error);
+      setActionError(`清理失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setMaintenanceAction(null);
+    }
+  };
+
+  const handleResetAllData = async () => {
+    if (!window.confirm("⚠️ 高危操作：将清空数据库内容、知识库与资源站文件。是否继续？")) return;
+    if (!window.confirm("请再次确认：该操作不可恢复，确定执行一键重置？")) return;
+
+    setMaintenanceAction("reset");
+    setActionError(null);
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const message = await invoke<string>("reset_all_data");
+      setActionError(message);
+      await loadStorageUsage();
+    } catch (error) {
+      console.error("[Settings] Failed to reset all data:", error);
+      setActionError(`重置失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setMaintenanceAction(null);
     }
   };
 
@@ -524,16 +614,30 @@ export function Settings() {
       <div className="glass-card rounded-2xl p-5 grid grid-cols-1 md:grid-cols-2 gap-4">
         <div>
           <label className="text-xs font-semibold text-gray-500">目标院校</label>
-          <input defaultValue="浙江大学 计算机学院" className={inputClass} />
+          <input
+            value={settings.targetUniversity}
+            onChange={(e) => setSettings({ ...settings, targetUniversity: e.target.value })}
+            placeholder="例如：浙江大学 计算机学院"
+            className={inputClass}
+          />
         </div>
         <div>
           <label className="text-xs font-semibold text-gray-500">总分目标</label>
-          <input type="number" defaultValue={380} className={inputClass} />
+          <input type="number" value={settings.targetScores.politics + settings.targetScores.english + settings.targetScores.math + settings.targetScores.major} readOnly className={inputClass} />
         </div>
         <div className="md:col-span-2">
           <label className="text-xs font-semibold text-gray-500">考试日期</label>
-          <input type="date" defaultValue="2026-12-20" className={inputClass} />
+          <input
+            type="date"
+            value={settings.examDate}
+            onChange={(e) => setSettings({ ...settings, examDate: e.target.value })}
+            className={inputClass}
+          />
         </div>
+      </div>
+
+      <div className="glass-card rounded-2xl p-5">
+        <p className="text-sm text-gray-600 dark:text-gray-300">距离考研还剩 <span className="font-bold text-[#FF9900]">{examCountdownDays ?? "--"}</span> 天</p>
       </div>
 
       <div className="glass-card rounded-2xl p-5">
@@ -541,19 +645,19 @@ export function Settings() {
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <div>
             <label className="text-xs text-gray-500">408</label>
-            <input type="number" defaultValue={120} className={inputClass} />
+            <input type="number" value={settings.targetScores.major} onChange={(e) => setSettings({ ...settings, targetScores: { ...settings.targetScores, major: Number(e.target.value || 0) } })} className={inputClass} />
           </div>
           <div>
             <label className="text-xs text-gray-500">数一</label>
-            <input type="number" defaultValue={130} className={inputClass} />
+            <input type="number" value={settings.targetScores.math} onChange={(e) => setSettings({ ...settings, targetScores: { ...settings.targetScores, math: Number(e.target.value || 0) } })} className={inputClass} />
           </div>
           <div>
             <label className="text-xs text-gray-500">英一</label>
-            <input type="number" defaultValue={75} className={inputClass} />
+            <input type="number" value={settings.targetScores.english} onChange={(e) => setSettings({ ...settings, targetScores: { ...settings.targetScores, english: Number(e.target.value || 0) } })} className={inputClass} />
           </div>
           <div>
             <label className="text-xs text-gray-500">政治</label>
-            <input type="number" defaultValue={70} className={inputClass} />
+            <input type="number" value={settings.targetScores.politics} onChange={(e) => setSettings({ ...settings, targetScores: { ...settings.targetScores, politics: Number(e.target.value || 0) } })} className={inputClass} />
           </div>
         </div>
       </div>
@@ -565,41 +669,72 @@ export function Settings() {
       <h2 className="text-xl font-bold text-gray-900 dark:text-white">隐私与安全</h2>
 
       <div className="glass-card rounded-2xl p-5">
-        <p className="text-sm font-semibold text-gray-900 dark:text-white mb-3">存储用量面板（占位）</p>
+        <div className="mb-3 flex items-center justify-between">
+          <p className="text-sm font-semibold text-gray-900 dark:text-white">存储用量面板</p>
+          <button
+            type="button"
+            onClick={loadStorageUsage}
+            disabled={storageLoading}
+            className="px-3 py-1.5 rounded-lg text-xs font-semibold border border-gray-200/80 dark:border-[#30435c] text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#1b2a41] disabled:opacity-60"
+          >
+            {storageLoading ? "刷新中..." : "刷新"}
+          </button>
+        </div>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
           <div className="rounded-xl border border-gray-200/80 dark:border-[#30435c] px-4 py-3 bg-white/80 dark:bg-[#0f1826]/70">
             <p className="text-gray-500">SQLite</p>
-            <p className="font-semibold text-gray-900 dark:text-white">12.4 MB</p>
+            <p className="font-semibold text-gray-900 dark:text-white">{formatBytes(storageStats?.db_bytes || 0)}</p>
           </div>
           <div className="rounded-xl border border-gray-200/80 dark:border-[#30435c] px-4 py-3 bg-white/80 dark:bg-[#0f1826]/70">
-            <p className="text-gray-500">文件系统</p>
-            <p className="font-semibold text-gray-900 dark:text-white">486.2 MB</p>
+            <p className="text-gray-500">知识库 + 资源站</p>
+            <p className="font-semibold text-gray-900 dark:text-white">{formatBytes((storageStats?.notes_bytes || 0) + (storageStats?.resources_bytes || 0))}</p>
           </div>
           <div className="rounded-xl border border-gray-200/80 dark:border-[#30435c] px-4 py-3 bg-white/80 dark:bg-[#0f1826]/70">
-            <p className="text-gray-500">localStorage</p>
-            <p className="font-semibold text-gray-900 dark:text-white">0.8 MB</p>
+            <p className="text-gray-500">日志</p>
+            <p className="font-semibold text-gray-900 dark:text-white">{formatBytes(storageStats?.logs_bytes || 0)}</p>
           </div>
         </div>
+        <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">总占用：{formatBytes(storageStats?.total_bytes || 0)}</p>
       </div>
 
       <div className="glass-card rounded-2xl p-5 space-y-3">
         <p className="text-sm font-semibold text-gray-900 dark:text-white">分类清理</p>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          <button className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-gray-200/80 dark:border-[#30435c] hover:bg-gray-100 dark:hover:bg-[#1b2a41] text-sm text-gray-700 dark:text-gray-200 transition-colors">
+          <button
+            onClick={() => handleClearCache("drafts", "清理草稿")}
+            disabled={maintenanceAction !== null}
+            className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-gray-200/80 dark:border-[#30435c] hover:bg-gray-100 dark:hover:bg-[#1b2a41] text-sm text-gray-700 dark:text-gray-200 transition-colors disabled:opacity-60"
+          >
             <Trash2 className="w-4 h-4" /> 清理草稿
           </button>
-          <button className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-gray-200/80 dark:border-[#30435c] hover:bg-gray-100 dark:hover:bg-[#1b2a41] text-sm text-gray-700 dark:text-gray-200 transition-colors">
+          <button
+            onClick={() => handleClearCache("tree", "清理树缓存")}
+            disabled={maintenanceAction !== null}
+            className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-gray-200/80 dark:border-[#30435c] hover:bg-gray-100 dark:hover:bg-[#1b2a41] text-sm text-gray-700 dark:text-gray-200 transition-colors disabled:opacity-60"
+          >
             <Trash2 className="w-4 h-4" /> 清理树缓存
           </button>
-          <button className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-gray-200/80 dark:border-[#30435c] hover:bg-gray-100 dark:hover:bg-[#1b2a41] text-sm text-gray-700 dark:text-gray-200 transition-colors">
+          <button
+            onClick={() => handleClearCache("file", "清理文件缓存")}
+            disabled={maintenanceAction !== null}
+            className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-gray-200/80 dark:border-[#30435c] hover:bg-gray-100 dark:hover:bg-[#1b2a41] text-sm text-gray-700 dark:text-gray-200 transition-colors disabled:opacity-60"
+          >
             <Trash2 className="w-4 h-4" /> 清理文件缓存
           </button>
-          <button className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-gray-200/80 dark:border-[#30435c] hover:bg-gray-100 dark:hover:bg-[#1b2a41] text-sm text-gray-700 dark:text-gray-200 transition-colors">
+          <button
+            onClick={() => handleClearCache("tasks", "清理任务回退")}
+            disabled={maintenanceAction !== null}
+            className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-gray-200/80 dark:border-[#30435c] hover:bg-gray-100 dark:hover:bg-[#1b2a41] text-sm text-gray-700 dark:text-gray-200 transition-colors disabled:opacity-60"
+          >
             <Trash2 className="w-4 h-4" /> 清理任务回退
           </button>
         </div>
-        <button className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-sm font-semibold transition-colors">
-          <Trash2 className="w-4 h-4" /> 一键清空
+        <button
+          onClick={handleResetAllData}
+          disabled={maintenanceAction !== null}
+          className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-sm font-semibold transition-colors disabled:opacity-70"
+        >
+          <Trash2 className="w-4 h-4" /> {maintenanceAction === "reset" ? "清空中..." : "一键清空"}
         </button>
       </div>
     </section>
