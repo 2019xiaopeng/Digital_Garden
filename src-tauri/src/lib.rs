@@ -338,67 +338,228 @@ async fn batch_create_tasks(tasks: Vec<Task>, db: State<'_, Arc<Mutex<AppDb>>>) 
 // Daily Log CRUD Commands
 // ═══════════════════════════════════════════════════════════
 
-#[tauri::command]
-async fn get_daily_logs(db: State<'_, Arc<Mutex<AppDb>>>) -> Result<Vec<DailyLog>, String> {
-    let db = db.lock().await;
-    let rows = sqlx::query_as::<_, DailyLog>(
-        "SELECT id, date, title, content, mood, sync_rate, tags, auto_generated, created_at, updated_at FROM daily_logs ORDER BY date DESC"
+fn parse_frontmatter_value<'a>(lines: &'a [String], key: &str) -> Option<&'a str> {
+    lines
+        .iter()
+        .find_map(|line| line.strip_prefix(&format!("{}:", key)).map(|v| v.trim()))
+}
+
+fn parse_daily_log_markdown(raw: &str, fallback_date: &str) -> DailyLog {
+    let mut frontmatter: Vec<String> = Vec::new();
+    let mut body = raw.to_string();
+
+    if raw.starts_with("---\n") {
+        let mut parts = raw.splitn(3, "---\n");
+        let _ = parts.next();
+        if let (Some(fm), Some(rest)) = (parts.next(), parts.next()) {
+            frontmatter = fm.lines().map(|s| s.trim().to_string()).collect();
+            body = rest.to_string();
+        }
+    }
+
+    let id = parse_frontmatter_value(&frontmatter, "id")
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| fallback_date.to_string());
+    let date = parse_frontmatter_value(&frontmatter, "date")
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| fallback_date.to_string());
+    let title = parse_frontmatter_value(&frontmatter, "title")
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| format!("留痕 {}", fallback_date));
+    let mood = parse_frontmatter_value(&frontmatter, "mood")
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "neutral".to_string());
+    let sync_rate = parse_frontmatter_value(&frontmatter, "sync_rate")
+        .and_then(|v| v.parse::<i32>().ok())
+        .unwrap_or(80);
+    let tags = parse_frontmatter_value(&frontmatter, "tags")
+        .map(|v| v.to_string())
+        .unwrap_or_default();
+    let auto_generated = parse_frontmatter_value(&frontmatter, "auto_generated")
+        .map(|v| v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let created_at = parse_frontmatter_value(&frontmatter, "created_at")
+        .map(|v| v.to_string())
+        .unwrap_or_else(now_iso);
+    let updated_at = parse_frontmatter_value(&frontmatter, "updated_at")
+        .map(|v| v.to_string())
+        .unwrap_or_else(now_iso);
+
+    DailyLog {
+        id,
+        date,
+        title,
+        content: body.trim_start_matches('\n').to_string(),
+        mood,
+        sync_rate,
+        tags,
+        auto_generated,
+        created_at,
+        updated_at,
+    }
+}
+
+fn daily_log_to_markdown(log: &DailyLog) -> String {
+    format!(
+        "---\nid: {}\ndate: {}\ntitle: {}\nmood: {}\nsync_rate: {}\ntags: {}\nauto_generated: {}\ncreated_at: {}\nupdated_at: {}\n---\n\n{}\n",
+        log.id,
+        log.date,
+        log.title,
+        log.mood,
+        log.sync_rate,
+        log.tags,
+        if log.auto_generated { "true" } else { "false" },
+        log.created_at,
+        log.updated_at,
+        log.content
     )
-    .fetch_all(&db.db)
-    .await
-    .map_err(|e| format!("Failed to fetch daily logs: {}", e))?;
-    Ok(rows)
+}
+
+fn date_file_name(date: &str) -> String {
+    let safe = date.trim().replace('/', "-").replace('\\', "-");
+    format!("{}.md", safe)
+}
+
+fn now_iso() -> String {
+    let now = std::time::SystemTime::now();
+    chrono_utc_iso(now)
+}
+
+fn chrono_utc_iso(now: std::time::SystemTime) -> String {
+    let since_epoch = now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let secs = since_epoch.as_secs();
+    format!("{}", secs)
 }
 
 #[tauri::command]
-async fn create_daily_log(log: DailyLog, db: State<'_, Arc<Mutex<AppDb>>>) -> Result<DailyLog, String> {
-    let db = db.lock().await;
-    sqlx::query(
-        "INSERT INTO daily_logs (id, date, title, content, mood, sync_rate, tags, auto_generated, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-    )
-    .bind(&log.id)
-    .bind(&log.date)
-    .bind(&log.title)
-    .bind(&log.content)
-    .bind(&log.mood)
-    .bind(&log.sync_rate)
-    .bind(&log.tags)
-    .bind(log.auto_generated)
-    .bind(&log.created_at)
-    .bind(&log.updated_at)
-    .execute(&db.db)
-    .await
-    .map_err(|e| format!("Failed to create daily log: {}", e))?;
-    Ok(log)
-}
-
-#[tauri::command]
-async fn update_daily_log(log: DailyLog, db: State<'_, Arc<Mutex<AppDb>>>) -> Result<DailyLog, String> {
-    let db = db.lock().await;
-    sqlx::query(
-        "UPDATE daily_logs SET title=?, content=?, mood=?, sync_rate=?, tags=?, updated_at=? WHERE id=?"
-    )
-    .bind(&log.title)
-    .bind(&log.content)
-    .bind(&log.mood)
-    .bind(&log.sync_rate)
-    .bind(&log.tags)
-    .bind(&log.updated_at)
-    .bind(&log.id)
-    .execute(&db.db)
-    .await
-    .map_err(|e| format!("Failed to update daily log: {}", e))?;
-    Ok(log)
-}
-
-#[tauri::command]
-async fn delete_daily_log(id: String, db: State<'_, Arc<Mutex<AppDb>>>) -> Result<(), String> {
-    let db = db.lock().await;
-    sqlx::query("DELETE FROM daily_logs WHERE id = ?")
-        .bind(&id)
-        .execute(&db.db)
+async fn get_daily_logs(app: tauri::AppHandle) -> Result<Vec<DailyLog>, String> {
+    let root = PathBuf::from(ensure_workspace_dirs(&app).await?);
+    let logs_dir = root.join("Logs");
+    fs::create_dir_all(&logs_dir)
         .await
-        .map_err(|e| format!("Failed to delete daily log: {}", e))?;
+        .map_err(|e| format!("Failed to ensure logs dir {}: {}", logs_dir.to_string_lossy(), e))?;
+
+    let mut entries = fs::read_dir(&logs_dir)
+        .await
+        .map_err(|e| format!("Failed to read logs dir {}: {}", logs_dir.to_string_lossy(), e))?;
+
+    let mut logs: Vec<DailyLog> = Vec::new();
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|e| format!("Failed to iterate logs dir: {}", e))?
+    {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+
+        let fallback_date = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        let raw = fs::read_to_string(&path)
+            .await
+            .map_err(|e| format!("Failed to read log file {}: {}", path.to_string_lossy(), e))?;
+        logs.push(parse_daily_log_markdown(&raw, &fallback_date));
+    }
+
+    logs.sort_by(|a, b| b.date.cmp(&a.date));
+    Ok(logs)
+}
+
+#[tauri::command]
+async fn create_daily_log(app: tauri::AppHandle, mut log: DailyLog) -> Result<DailyLog, String> {
+    let root = PathBuf::from(ensure_workspace_dirs(&app).await?);
+    let logs_dir = root.join("Logs");
+    fs::create_dir_all(&logs_dir)
+        .await
+        .map_err(|e| format!("Failed to ensure logs dir {}: {}", logs_dir.to_string_lossy(), e))?;
+
+    if log.date.trim().is_empty() {
+        return Err("Daily log date is required".to_string());
+    }
+
+    if log.id.trim().is_empty() {
+        log.id = log.date.clone();
+    }
+    if log.created_at.trim().is_empty() {
+        log.created_at = now_iso();
+    }
+    if log.updated_at.trim().is_empty() {
+        log.updated_at = now_iso();
+    }
+
+    let file_path = logs_dir.join(date_file_name(&log.date));
+    let markdown = daily_log_to_markdown(&log);
+    fs::write(&file_path, markdown)
+        .await
+        .map_err(|e| format!("Failed to write log file {}: {}", file_path.to_string_lossy(), e))?;
+
+    Ok(log)
+}
+
+#[tauri::command]
+async fn update_daily_log(app: tauri::AppHandle, mut log: DailyLog) -> Result<DailyLog, String> {
+    if log.date.trim().is_empty() {
+        return Err("Daily log date is required".to_string());
+    }
+    if log.id.trim().is_empty() {
+        log.id = log.date.clone();
+    }
+    if log.updated_at.trim().is_empty() {
+        log.updated_at = now_iso();
+    }
+
+    create_daily_log(app, log).await
+}
+
+#[tauri::command]
+async fn delete_daily_log(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    let root = PathBuf::from(ensure_workspace_dirs(&app).await?);
+    let logs_dir = root.join("Logs");
+    fs::create_dir_all(&logs_dir)
+        .await
+        .map_err(|e| format!("Failed to ensure logs dir {}: {}", logs_dir.to_string_lossy(), e))?;
+
+    let direct_path = logs_dir.join(date_file_name(&id));
+    if fs::metadata(&direct_path).await.is_ok() {
+        fs::remove_file(&direct_path)
+            .await
+            .map_err(|e| format!("Failed to delete log file {}: {}", direct_path.to_string_lossy(), e))?;
+        return Ok(());
+    }
+
+    let mut entries = fs::read_dir(&logs_dir)
+        .await
+        .map_err(|e| format!("Failed to read logs dir {}: {}", logs_dir.to_string_lossy(), e))?;
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|e| format!("Failed to iterate logs dir: {}", e))?
+    {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let fallback_date = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        let raw = fs::read_to_string(&path)
+            .await
+            .map_err(|e| format!("Failed to read log file {}: {}", path.to_string_lossy(), e))?;
+        let parsed = parse_daily_log_markdown(&raw, &fallback_date);
+        if parsed.id == id {
+            fs::remove_file(&path)
+                .await
+                .map_err(|e| format!("Failed to delete log file {}: {}", path.to_string_lossy(), e))?;
+            return Ok(());
+        }
+    }
+
     Ok(())
 }
 
@@ -750,6 +911,7 @@ async fn fetch_bilibili_metadata(bvid: String) -> Result<BilibiliMetadata, Strin
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         )
         .header(reqwest::header::REFERER, "https://www.bilibili.com")
+        .header(reqwest::header::ACCEPT, "application/json,text/plain,*/*")
         .send()
         .await
         .map_err(|e| format!("Failed to request bilibili api: {}", e))?;

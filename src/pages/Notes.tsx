@@ -60,6 +60,7 @@ export function Notes() {
   // Drag-and-drop state
   const [draggedNodeId, setDraggedNodeId] = useState<string | null>(null);
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; nodeId: string } | null>(null);
 
   // File preview state
   const [fileContent, setFileContent] = useState<string | null>(null);
@@ -83,6 +84,21 @@ export function Notes() {
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [chatHistory]);
+
+  useEffect(() => {
+    const closeMenu = () => setContextMenu(null);
+    const onEsc = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setContextMenu(null);
+      }
+    };
+    window.addEventListener("click", closeMenu);
+    window.addEventListener("keydown", onEsc);
+    return () => {
+      window.removeEventListener("click", closeMenu);
+      window.removeEventListener("keydown", onEsc);
+    };
+  }, []);
 
   // Load file content when viewing a file
   useEffect(() => {
@@ -181,6 +197,21 @@ export function Notes() {
       return;
     }
     setViewingFile(node);
+  };
+
+  const handleNodeContextMenu = (e: React.MouseEvent, node: TreeNode) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    if (node.type !== "file") {
+      setContextMenu(null);
+      return;
+    }
+
+    setSelectedNodeIds([node.id]);
+    setActiveNodeId(node.id);
+    setSelectionAnchorId(node.id);
+    setContextMenu({ x: e.clientX, y: e.clientY, nodeId: node.id });
   };
 
   const handleCreateFolder = async (folderName?: string) => {
@@ -906,6 +937,7 @@ export function Notes() {
       return (
         <div key={node.id}>
           <div 
+            data-node-row="true"
             className={cn(
               "flex items-center gap-1.5 py-1.5 px-2 rounded-lg cursor-pointer transition-all text-sm",
               isSelected ? "bg-[#88B5D3]/10 dark:bg-[#88B5D3]/20 text-[#88B5D3] dark:text-[#88B5D3]" : "hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-700 dark:text-gray-300",
@@ -922,6 +954,7 @@ export function Notes() {
             onDragOver={node.type === "folder" ? (e) => handleDragOver(e, node.id) : undefined}
             onDragLeave={node.type === "folder" ? handleDragLeave : undefined}
             onDrop={node.type === "folder" ? (e) => handleDropOnFolder(e, node.id) : undefined}
+            onContextMenu={(e) => handleNodeContextMenu(e, node)}
           >
             {node.type === "folder" ? (
               <>
@@ -954,7 +987,16 @@ export function Notes() {
   };
 
   return (
-    <div className="h-[calc(100vh-2rem)] flex flex-col animate-in fade-in slide-in-from-bottom-4 duration-700 ease-out">
+    <div
+      className="h-[calc(100vh-2rem)] flex flex-col animate-in fade-in slide-in-from-bottom-4 duration-700 ease-out"
+      onContextMenu={(e) => {
+        e.preventDefault();
+        const target = e.target as HTMLElement;
+        if (!target.closest('[data-node-row="true"]')) {
+          setContextMenu(null);
+        }
+      }}
+    >
       <header className="flex items-center justify-between mb-6 flex-shrink-0">
         <div>
           <h1 className="text-3xl font-bold tracking-tight text-gray-900 dark:text-white">知识库</h1>
@@ -1333,6 +1375,61 @@ export function Notes() {
           </div>
         </div>
       )}
+      {contextMenu && (() => {
+        const node = findNode(treeData, contextMenu.nodeId);
+        if (!node || node.type !== "file") return null;
+        return (
+          <div
+            className="fixed z-[120] min-w-[160px] rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-[#101a29] shadow-xl p-1"
+            style={{ left: contextMenu.x, top: contextMenu.y }}
+            onClick={(e) => e.stopPropagation()}
+            onContextMenu={(e) => e.preventDefault()}
+          >
+            <button
+              className="w-full text-left px-3 py-2 text-sm rounded-lg text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-[#1a2a40]"
+              onClick={() => {
+                setViewingFile(node);
+                setContextMenu(null);
+              }}
+            >
+              打开
+            </button>
+            <button
+              className="w-full text-left px-3 py-2 text-sm rounded-lg text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-[#1a2a40]"
+              onClick={() => {
+                setSelectedNodeIds([node.id]);
+                setActiveNodeId(node.id);
+                handleRenameNode();
+                setContextMenu(null);
+              }}
+            >
+              重命名
+            </button>
+            <button
+              className="w-full text-left px-3 py-2 text-sm rounded-lg text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10"
+              onClick={() => {
+                setSelectedNodeIds([node.id]);
+                setActiveNodeId(node.id);
+                setShowDeleteConfirm(true);
+                setContextMenu(null);
+              }}
+            >
+              删除
+            </button>
+            <button
+              className="w-full text-left px-3 py-2 text-sm rounded-lg text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-[#1a2a40]"
+              onClick={() => {
+                setSelectedNodeIds([node.id]);
+                setActiveNodeId(node.id);
+                setPromptMode("move");
+                setContextMenu(null);
+              }}
+            >
+              移动到...
+            </button>
+          </div>
+        );
+      })()}
     </div>
   );
 }

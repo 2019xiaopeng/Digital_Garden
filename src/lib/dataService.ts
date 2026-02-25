@@ -231,7 +231,6 @@ function inferDurations(tasks: ImportedTask[]): ImportedTask[] {
 
 const LS_TASKS = "qcb.tasks.v1";
 const LS_ATTENDANCE = "qcb.attendance.v1";
-const LS_POSTS = "qcb.posts.v1";
 
 // ═══════════════════════════════════════════════════════════
 // Task Service
@@ -368,99 +367,71 @@ export interface LegacyPost {
 export const DailyLogService = {
   async getAll(): Promise<LegacyPost[]> {
     const invoke = await getInvoke();
-    if (invoke) {
-      try {
-        const logs = (await invoke("get_daily_logs")) as DailyLog[];
-        return logs.map(l => ({
-          id: l.id,
-          title: l.title,
-          excerpt: l.content,
-          date: l.date,
-          readTime: "1 min read",
-          category: l.auto_generated ? "Auto" : "Manual",
-          tags: l.tags ? l.tags.split(",").filter(Boolean) : [],
-          mood: l.mood,
-          syncRate: l.sync_rate,
-        }));
-      } catch (e) {
-        console.warn("Tauri get_daily_logs failed:", e);
-      }
+    if (!invoke) {
+      throw new Error("Daily logs require Tauri desktop runtime");
     }
-    try {
-      const raw = localStorage.getItem(LS_POSTS);
-      return raw ? JSON.parse(raw) : [];
-    } catch { return []; }
+    const logs = (await invoke("get_daily_logs")) as DailyLog[];
+    return logs.map(l => ({
+      id: l.id,
+      title: l.title,
+      excerpt: l.content,
+      date: l.date,
+      readTime: "1 min read",
+      category: l.auto_generated ? "Auto" : "Manual",
+      tags: l.tags ? l.tags.split(",").filter(Boolean) : [],
+      mood: l.mood,
+      syncRate: l.sync_rate,
+    }));
   },
 
   async create(post: LegacyPost): Promise<LegacyPost> {
     const invoke = await getInvoke();
-    if (invoke) {
-      try {
-        const log: DailyLog = {
-          id: post.id,
-          date: post.date,
-          title: post.title,
-          content: post.excerpt,
-          mood: post.mood as DailyLog["mood"],
-          sync_rate: post.syncRate,
-          tags: post.tags.join(","),
-          auto_generated: post.category === "Auto",
-          created_at: nowIso(),
-          updated_at: nowIso(),
-        };
-        await invoke("create_daily_log", { log });
-        return post;
-      } catch (e) {
-        console.warn("Tauri create_daily_log failed:", e);
-      }
+    if (!invoke) {
+      throw new Error("Daily logs require Tauri desktop runtime");
     }
-    const all = await this.getAll();
-    all.unshift(post);
-    localStorage.setItem(LS_POSTS, JSON.stringify(all));
-    return post;
+    const log: DailyLog = {
+      id: post.date,
+      date: post.date,
+      title: post.title,
+      content: post.excerpt,
+      mood: post.mood as DailyLog["mood"],
+      sync_rate: post.syncRate,
+      tags: post.tags.join(","),
+      auto_generated: post.category === "Auto",
+      created_at: nowIso(),
+      updated_at: nowIso(),
+    };
+    await invoke("create_daily_log", { log });
+    return { ...post, id: post.date };
   },
 
   async update(post: LegacyPost): Promise<LegacyPost> {
     const invoke = await getInvoke();
-    if (invoke) {
-      try {
-        const log: DailyLog = {
-          id: post.id,
-          date: post.date,
-          title: post.title,
-          content: post.excerpt,
-          mood: post.mood as DailyLog["mood"],
-          sync_rate: post.syncRate,
-          tags: post.tags.join(","),
-          auto_generated: false,
-          created_at: nowIso(),
-          updated_at: nowIso(),
-        };
-        await invoke("update_daily_log", { log });
-        return post;
-      } catch (e) {
-        console.warn("Tauri update_daily_log failed:", e);
-      }
+    if (!invoke) {
+      throw new Error("Daily logs require Tauri desktop runtime");
     }
-    const all = await this.getAll();
-    const idx = all.findIndex(p => p.id === post.id);
-    if (idx >= 0) all[idx] = post;
-    localStorage.setItem(LS_POSTS, JSON.stringify(all));
-    return post;
+    const log: DailyLog = {
+      id: post.date,
+      date: post.date,
+      title: post.title,
+      content: post.excerpt,
+      mood: post.mood as DailyLog["mood"],
+      sync_rate: post.syncRate,
+      tags: post.tags.join(","),
+      auto_generated: false,
+      created_at: nowIso(),
+      updated_at: nowIso(),
+    };
+    await invoke("update_daily_log", { log });
+    return { ...post, id: post.date };
   },
 
   async delete(id: string): Promise<void> {
     const invoke = await getInvoke();
-    if (invoke) {
-      try {
-        await invoke("delete_daily_log", { id });
-        return;
-      } catch (e) {
-        console.warn("Tauri delete_daily_log failed:", e);
-      }
+    if (!invoke) {
+      throw new Error("Daily logs require Tauri desktop runtime");
     }
-    const all = await this.getAll();
-    localStorage.setItem(LS_POSTS, JSON.stringify(all.filter(p => p.id !== id)));
+    await invoke("delete_daily_log", { id });
   },
 
   /** Auto-generate today's review entry from completed tasks */

@@ -173,8 +173,8 @@ export function Blog() {
         mood: newPost.mood,
         syncRate: newPost.syncRate
       };
-      await DailyLogService.update(updated);
-      setPosts(posts.map(p => p.id === editingPostId ? updated : p));
+      const saved = await DailyLogService.update(updated);
+      setPosts(posts.map(p => p.id === editingPostId ? saved : p));
     } else {
       const post: LegacyPost = {
         id: `post-${Date.now()}`,
@@ -187,8 +187,8 @@ export function Blog() {
         mood: newPost.mood,
         syncRate: newPost.syncRate
       };
-      await DailyLogService.create(post);
-      setPosts([post, ...posts]);
+      const saved = await DailyLogService.create(post);
+      setPosts([saved, ...posts]);
     }
     setIsWriting(false);
     setEditingPostId(null);
@@ -267,8 +267,8 @@ export function Blog() {
           mood: "focused",
           syncRate: Math.min(100, Math.round((completedToday.length / Math.max(1, completedToday.length + 2)) * 100)),
         };
-        await DailyLogService.create(post);
-        setPosts([post, ...posts]);
+        const saved = await DailyLogService.create(post);
+        setPosts([saved, ...posts]);
       }
     } catch (e) {
       console.error("AI review failed:", e);
@@ -323,8 +323,9 @@ export function Blog() {
                 mood: "focused",
                 syncRate: 80,
               };
-              DailyLogService.create(post);
-              setPosts([post, ...posts]);
+              DailyLogService.create(post).then((saved) => {
+                setPosts((prev) => [saved, ...prev]);
+              }).catch(console.error);
             }}
             className="bg-white/90 dark:bg-[#111b29]/85 border border-[#88B5D3]/35 hover:bg-[#88B5D3]/10 text-[#88B5D3] px-4 py-2.5 rounded-2xl text-sm font-semibold transition-all"
           >
