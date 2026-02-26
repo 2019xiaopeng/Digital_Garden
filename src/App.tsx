@@ -14,6 +14,7 @@ import { Notes } from "./pages/Notes";
 import { Resources } from "./pages/Resources";
 import { Quiz } from "./pages/Quiz";
 import { Tasks } from "./pages/Tasks";
+import { WeeklyReview } from "./pages/WeeklyReview";
 import { Settings } from "./pages/Settings";
 import { isTauriAvailable } from "./lib/dataService";
 import { KnowledgeSelectionProvider } from "./context/KnowledgeSelectionContext";
@@ -78,6 +79,7 @@ export default function App() {
             <Route path="resources" element={<Resources />} />
             <Route path="quiz" element={<Quiz />} />
             <Route path="tasks" element={<Tasks />} />
+            <Route path="weekly" element={<WeeklyReview />} />
             <Route path="settings" element={<SettingsDesktopOnly />} />
           </Route>
         </Routes>

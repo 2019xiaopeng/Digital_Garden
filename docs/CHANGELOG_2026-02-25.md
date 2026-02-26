@@ -157,6 +157,19 @@
 - 前端桥接层 `apiBridge.ts` 新增：
   - `fetchWeeklyStats(endDate)`
   - 桌面端走 `invoke("get_weekly_stats")`，Web 局域网走 HTTP `/api/stats/weekly`。
+- 前端新增 `WeeklyReview` 页面（`/weekly`）：
+  - 顶层基准日选择器（`endDate`，默认当天）。
+  - 核心指标卡：本周总专注时长 + 本周任务完成率（环形进度）。
+  - 图表区接入 `recharts`，使用 `PieChart` 渲染 `subject_distribution`（EVA 配色）。
+- 新增「周度学情深度剖析」AI 模块：
+  - 按周统计数据自动构建 Prompt 并调用已有 `ai_proxy`。
+  - 输出以 Markdown 面板渲染，结构化呈现“数据诊断 / 偏科预警 / 下周行动”。
+- 全局导航接入完成：
+  - `App.tsx` 新增 `/weekly` 路由。
+  - 桌面端侧边栏新增「周复盘」入口。
+  - Web 移动端底部导航新增「周复盘」入口。
+- 前端依赖新增：
+  - `recharts`
 
 ### 说明
-- 该版本为 Phase 6 第一批基础能力，下一步将接入 Weekly Review 路由与图表渲染（雷达图/柱状图/趋势线）。
+- Phase 6 第一阶段「周统计 + 周复盘页面 + AI 剖析 + 导航入口」已闭环。
