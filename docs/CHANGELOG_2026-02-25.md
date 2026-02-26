@@ -136,3 +136,27 @@
 - `Blog`：
   - 一键生成今日留痕改为调用结构化模板（带数据快照、完成清单、复盘结论、明日三步）。
   - 一键 AI 复盘的提示词升级为“四段式输出”模板（今日结论/做对了什么/主要阻塞/明日行动），输出更可执行。
+
+---
+
+## v1.0.3 预发布（Phase 6 · 极简周复盘闭环启动，2026-02-26）
+
+### 已落地（本次）
+- `Tasks` 新增「一键克隆昨日任务」：
+  - 支持在任务快速输入区与空列表占位区直接触发。
+  - 以 `selectedDate - 1` 为源日期读取任务，批量创建到当前日期，默认状态为 `todo`。
+  - 克隆成功后提供 Toast 提示，并静默刷新列表。
+- Rust 后端新增周度聚合命令：
+  - `get_weekly_stats(end_date)`（Tauri Command）
+  - 统计过去 7 天：
+    - `total_focus_minutes`
+    - `completion_rate`
+    - `subject_distribution`（408/数学/英语/政治）
+- Axum 新增周度统计 API：
+  - `GET /api/stats/weekly?end_date=YYYY-MM-DD`
+- 前端桥接层 `apiBridge.ts` 新增：
+  - `fetchWeeklyStats(endDate)`
+  - 桌面端走 `invoke("get_weekly_stats")`，Web 局域网走 HTTP `/api/stats/weekly`。
+
+### 说明
+- 该版本为 Phase 6 第一批基础能力，下一步将接入 Weekly Review 路由与图表渲染（雷达图/柱状图/趋势线）。

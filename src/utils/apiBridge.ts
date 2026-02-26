@@ -62,6 +62,12 @@ export type DashboardStats = {
   dueCount: number;
 };
 
+export type WeeklyStats = {
+  total_focus_minutes: number;
+  completion_rate: number;
+  subject_distribution: Record<string, number>;
+};
+
 function isTauriRuntime(): boolean {
   if (typeof window === "undefined") return false;
   const win = window as Window & { __TAURI__?: unknown; __TAURI_INTERNALS__?: unknown };
@@ -362,4 +368,25 @@ export async function fetchResources(): Promise<ResourceItem[]> {
 
   const data = (await response.json()) as ResourceItem[];
   return Array.isArray(data) ? data : [];
+}
+
+export async function fetchWeeklyStats(endDate: string): Promise<WeeklyStats> {
+  if (!endDate.trim()) {
+    throw new Error("endDate 不能为空");
+  }
+
+  if (isTauriRuntime()) {
+    const invoke = await getInvoke();
+    return await invoke<WeeklyStats>("get_weekly_stats", { endDate });
+  }
+
+  const response = await fetch(
+    `${getLanBaseUrl()}/api/stats/weekly?end_date=${encodeURIComponent(endDate)}`
+  );
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`HTTP 请求失败 (${response.status}): ${text || response.statusText}`);
+  }
+
+  return (await response.json()) as WeeklyStats;
 }

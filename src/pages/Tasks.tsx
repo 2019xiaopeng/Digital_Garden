@@ -21,6 +21,12 @@ const getTodayStr = () => {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 };
 
+const getDateOffsetStr = (baseDate: string, offsetDays: number) => {
+  const d = new Date(baseDate);
+  d.setDate(d.getDate() + offsetDays);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
 export function Tasks() {
   const [activeTab, setActiveTab] = useState<"todo" | "calendar" | "timeline" | "gantt">("todo");
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -69,6 +75,12 @@ export function Tasks() {
   const [newTag, setNewTag] = useState("");
   const [quickTaskTitle, setQuickTaskTitle] = useState("");
   const [showAdvancedFields, setShowAdvancedFields] = useState(false);
+  const [cloneToast, setCloneToast] = useState<{ type: "success" | "error"; message: string } | null>(null);
+
+  const showCloneToast = useCallback((type: "success" | "error", message: string) => {
+    setCloneToast({ type, message });
+    window.setTimeout(() => setCloneToast(null), 1800);
+  }, []);
 
   const openEditModal = (task: Task) => {
     setEditingTaskId(task.id);
@@ -309,6 +321,34 @@ export function Tasks() {
       console.warn("Quick add task failed:", error);
     }
     setQuickTaskTitle("");
+  };
+
+  const handleCloneYesterdayTasks = async () => {
+    const sourceDate = getDateOffsetStr(selectedDate, -1);
+    try {
+      const sourceTasks = await fetchTasks(sourceDate);
+      if (!sourceTasks.length) {
+        showCloneToast("error", "昨日无可克隆任务");
+        return;
+      }
+
+      const now = Date.now();
+      const clonedTasks: Task[] = sourceTasks.map((task, index) => ({
+        ...task,
+        id: `${now}-clone-${index}-${Math.random().toString(36).slice(2, 8)}`,
+        date: selectedDate,
+        status: "todo",
+        repeat: "none",
+      }));
+
+      await Promise.all(clonedTasks.map((task) => addTask(task as LegacyTask)));
+      const updated = await fetchTasks();
+      setTasks(updated);
+      showCloneToast("success", `已克隆 ${clonedTasks.length} 个昨日任务`);
+    } catch (error) {
+      console.warn("Clone yesterday tasks failed:", error);
+      showCloneToast("error", "克隆失败，请稍后重试");
+    }
   };
 
   const postponeTaskOneDay = (id: string) => {
@@ -579,6 +619,12 @@ export function Tasks() {
                   >
                     一键创建
                   </button>
+                  <button
+                    onClick={handleCloneYesterdayTasks}
+                    className="px-5 py-3 rounded-xl bg-white/90 dark:bg-[#111b29]/85 border border-[#88B5D3]/35 hover:bg-[#88B5D3]/10 text-[#88B5D3] text-sm font-semibold transition-all"
+                  >
+                    一键克隆昨日任务
+                  </button>
                 </div>
                 <button 
                   onClick={() => setIsAddingTask(true)}
@@ -725,6 +771,12 @@ export function Tasks() {
                   <ListTodo className="w-12 h-12 mx-auto mb-3 opacity-30 text-[#88B5D3]" />
                   <p className="font-medium">当前暂无任务，开始你的同步率训练吧</p>
                   <p className="text-xs mt-2">可用 Ctrl/Cmd + N 快速新建任务</p>
+                  <button
+                    onClick={handleCloneYesterdayTasks}
+                    className="mt-5 px-4 py-2.5 rounded-xl bg-[#88B5D3] hover:bg-[#6f9fbe] text-white text-sm font-semibold transition-colors"
+                  >
+                    一键克隆昨日任务
+                  </button>
                 </div>
               ) : (
                 selectedDateTasks.map(task => {
@@ -1178,6 +1230,17 @@ export function Tasks() {
               <RotateCcw className={cn(isPomodoroFullscreen ? "w-6 h-6" : "w-4 h-4")} />
             </button>
           </div>
+        </div>
+      )}
+
+      {cloneToast && (
+        <div className={cn(
+          "fixed top-5 right-5 z-[70] px-4 py-2.5 rounded-xl text-sm font-semibold shadow-lg border backdrop-blur-md",
+          cloneToast.type === "success"
+            ? "bg-emerald-500/90 text-white border-emerald-400/70"
+            : "bg-red-500/90 text-white border-red-400/70"
+        )}>
+          {cloneToast.message}
         </div>
       )}
 

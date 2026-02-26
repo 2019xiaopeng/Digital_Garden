@@ -10,6 +10,7 @@ use mime_guess::from_path;
 use rust_embed::RustEmbed;
 use serde_json::json;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -326,8 +327,30 @@ struct TasksQuery {
 }
 
 #[derive(Debug, Deserialize)]
+struct WeeklyStatsQuery {
+    end_date: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct NotesFileQuery {
     path: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct WeeklyStats {
+    pub total_focus_minutes: i64,
+    pub completion_rate: f64,
+    pub subject_distribution: HashMap<String, f64>,
+}
+
+fn resolve_week_window(end_date: &str) -> Result<(String, String), String> {
+    let parsed_end = chrono::NaiveDate::parse_from_str(end_date, "%Y-%m-%d")
+        .map_err(|e| format!("Invalid end_date, expected YYYY-MM-DD: {}", e))?;
+    let start = parsed_end - chrono::Duration::days(6);
+    Ok((
+        start.format("%Y-%m-%d").to_string(),
+        parsed_end.format("%Y-%m-%d").to_string(),
+    ))
 }
 
 async fn db_fetch_all_questions(pool: &sqlx::SqlitePool) -> Result<Vec<Question>, String> {
@@ -445,6 +468,72 @@ async fn db_batch_create_tasks(pool: &sqlx::SqlitePool, tasks: &[Task]) -> Resul
         }
     }
     Ok(count)
+}
+
+async fn db_get_weekly_stats(pool: &sqlx::SqlitePool, end_date: &str) -> Result<WeeklyStats, String> {
+    let (start_date, end_date) = resolve_week_window(end_date)?;
+
+    let total_focus_seconds = sqlx::query_scalar::<_, i64>(
+        "SELECT COALESCE(SUM(total_focus_seconds), 0) FROM focus_sessions WHERE date BETWEEN ? AND ?",
+    )
+    .bind(&start_date)
+    .bind(&end_date)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| format!("Failed to aggregate focus sessions: {}", e))?;
+
+    let task_done_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COALESCE(SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END), 0) FROM tasks WHERE date BETWEEN ? AND ?",
+    )
+    .bind(&start_date)
+    .bind(&end_date)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| format!("Failed to aggregate done tasks: {}", e))?;
+
+    let task_total_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM tasks WHERE date BETWEEN ? AND ?",
+    )
+    .bind(&start_date)
+    .bind(&end_date)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| format!("Failed to aggregate total tasks: {}", e))?;
+
+    let (s408, smath, senglish, spolitics) = sqlx::query_as::<_, (i64, i64, i64, i64)>(
+        "SELECT
+            COALESCE(SUM(CASE WHEN (title LIKE '%408%' OR tags LIKE '%408%') THEN 1 ELSE 0 END), 0) AS s408,
+            COALESCE(SUM(CASE WHEN (title LIKE '%数学%' OR title LIKE '%数一%' OR tags LIKE '%数学%' OR tags LIKE '%数一%') THEN 1 ELSE 0 END), 0) AS smath,
+            COALESCE(SUM(CASE WHEN (title LIKE '%英语%' OR title LIKE '%英一%' OR tags LIKE '%英语%' OR tags LIKE '%英一%') THEN 1 ELSE 0 END), 0) AS senglish,
+            COALESCE(SUM(CASE WHEN (title LIKE '%政治%' OR tags LIKE '%政治%') THEN 1 ELSE 0 END), 0) AS spolitics
+         FROM tasks
+         WHERE date BETWEEN ? AND ?",
+    )
+    .bind(&start_date)
+    .bind(&end_date)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| format!("Failed to aggregate subject distribution: {}", e))?;
+
+    let total_focus_minutes = total_focus_seconds / 60;
+    let completion_rate = if task_total_count > 0 {
+        (task_done_count as f64 / task_total_count as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    let total_for_distribution = task_total_count.max(1) as f64;
+    let mut subject_distribution = HashMap::new();
+    subject_distribution.insert("408".to_string(), (s408 as f64 / total_for_distribution) * 100.0);
+    subject_distribution.insert("数学".to_string(), (smath as f64 / total_for_distribution) * 100.0);
+    subject_distribution.insert("英语".to_string(), (senglish as f64 / total_for_distribution) * 100.0);
+    subject_distribution.insert("政治".to_string(), (spolitics as f64 / total_for_distribution) * 100.0);
+
+    Ok(WeeklyStats {
+        total_focus_minutes,
+        completion_rate,
+        subject_distribution,
+    })
 }
 
 async fn db_get_resources_rows(pool: &sqlx::SqlitePool) -> Result<Vec<Resource>, String> {
@@ -577,6 +666,22 @@ async fn api_resources_handler(
     Ok(Json(rows))
 }
 
+async fn api_weekly_stats_handler(
+    AxumState(state): AxumState<LanAppState>,
+    Query(params): Query<WeeklyStatsQuery>,
+) -> Result<Json<WeeklyStats>, (StatusCode, String)> {
+    let end_date = params
+        .end_date
+        .unwrap_or_else(|| Local::now().format("%Y-%m-%d").to_string());
+
+    let db = state.db.lock().await;
+    let stats = db_get_weekly_stats(&db.db, &end_date)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(stats))
+}
+
 async fn api_ws_handler(
     AxumState(state): AxumState<LanAppState>,
     ws: WebSocketUpgrade,
@@ -706,6 +811,7 @@ async fn toggle_local_server(
         .route("/api/ws", get(api_ws_handler))
         .route("/api/tasks", get(api_tasks_handler).post(api_create_task_handler))
         .route("/api/tasks/{id}", put(api_update_task_handler).delete(api_delete_task_handler))
+        .route("/api/stats/weekly", get(api_weekly_stats_handler))
         .route("/api/resources", get(api_resources_handler))
         .route(
             "/api/notes/tree",
@@ -1021,6 +1127,15 @@ async fn batch_create_tasks(
         emit_sync_action(sync_hub.inner().as_ref(), "SYNC_TASKS");
     }
     Ok(count)
+}
+
+#[tauri::command]
+async fn get_weekly_stats(
+    end_date: String,
+    db: State<'_, Arc<Mutex<AppDb>>>,
+) -> Result<WeeklyStats, String> {
+    let db = db.lock().await;
+    db_get_weekly_stats(&db.db, &end_date).await
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -3369,6 +3484,7 @@ pub fn run() {
             update_task,
             delete_task,
             batch_create_tasks,
+            get_weekly_stats,
             get_daily_logs,
             create_daily_log,
             update_daily_log,
