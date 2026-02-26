@@ -12,6 +12,7 @@ import { MarkdownImportService, AiService, isTauriAvailable } from "../lib/dataS
 import type { LegacyTask, ImportedTask } from "../lib/dataService";
 import { bellUrl, getSettings } from "../lib/settings";
 import { addTask, fetchTasks, modifyTask, removeTask } from "../utils/apiBridge";
+import { useSync } from "../hooks/useSync";
 
 type Task = LegacyTask;
 
@@ -40,6 +41,14 @@ export function Tasks() {
   const [aiParsedTasks, setAiParsedTasks] = useState<ImportedTask[]>([]);
   const [aiApiKey, setAiApiKey] = useState(() => getSettings().aiApiKey || localStorage.getItem("eva.ai.apiKey") || "");
 
+  const refreshTasksSilently = useCallback(() => {
+    fetchTasks()
+      .then((loaded) => {
+        setTasks(loaded);
+      })
+      .catch(() => {});
+  }, []);
+
   // Load tasks on mount
   useEffect(() => {
     fetchTasks().then((loaded) => {
@@ -47,6 +56,8 @@ export function Tasks() {
       setDataLoaded(true);
     });
   }, []);
+
+  useSync("SYNC_TASKS", refreshTasksSilently);
   
   // Add Task Modal State
   const [isAddingTask, setIsAddingTask] = useState(false);
@@ -708,7 +719,7 @@ export function Tasks() {
               </form>
             )}
 
-            <div className="space-y-4 mt-8">
+            <div className="space-y-5 mt-8">
               {selectedDateTasks.length === 0 ? (
                 <div className="text-center py-14 text-gray-500 dark:text-gray-400 glass-soft rounded-2xl">
                   <ListTodo className="w-12 h-12 mx-auto mb-3 opacity-30 text-[#88B5D3]" />
@@ -726,7 +737,7 @@ export function Tasks() {
                       isOverdue && task.status !== "done" && "border-red-200 dark:border-red-500/40 bg-red-50/30 dark:bg-red-500/10"
                     )}>
                       <div className="flex items-start gap-4">
-                        <button onClick={() => toggleTaskStatus(task.id)} className="flex-shrink-0 mt-0.5 text-gray-400 dark:text-gray-500 hover:text-indigo-600 dark:hover:text-indigo-300 transition-colors">
+                        <button onClick={() => toggleTaskStatus(task.id)} className="flex-shrink-0 -ml-1 mt-0.5 w-10 h-10 rounded-xl flex items-center justify-center text-gray-400 dark:text-gray-500 hover:text-indigo-600 dark:hover:text-indigo-300 hover:bg-indigo-50/70 dark:hover:bg-indigo-500/10 transition-colors">
                           {task.status === "done" ? <CheckCircle2 className="w-6 h-6 text-emerald-500" /> : <Circle className="w-6 h-6" />}
                         </button>
                         <div className="flex flex-col min-w-0 flex-1">

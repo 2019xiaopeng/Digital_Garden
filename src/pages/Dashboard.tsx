@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { ArrowRight, Target, Play, Square, BarChart3, Activity, AlarmClockCheck, CheckCircle2, Circle, Maximize2, X, Pause, RotateCcw } from "lucide-react";
 import { Link } from "react-router-dom";
 import { cn } from "../lib/utils";
@@ -6,6 +6,7 @@ import { FocusService } from "../lib/dataService";
 import type { LegacyTask } from "../lib/dataService";
 import { fetchDashboardStats, modifyTask } from "../utils/apiBridge";
 import { getSettings, type AppSettings } from "../lib/settings";
+import { useSync } from "../hooks/useSync";
 
 type DailyAttendance = {
   checkedInAt?: string;
@@ -267,6 +268,18 @@ export function Dashboard() {
   const [attendanceMap, setAttendanceMap] = useState<AttendanceMap>(() => (typeof window === "undefined" ? {} : loadAttendanceMap()));
   const [sessionNow, setSessionNow] = useState(Date.now());
   const [selectedTaskId, setSelectedTaskId] = useState("");
+  const [pomodoroSeconds, setPomodoroSeconds] = useState(25 * 60);
+  const [pomodoroTotal, setPomodoroTotal] = useState(25 * 60);
+  const [isPomodoroRunning, setIsPomodoroRunning] = useState(false);
+  const [isPomodoroFullscreen, setIsPomodoroFullscreen] = useState(false);
+
+  const refreshTasksSilently = useCallback(() => {
+    fetchDashboardStats()
+      .then((stats) => {
+        setTasks(stats.tasks || []);
+      })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     const onSettingsUpdated = () => {
@@ -278,9 +291,7 @@ export function Dashboard() {
 
   // Load tasks from dataService
   useEffect(() => {
-    fetchDashboardStats().then((stats) => {
-      setTasks(stats.tasks || []);
-    });
+    refreshTasksSilently();
     FocusService.getAll().then((sessions) => {
       const mapped: AttendanceMap = {};
       Object.values(sessions).forEach((s) => {
@@ -293,12 +304,9 @@ export function Dashboard() {
       });
       if (Object.keys(mapped).length > 0) setAttendanceMap(mapped);
     }).catch(() => {});
-  }, []);
+  }, [refreshTasksSilently]);
 
-  const [pomodoroSeconds, setPomodoroSeconds] = useState(25 * 60);
-  const [pomodoroTotal, setPomodoroTotal] = useState(25 * 60);
-  const [isPomodoroRunning, setIsPomodoroRunning] = useState(false);
-  const [isPomodoroFullscreen, setIsPomodoroFullscreen] = useState(false);
+  useSync("SYNC_TASKS", refreshTasksSilently);
 
   const todayTasks = useMemo(() => tasks.filter((task) => task.date === today), [tasks, today]);
   const pendingTasks = useMemo(() => todayTasks.filter((task) => task.status !== "done"), [todayTasks]);
@@ -316,12 +324,9 @@ export function Dashboard() {
     const countdownTimer = setInterval(() => {
       setTimeLeft(getCountdown(EXAM_DATE_ISO));
     }, 30_000);
-    const syncTasks = () => {
-      fetchDashboardStats().then((stats) => setTasks(stats.tasks || []));
-    };
-    window.addEventListener("focus", syncTasks);
-    return () => { clearInterval(countdownTimer); window.removeEventListener("focus", syncTasks); };
-  }, []);
+    window.addEventListener("focus", refreshTasksSilently);
+    return () => { clearInterval(countdownTimer); window.removeEventListener("focus", refreshTasksSilently); };
+  }, [refreshTasksSilently]);
 
   useEffect(() => {
     if (!isCheckedIn) return;
@@ -562,7 +567,7 @@ export function Dashboard() {
       </header>
 
       {/* ─── Row 1: Check-in | Pomodoro | Task Pie ─── */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
         {/* Check-in Card */}
         <div className="glass-card rounded-3xl p-6 flex flex-col gap-4 relative overflow-hidden">
           <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-emerald-400 to-[#88B5D3]" />
@@ -667,7 +672,7 @@ export function Dashboard() {
           </h3>
           <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">30-Day Overview</span>
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-[1fr_auto] gap-6 items-start">
+        <div className="grid grid-cols-1 lg:grid-cols-[1fr_auto] gap-6 items-start">
           {/* Heatmap */}
           <div>
             <div className="flex items-center justify-between mb-3">
@@ -685,7 +690,7 @@ export function Dashboard() {
             <HeatmapGrid attendanceMap={attendanceMap} todayFocusSeconds={todayFocusSeconds} />
           </div>
           {/* NERV Stats Grid */}
-          <div className="grid grid-cols-2 md:grid-cols-2 gap-3 min-w-[180px]">
+          <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-2 gap-3 min-w-[180px]">
             <NervDataBlock label="连胜" value={streak} unit="天" accentColor="#FF9900" glowColor="#FF9900" />
             <NervDataBlock label="今日" value={(todayFocusSeconds / 3600).toFixed(1)} unit="h" accentColor="#34d399" />
             <NervDataBlock label="本周" value={weeklyFocusHours} unit="h" accentColor="#88B5D3" />

@@ -107,25 +107,6 @@ export function Sidebar() {
         </div>
       </aside>
 
-      {/* Mobile Bottom Nav */}
-      <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-white/68 dark:bg-[#0e1724]/74 backdrop-blur-md border-t border-white/50 dark:border-[#2a3b52] flex justify-around items-center p-2 pb-safe z-50 shadow-lg transition-colors">
-        {navItems.map((item) => {
-          const isActive = location.pathname === item.path || (item.path !== "/" && location.pathname.startsWith(item.path));
-          return (
-            <Link
-              key={item.path}
-              to={item.path}
-              className={cn(
-                "flex flex-col items-center gap-1 p-2 rounded-lg text-[10px] font-medium transition-colors",
-                isActive ? "text-[#88B5D3] dark:text-[#88B5D3]" : "text-gray-500 dark:text-gray-400"
-              )}
-            >
-              <item.icon className={cn("w-5 h-5", isActive ? "text-[#88B5D3] dark:text-[#88B5D3]" : "text-gray-400 dark:text-gray-500")} />
-              {item.name}
-            </Link>
-          );
-        })}
-      </nav>
     </>
   );
 }

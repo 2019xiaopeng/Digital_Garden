@@ -1,22 +1,24 @@
 use axum::body::Body;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path as AxumPath, Query, State as AxumState};
 use axum::http::{header, StatusCode, Uri};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, put};
 use axum::{Json, Router};
 use chrono::{Local, Utc};
 use mime_guess::from_path;
 use rust_embed::RustEmbed;
+use serde_json::json;
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 use tokio::fs;
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{broadcast, oneshot, Mutex};
 use tower_http::cors::CorsLayer;
 
 // ═══════════════════════════════════════════════════════════
@@ -192,6 +194,52 @@ struct LocalServerRuntime {
 #[derive(Default)]
 struct LocalServerState {
     runtime: Option<LocalServerRuntime>,
+}
+
+struct SyncHub {
+    tx: broadcast::Sender<String>,
+    app: tauri::AppHandle,
+}
+
+#[derive(Clone)]
+struct LanAppState {
+    db: Arc<Mutex<AppDb>>,
+    sync_hub: Arc<SyncHub>,
+}
+
+fn emit_sync_action(sync_hub: &SyncHub, action: &str) {
+    let payload = json!({ "action": action }).to_string();
+    let _ = sync_hub.tx.send(payload.clone());
+    let _ = sync_hub.app.emit("sync-update", payload);
+}
+
+async fn ws_client_loop(mut socket: WebSocket, mut rx: broadcast::Receiver<String>) {
+    loop {
+        tokio::select! {
+            inbound = socket.recv() => {
+                match inbound {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Ping(payload))) => {
+                        if socket.send(Message::Pong(payload)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(_)) => {}
+                    Some(Err(_)) => break,
+                }
+            }
+            outbound = rx.recv() => {
+                match outbound {
+                    Ok(payload) => {
+                        if socket.send(Message::Text(payload.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+    }
 }
 
 #[derive(RustEmbed)]
@@ -443,9 +491,9 @@ async fn db_fetch_due_questions(
 }
 
 async fn api_quiz_all_handler(
-    AxumState(db): AxumState<Arc<Mutex<AppDb>>>,
+    AxumState(state): AxumState<LanAppState>,
 ) -> Result<Json<Vec<Question>>, (StatusCode, String)> {
-    let db = db.lock().await;
+    let db = state.db.lock().await;
     let rows = db_fetch_all_questions(&db.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -453,10 +501,10 @@ async fn api_quiz_all_handler(
 }
 
 async fn api_quiz_due_handler(
-    AxumState(db): AxumState<Arc<Mutex<AppDb>>>,
+    AxumState(state): AxumState<LanAppState>,
     Query(params): Query<QuizDueQuery>,
 ) -> Result<Json<Vec<Question>>, (StatusCode, String)> {
-    let db = db.lock().await;
+    let db = state.db.lock().await;
     let rows = db_fetch_due_questions(&db.db, params.subject.as_deref())
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -464,10 +512,10 @@ async fn api_quiz_due_handler(
 }
 
 async fn api_tasks_handler(
-    AxumState(db): AxumState<Arc<Mutex<AppDb>>>,
+    AxumState(state): AxumState<LanAppState>,
     Query(params): Query<TasksQuery>,
 ) -> Result<Json<Vec<Task>>, (StatusCode, String)> {
-    let db = db.lock().await;
+    let db = state.db.lock().await;
     let rows = if let Some(date) = params.date.as_deref() {
         db_get_tasks_by_date(&db.db, date).await
     } else {
@@ -479,48 +527,65 @@ async fn api_tasks_handler(
 }
 
 async fn api_create_task_handler(
-    AxumState(db): AxumState<Arc<Mutex<AppDb>>>,
+    AxumState(state): AxumState<LanAppState>,
     Json(task): Json<Task>,
 ) -> Result<Json<Task>, (StatusCode, String)> {
-    let db = db.lock().await;
+    let db = state.db.lock().await;
     let created = db_create_task(&db.db, &task)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    drop(db);
+    emit_sync_action(&state.sync_hub, "SYNC_TASKS");
     Ok(Json(created))
 }
 
 async fn api_update_task_handler(
-    AxumState(db): AxumState<Arc<Mutex<AppDb>>>,
+    AxumState(state): AxumState<LanAppState>,
     AxumPath(id): AxumPath<String>,
     Json(mut task): Json<Task>,
 ) -> Result<Json<Task>, (StatusCode, String)> {
     task.id = id;
-    let db = db.lock().await;
+    let db = state.db.lock().await;
     let updated = db_update_task(&db.db, &task)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    drop(db);
+    emit_sync_action(&state.sync_hub, "SYNC_TASKS");
     Ok(Json(updated))
 }
 
 async fn api_delete_task_handler(
-    AxumState(db): AxumState<Arc<Mutex<AppDb>>>,
+    AxumState(state): AxumState<LanAppState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let db = db.lock().await;
+    let db = state.db.lock().await;
     db_delete_task(&db.db, &id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    drop(db);
+    emit_sync_action(&state.sync_hub, "SYNC_TASKS");
     Ok(StatusCode::NO_CONTENT)
 }
 
 async fn api_resources_handler(
-    AxumState(db): AxumState<Arc<Mutex<AppDb>>>,
+    AxumState(state): AxumState<LanAppState>,
 ) -> Result<Json<Vec<Resource>>, (StatusCode, String)> {
-    let db = db.lock().await;
+    let db = state.db.lock().await;
     let rows = db_get_resources_rows(&db.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(rows))
+}
+
+async fn api_ws_handler(
+    AxumState(state): AxumState<LanAppState>,
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
+    let tx = state.sync_hub.tx.clone();
+    ws.on_upgrade(move |socket| async move {
+        let rx = tx.subscribe();
+        ws_client_loop(socket, rx).await;
+    })
 }
 
 async fn load_notes_tree(app: &tauri::AppHandle) -> Result<Vec<NotesFsNode>, String> {
@@ -596,6 +661,7 @@ async fn toggle_local_server(
     port: u16,
     app: tauri::AppHandle,
     server_state: State<'_, Arc<Mutex<LocalServerState>>>,
+    sync_hub: State<'_, Arc<SyncHub>>,
 ) -> Result<String, String> {
     if port == 0 {
         return Err("端口必须大于 0".to_string());
@@ -621,6 +687,10 @@ async fn toggle_local_server(
         .try_state::<Arc<Mutex<AppDb>>>()
         .ok_or_else(|| "数据库尚未就绪，请稍后重试。".to_string())?;
     let shared_db = db_state.inner().clone();
+    let lan_state = LanAppState {
+        db: shared_db,
+        sync_hub: sync_hub.inner().clone(),
+    };
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = tokio::net::TcpListener::bind(addr)
@@ -633,6 +703,7 @@ async fn toggle_local_server(
 
     let router = Router::new()
         .route("/api/ping", get(local_ping_handler))
+        .route("/api/ws", get(api_ws_handler))
         .route("/api/tasks", get(api_tasks_handler).post(api_create_task_handler))
         .route("/api/tasks/{id}", put(api_update_task_handler).delete(api_delete_task_handler))
         .route("/api/resources", get(api_resources_handler))
@@ -654,7 +725,7 @@ async fn toggle_local_server(
         .route("/api/quiz/due", get(api_quiz_due_handler))
         .fallback(embedded_static_handler)
         .layer(CorsLayer::permissive())
-        .with_state(shared_db);
+        .with_state(lan_state);
 
     let server = axum::serve(listener, router).with_graceful_shutdown(async move {
         let _ = shutdown_rx.await;
@@ -899,30 +970,57 @@ async fn get_tasks_by_date(
 }
 
 #[tauri::command]
-async fn create_task(task: Task, db: State<'_, Arc<Mutex<AppDb>>>) -> Result<Task, String> {
+async fn create_task(
+    task: Task,
+    db: State<'_, Arc<Mutex<AppDb>>>,
+    sync_hub: State<'_, Arc<SyncHub>>,
+) -> Result<Task, String> {
     let db = db.lock().await;
-    db_create_task(&db.db, &task).await
+    let created = db_create_task(&db.db, &task).await?;
+    drop(db);
+    emit_sync_action(sync_hub.inner().as_ref(), "SYNC_TASKS");
+    Ok(created)
 }
 
 #[tauri::command]
-async fn update_task(task: Task, db: State<'_, Arc<Mutex<AppDb>>>) -> Result<Task, String> {
+async fn update_task(
+    task: Task,
+    db: State<'_, Arc<Mutex<AppDb>>>,
+    sync_hub: State<'_, Arc<SyncHub>>,
+) -> Result<Task, String> {
     let db = db.lock().await;
-    db_update_task(&db.db, &task).await
+    let updated = db_update_task(&db.db, &task).await?;
+    drop(db);
+    emit_sync_action(sync_hub.inner().as_ref(), "SYNC_TASKS");
+    Ok(updated)
 }
 
 #[tauri::command]
-async fn delete_task(id: String, db: State<'_, Arc<Mutex<AppDb>>>) -> Result<(), String> {
+async fn delete_task(
+    id: String,
+    db: State<'_, Arc<Mutex<AppDb>>>,
+    sync_hub: State<'_, Arc<SyncHub>>,
+) -> Result<(), String> {
     let db = db.lock().await;
-    db_delete_task(&db.db, &id).await
+    db_delete_task(&db.db, &id).await?;
+    drop(db);
+    emit_sync_action(sync_hub.inner().as_ref(), "SYNC_TASKS");
+    Ok(())
 }
 
 #[tauri::command]
 async fn batch_create_tasks(
     tasks: Vec<Task>,
     db: State<'_, Arc<Mutex<AppDb>>>,
+    sync_hub: State<'_, Arc<SyncHub>>,
 ) -> Result<usize, String> {
     let db = db.lock().await;
-    db_batch_create_tasks(&db.db, &tasks).await
+    let count = db_batch_create_tasks(&db.db, &tasks).await?;
+    drop(db);
+    if count > 0 {
+        emit_sync_action(sync_hub.inner().as_ref(), "SYNC_TASKS");
+    }
+    Ok(count)
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -3177,6 +3275,11 @@ pub fn run() {
         })
         .setup(|app| {
             app.manage(Arc::new(Mutex::new(LocalServerState::default())));
+            let (tx, _rx) = broadcast::channel::<String>(256);
+            app.manage(Arc::new(SyncHub {
+                tx,
+                app: app.handle().clone(),
+            }));
 
             let shortcut = Shortcut::new(Some(command_or_control_modifiers()), Code::KeyE);
             app.global_shortcut().register(shortcut)?;
