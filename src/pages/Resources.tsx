@@ -1,6 +1,5 @@
-import { FileText, Image as ImageIcon, FileArchive, Download, Search, Filter, CheckSquare, Square, Swords, Upload, Folder, Trash2 } from "lucide-react";
+import { FileText, Image as ImageIcon, FileArchive, Download, Search, Filter, CheckSquare, Square, Upload, Folder, Trash2 } from "lucide-react";
 import React, { useCallback, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
 import { cn } from "../lib/utils";
 import { isTauriAvailable } from "../lib/dataService";
 import { extractBilibiliVideoUrl, openExternalUrl } from "../lib/videoBookmark";
@@ -75,7 +74,6 @@ export function Resources() {
   const [resourceToast, setResourceToast] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const [pendingDeleteResource, setPendingDeleteResource] = useState<ResourceItem | null>(null);
   const [videoBookmarks, setVideoBookmarks] = useState<VideoBookmark[]>([]);
-  const navigate = useNavigate();
   const isDesktopRuntime = isTauriAvailable();
   const readonlyWebHint = "局域网模式下仅支持跨端阅读，请在桌面端进行文件管理";
 
@@ -161,20 +159,6 @@ export function Resources() {
       setTimeout(() => setBookmarkToast(null), 2000);
     }
   }, [isDesktopRuntime]);
-
-  const handleGenerateQuiz = () => {
-    if (selectedIds.length === 0) return;
-
-    const selectedResources = resources.filter((item) => selectedIds.includes(item.id));
-    const selectedResourcePaths = selectedResources.map((item) => item.path);
-
-    navigate("/quiz?generated=true&fromResources=true", {
-      state: {
-        generateFromResources: true,
-        selectedResourcePaths,
-      },
-    });
-  };
 
   const handleFileUpload = async () => {
     if (!ensureDesktopWritable()) return;
@@ -407,15 +391,6 @@ export function Resources() {
             <Folder className="w-4 h-4" />
             上传目录
           </button>
-          {selectedIds.length > 0 && (
-            <button 
-              onClick={handleGenerateQuiz}
-              className="animate-in fade-in zoom-in duration-300 flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2.5 rounded-2xl text-sm font-semibold shadow-sm transition-all active:scale-95"
-            >
-              <Swords className="w-4 h-4" />
-              生成练功房 ({selectedIds.length})
-            </button>
-          )}
           <div className="flex items-center gap-1.5 rounded-2xl bg-white/80 dark:bg-gray-900/80 border border-gray-200 dark:border-gray-800 px-2 py-1 overflow-x-auto max-w-[420px]">
             {subjects.map((subject) => {
               const count = subject === "all" ? resources.length : resources.filter(r => r.subject === subject).length;
@@ -527,7 +502,7 @@ export function Resources() {
         {visibleResources.length === 0 && (
           <div className="col-span-full glass-soft rounded-3xl py-16 text-center text-gray-500 dark:text-gray-400">
             <Folder className="w-10 h-10 mx-auto mb-3 text-[#88B5D3]/70" />
-            <p className="font-medium">当前暂无资料，上传后即可在此管理与生成练功房</p>
+            <p className="font-medium">当前暂无资料，上传后即可在此管理与查阅</p>
           </div>
         )}
         {visibleResources.map((file) => {

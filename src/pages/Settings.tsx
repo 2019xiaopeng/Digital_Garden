@@ -29,6 +29,20 @@ import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { documentDir, join } from "@tauri-apps/api/path";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 
+const isLanPortAlreadyInUse = (error: unknown) => {
+  const raw = typeof error === "string"
+    ? error
+    : error instanceof Error
+      ? error.message
+      : String(error || "");
+
+  return (
+    raw.includes("os error 10048") ||
+    raw.includes("只允许使用一次") ||
+    raw.toLowerCase().includes("address already in use")
+  );
+};
+
 type TabKey =
   | "general"
   | "appearance"
@@ -215,6 +229,9 @@ export function Settings() {
           });
         }
       } catch (error) {
+        if (isLanPortAlreadyInUse(error)) {
+          return;
+        }
         console.error("[Settings] Failed to initialize LAN sync state:", error);
       }
     };

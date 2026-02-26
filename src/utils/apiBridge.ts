@@ -68,6 +68,83 @@ export type WeeklyStats = {
   subject_distribution: Record<string, number>;
 };
 
+export type FocusTemplate = {
+  id: string;
+  name: string;
+  timer_type: "pomodoro" | "countdown";
+  duration_minutes: number;
+  tags_json: string;
+  linked_task_title?: string | null;
+  color_token?: string | null;
+  is_archived: 0 | 1;
+  created_at: string;
+  updated_at: string;
+};
+
+export type StartFocusRunPayload = {
+  source: "dashboard" | "tasks" | "weekly_review" | "mobile";
+  template_id?: string | null;
+  task_id?: string | null;
+  timer_type: "pomodoro" | "countdown";
+  planned_minutes: number;
+  date?: string | null;
+  tags_json?: string | null;
+  note?: string | null;
+};
+
+export type FinishFocusRunPayload = {
+  actual_seconds: number;
+  status: "completed" | "aborted";
+  ended_at?: string | null;
+  tags_json?: string | null;
+  note?: string | null;
+};
+
+export type FocusRun = {
+  id: string;
+  source: string;
+  template_id?: string | null;
+  task_id?: string | null;
+  timer_type: "pomodoro" | "countdown";
+  planned_minutes: number;
+  actual_seconds: number;
+  status: "running" | "completed" | "aborted";
+  started_at: string;
+  ended_at?: string | null;
+  date: string;
+  tags_json: string;
+  note?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type FocusStatsSummary = {
+  total_focus_minutes: number;
+  completed_runs: number;
+  completion_rate: number;
+};
+
+export type FocusStatsSlice = {
+  key: string;
+  minutes: number;
+  percent: number;
+  runs: number;
+};
+
+export type FocusStatsResult = {
+  start_date: string;
+  end_date: string;
+  dimension: "tag" | "template" | "timer_type";
+  summary: FocusStatsSummary;
+  slices: FocusStatsSlice[];
+};
+
+export type FetchFocusStatsOptions = {
+  startDate?: string;
+  endDate?: string;
+  dimension?: "tag" | "template" | "timer_type";
+};
+
 function isTauriRuntime(): boolean {
   if (typeof window === "undefined") return false;
   const win = window as Window & { __TAURI__?: unknown; __TAURI_INTERNALS__?: unknown };
@@ -389,4 +466,169 @@ export async function fetchWeeklyStats(endDate: string): Promise<WeeklyStats> {
   }
 
   return (await response.json()) as WeeklyStats;
+}
+
+export async function fetchFocusTemplates(includeArchived = false): Promise<FocusTemplate[]> {
+  if (isTauriRuntime()) {
+    const invoke = await getInvoke();
+    const rows = await invoke<FocusTemplate[]>("get_focus_templates", { includeArchived });
+    return Array.isArray(rows) ? rows : [];
+  }
+
+  const response = await fetch(`${getLanBaseUrl()}/api/focus/templates`);
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`HTTP 请求失败 (${response.status}): ${text || response.statusText}`);
+  }
+
+  const rows = (await response.json()) as FocusTemplate[];
+  if (!Array.isArray(rows)) return [];
+  if (includeArchived) return rows;
+  return rows.filter((item) => item.is_archived === 0);
+}
+
+export async function createFocusTemplate(template: FocusTemplate): Promise<FocusTemplate> {
+  if (isTauriRuntime()) {
+    const invoke = await getInvoke();
+    return await invoke<FocusTemplate>("create_focus_template", { template });
+  }
+
+  const response = await fetch(`${getLanBaseUrl()}/api/focus/templates`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(template),
+  });
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`HTTP 请求失败 (${response.status}): ${text || response.statusText}`);
+  }
+
+  return (await response.json()) as FocusTemplate;
+}
+
+export async function updateFocusTemplate(id: string, template: FocusTemplate): Promise<FocusTemplate> {
+  if (!id.trim()) {
+    throw new Error("模板 id 不能为空");
+  }
+
+  if (isTauriRuntime()) {
+    const invoke = await getInvoke();
+    return await invoke<FocusTemplate>("update_focus_template", { id, template });
+  }
+
+  const response = await fetch(`${getLanBaseUrl()}/api/focus/templates/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ ...template, id }),
+  });
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`HTTP 请求失败 (${response.status}): ${text || response.statusText}`);
+  }
+
+  return (await response.json()) as FocusTemplate;
+}
+
+export async function archiveFocusTemplate(id: string): Promise<void> {
+  if (!id.trim()) {
+    throw new Error("模板 id 不能为空");
+  }
+
+  if (isTauriRuntime()) {
+    const invoke = await getInvoke();
+    await invoke("archive_focus_template", { id });
+    return;
+  }
+
+  const response = await fetch(`${getLanBaseUrl()}/api/focus/templates/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+
+  if (!response.ok && response.status !== 204) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`HTTP 请求失败 (${response.status}): ${text || response.statusText}`);
+  }
+}
+
+export async function startFocusRun(payload: StartFocusRunPayload): Promise<FocusRun> {
+  if (payload.planned_minutes <= 0) {
+    throw new Error("planned_minutes 必须大于 0");
+  }
+
+  if (isTauriRuntime()) {
+    const invoke = await getInvoke();
+    return await invoke<FocusRun>("start_focus_run", { payload });
+  }
+
+  const response = await fetch(`${getLanBaseUrl()}/api/focus/runs/start`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`HTTP 请求失败 (${response.status}): ${text || response.statusText}`);
+  }
+
+  return (await response.json()) as FocusRun;
+}
+
+export async function finishFocusRun(runId: string, payload: FinishFocusRunPayload): Promise<FocusRun> {
+  if (!runId.trim()) {
+    throw new Error("runId 不能为空");
+  }
+
+  if (isTauriRuntime()) {
+    const invoke = await getInvoke();
+    return await invoke<FocusRun>("finish_focus_run", { runId, payload });
+  }
+
+  const response = await fetch(`${getLanBaseUrl()}/api/focus/runs/${encodeURIComponent(runId)}/finish`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`HTTP 请求失败 (${response.status}): ${text || response.statusText}`);
+  }
+
+  return (await response.json()) as FocusRun;
+}
+
+export async function fetchFocusStats(options: FetchFocusStatsOptions = {}): Promise<FocusStatsResult> {
+  const query = new URLSearchParams();
+  if (options.startDate?.trim()) query.set("start_date", options.startDate.trim());
+  if (options.endDate?.trim()) query.set("end_date", options.endDate.trim());
+  if (options.dimension) query.set("dimension", options.dimension);
+
+  if (isTauriRuntime()) {
+    const invoke = await getInvoke();
+    return await invoke<FocusStatsResult>("get_focus_stats", {
+      startDate: options.startDate,
+      endDate: options.endDate,
+      dimension: options.dimension,
+    });
+  }
+
+  const qs = query.toString();
+  const response = await fetch(`${getLanBaseUrl()}/api/focus/stats${qs ? `?${qs}` : ""}`);
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`HTTP 请求失败 (${response.status}): ${text || response.statusText}`);
+  }
+
+  return (await response.json()) as FocusStatsResult;
 }

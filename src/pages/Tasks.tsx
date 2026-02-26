@@ -11,7 +11,18 @@ import { ConfirmDialog } from "../components/ConfirmDialog";
 import { MarkdownImportService, AiService, isTauriAvailable } from "../lib/dataService";
 import type { LegacyTask, ImportedTask } from "../lib/dataService";
 import { bellUrl, getSettings } from "../lib/settings";
-import { addTask, fetchTasks, modifyTask, removeTask } from "../utils/apiBridge";
+import {
+  addTask,
+  archiveFocusTemplate,
+  createFocusTemplate,
+  fetchFocusTemplates,
+  fetchTasks,
+  finishFocusRun,
+  modifyTask,
+  removeTask,
+  startFocusRun,
+  type FocusTemplate,
+} from "../utils/apiBridge";
 import { useSync } from "../hooks/useSync";
 
 type Task = LegacyTask;
@@ -25,6 +36,83 @@ const getDateOffsetStr = (baseDate: string, offsetDays: number) => {
   const d = new Date(baseDate);
   d.setDate(d.getDate() + offsetDays);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
+const mergeUniqueTags = (first: string[], second: string[]) => {
+  const merged: string[] = [];
+  [...first, ...second].forEach((tag) => {
+    const normalized = tag.trim();
+    if (!normalized) return;
+    if (merged.includes(normalized)) return;
+    merged.push(normalized);
+  });
+  return merged;
+};
+
+const parseTemplateTags = (template: FocusTemplate | null) => {
+  if (!template) return [] as string[];
+  try {
+    const parsed = JSON.parse(template.tags_json);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((tag) => String(tag).trim())
+      .filter((tag) => Boolean(tag));
+  } catch {
+    return [];
+  }
+};
+
+type FocusPresetOption = {
+  id: string;
+  label: string;
+  timerType: "pomodoro" | "countdown";
+  durationMinutes: number;
+  tags: string[];
+  linkedTaskTitle?: string;
+};
+
+const FOCUS_RECENT_STORAGE_KEY = "eva.focus.recentPresets.v1";
+
+const QUICK_FOCUS_PRESETS: FocusPresetOption[] = [
+  {
+    id: "quick:25",
+    label: "25m 番茄",
+    timerType: "pomodoro",
+    durationMinutes: 25,
+    tags: [],
+  },
+  {
+    id: "quick:50",
+    label: "50m 深度",
+    timerType: "pomodoro",
+    durationMinutes: 50,
+    tags: [],
+  },
+  {
+    id: "quick:15",
+    label: "15m 冲刺",
+    timerType: "pomodoro",
+    durationMinutes: 15,
+    tags: [],
+  },
+];
+
+const loadRecentPresetIds = (): string[] => {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = localStorage.getItem(FOCUS_RECENT_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((item) => String(item)).filter(Boolean);
+  } catch {
+    return [];
+  }
+};
+
+const saveRecentPresetIds = (ids: string[]) => {
+  if (typeof window === "undefined") return;
+  localStorage.setItem(FOCUS_RECENT_STORAGE_KEY, JSON.stringify(ids.slice(0, 3)));
 };
 
 export function Tasks() {
@@ -55,15 +143,25 @@ export function Tasks() {
       .catch(() => {});
   }, []);
 
+  const refreshTemplatesSilently = useCallback(() => {
+    fetchFocusTemplates(false)
+      .then((rows) => {
+        setFocusTemplates(rows);
+      })
+      .catch(() => {});
+  }, []);
+
   // Load tasks on mount
   useEffect(() => {
     fetchTasks().then((loaded) => {
       setTasks(loaded);
       setDataLoaded(true);
     });
+    refreshTemplatesSilently();
   }, []);
 
   useSync("SYNC_TASKS", refreshTasksSilently);
+  useSync("SYNC_FOCUS_TEMPLATES", refreshTemplatesSilently);
   
   // Add Task Modal State
   const [isAddingTask, setIsAddingTask] = useState(false);
@@ -76,6 +174,15 @@ export function Tasks() {
   const [quickTaskTitle, setQuickTaskTitle] = useState("");
   const [showAdvancedFields, setShowAdvancedFields] = useState(false);
   const [cloneToast, setCloneToast] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const [focusTemplates, setFocusTemplates] = useState<FocusTemplate[]>([]);
+  const [selectedPresetId, setSelectedPresetId] = useState("none");
+  const [recentPresetIds, setRecentPresetIds] = useState<string[]>(() => loadRecentPresetIds());
+  const [showTemplateSaveInput, setShowTemplateSaveInput] = useState(false);
+  const [templateNameDraft, setTemplateNameDraft] = useState("");
+  const [templateSaving, setTemplateSaving] = useState(false);
+  const [templateArchivingId, setTemplateArchivingId] = useState<string | null>(null);
+  const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  const runFinalizeGuardRef = useRef(false);
 
   const showCloneToast = useCallback((type: "success" | "error", message: string) => {
     setCloneToast({ type, message });
@@ -85,6 +192,9 @@ export function Tasks() {
   const openEditModal = (task: Task) => {
     setEditingTaskId(task.id);
     setNewTask({ ...task });
+    setSelectedPresetId("none");
+    setShowTemplateSaveInput(false);
+    setTemplateNameDraft(task.title || "");
     setIsAddingTask(true);
   };
 
@@ -123,6 +233,31 @@ export function Tasks() {
     };
   }, []);
 
+  const finalizeFocusRun = useCallback(async (
+    status: "completed" | "aborted",
+    explicitActualSeconds?: number
+  ) => {
+    if (!activeRunId || runFinalizeGuardRef.current) return;
+
+    runFinalizeGuardRef.current = true;
+    const plannedSeconds = (activeTimerTask?.timerDuration || 25) * 60;
+    const actualSeconds = typeof explicitActualSeconds === "number"
+      ? Math.max(0, explicitActualSeconds)
+      : Math.max(0, plannedSeconds - timeLeft);
+
+    try {
+      await finishFocusRun(activeRunId, {
+        actual_seconds: actualSeconds,
+        status,
+      });
+    } catch (error) {
+      console.warn("finish focus run failed:", error);
+    } finally {
+      setActiveRunId(null);
+      runFinalizeGuardRef.current = false;
+    }
+  }, [activeRunId, activeTimerTask?.timerDuration, timeLeft]);
+
   useEffect(() => {
     if (isTimerRunning && timeLeft > 0) {
       timerRef.current = setInterval(() => {
@@ -131,6 +266,7 @@ export function Tasks() {
             clearInterval(timerRef.current!);
             setIsTimerRunning(false);
             audioRef.current?.play().catch(e => console.log("Audio play failed:", e));
+            void finalizeFocusRun("completed", (activeTimerTask?.timerDuration || 25) * 60);
             return 0;
           }
           return prev - 1;
@@ -142,13 +278,51 @@ export function Tasks() {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
     };
-  }, [isTimerRunning, timeLeft]);
+  }, [activeTimerTask?.timerDuration, finalizeFocusRun, isTimerRunning, timeLeft]);
 
-  const startTimerForTask = (task: Task) => {
+  const startTimerForTask = useCallback(async (task: Task) => {
+    if (activeRunId) {
+      const currentPlanned = (activeTimerTask?.timerDuration || 25) * 60;
+      await finalizeFocusRun("aborted", Math.max(0, currentPlanned - timeLeft));
+    }
+
+    const payload = {
+      source: "tasks" as const,
+      template_id: null,
+      task_id: task.id,
+      timer_type: task.timerType === "countdown" ? "countdown" : "pomodoro",
+      planned_minutes: task.timerDuration || 25,
+      date: task.date,
+      tags_json: JSON.stringify(task.tags || []),
+      note: null,
+    };
+
+    try {
+      const run = await startFocusRun(payload);
+      setActiveRunId(run.id);
+    } catch (error) {
+      console.warn("start focus run failed:", error);
+      setActiveRunId(null);
+    }
+
+    if (task.status === "todo") {
+      const nextTask = { ...task, status: "in-progress" as Task["status"] };
+      setTasks((prev) => prev.map((item) => (item.id === task.id ? nextTask : item)));
+      modifyTask(task.id, nextTask).catch((error) => {
+        console.warn("mark task in-progress failed:", error);
+      });
+    }
+
     setActiveTimerTask(task);
     setTimeLeft((task.timerDuration || 25) * 60);
     setIsTimerRunning(false);
-  };
+  }, [
+    activeRunId,
+    activeTimerTask?.timerDuration,
+    finalizeFocusRun,
+    timeLeft,
+    setTasks,
+  ]);
 
   const toggleTimer = () => setIsTimerRunning(!isTimerRunning);
   const resetTimer = () => {
@@ -165,6 +339,141 @@ export function Tasks() {
   const selectedDateTasks = useMemo(() => {
     return tasks.filter(t => t.date === selectedDate).sort((a, b) => a.startTime.localeCompare(b.startTime));
   }, [tasks, selectedDate]);
+
+  const presetOptions = useMemo<FocusPresetOption[]>(() => {
+    const templateOptions = focusTemplates.map((template) => ({
+      id: `template:${template.id}`,
+      label: template.name,
+      timerType: template.timer_type,
+      durationMinutes: template.duration_minutes,
+      tags: parseTemplateTags(template),
+      linkedTaskTitle: template.linked_task_title || template.name,
+    }));
+    return [...QUICK_FOCUS_PRESETS, ...templateOptions];
+  }, [focusTemplates]);
+
+  const presetOptionMap = useMemo(() => {
+    const map = new Map<string, FocusPresetOption>();
+    presetOptions.forEach((option) => {
+      map.set(option.id, option);
+    });
+    return map;
+  }, [presetOptions]);
+
+  const recentPresetOptions = useMemo(() => {
+    return recentPresetIds
+      .map((id) => presetOptionMap.get(id) || null)
+      .filter((item): item is FocusPresetOption => Boolean(item));
+  }, [presetOptionMap, recentPresetIds]);
+
+  const rememberPreset = useCallback((presetId: string) => {
+    if (!presetId || presetId === "none") return;
+    setRecentPresetIds((prev) => {
+      const next = [presetId, ...prev.filter((id) => id !== presetId)].slice(0, 3);
+      saveRecentPresetIds(next);
+      return next;
+    });
+  }, []);
+
+  const forgetPreset = useCallback((presetId: string) => {
+    if (!presetId) return;
+    setRecentPresetIds((prev) => {
+      const next = prev.filter((id) => id !== presetId);
+      saveRecentPresetIds(next);
+      return next;
+    });
+  }, []);
+
+  const applyFocusPreset = useCallback((presetId: string) => {
+    if (!presetId || presetId === "none") {
+      setSelectedPresetId("none");
+      return;
+    }
+
+    const preset = presetOptionMap.get(presetId);
+    if (!preset) return;
+
+    setSelectedPresetId(presetId);
+    setNewTask((prev) => ({
+      ...prev,
+      title: prev.title?.trim() ? prev.title : (preset.linkedTaskTitle || prev.title || ""),
+      timerType: preset.timerType,
+      timerDuration: preset.durationMinutes,
+      tags: mergeUniqueTags(preset.tags, prev.tags || []),
+    }));
+    rememberPreset(presetId);
+  }, [presetOptionMap, rememberPreset]);
+
+  const handleCreateTemplateFromCurrentConfig = useCallback(async () => {
+    if (templateSaving) return;
+
+    const timerType = newTask.timerType === "countdown" ? "countdown" : newTask.timerType === "pomodoro" ? "pomodoro" : null;
+    if (!timerType) {
+      alert("请先在专注模式中选择番茄钟或倒计时，再保存为模板。");
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const nextTemplate: FocusTemplate = {
+      id: "",
+      name: (templateNameDraft || newTask.title || "未命名模板").trim(),
+      timer_type: timerType,
+      duration_minutes: Math.max(1, newTask.timerDuration || 25),
+      tags_json: JSON.stringify(mergeUniqueTags(newTask.tags || [], [])),
+      linked_task_title: (newTask.title || "").trim() || null,
+      color_token: null,
+      is_archived: 0,
+      created_at: now,
+      updated_at: now,
+    };
+
+    if (!nextTemplate.name) {
+      alert("请输入模板名称。");
+      return;
+    }
+
+    setTemplateSaving(true);
+    try {
+      const created = await createFocusTemplate(nextTemplate);
+      await refreshTemplatesSilently();
+      const presetId = `template:${created.id}`;
+      setSelectedPresetId(presetId);
+      setShowTemplateSaveInput(false);
+      setTemplateNameDraft(created.name);
+      rememberPreset(presetId);
+      setNewTask((prev) => ({
+        ...prev,
+        timerType: created.timer_type,
+        timerDuration: created.duration_minutes,
+        tags: mergeUniqueTags(parseTemplateTags(created), prev.tags || []),
+      }));
+    } catch (error) {
+      console.warn("Create focus template failed:", error);
+    } finally {
+      setTemplateSaving(false);
+    }
+  }, [newTask.tags, newTask.timerDuration, newTask.timerType, newTask.title, refreshTemplatesSilently, rememberPreset, templateNameDraft, templateSaving]);
+
+  const handleArchiveTemplate = useCallback(async (template: FocusTemplate) => {
+    if (templateArchivingId) return;
+    const confirmed = window.confirm(`确定删除模板「${template.name}」吗？`);
+    if (!confirmed) return;
+
+    setTemplateArchivingId(template.id);
+    try {
+      await archiveFocusTemplate(template.id);
+      const presetId = `template:${template.id}`;
+      forgetPreset(presetId);
+      if (selectedPresetId === presetId) {
+        setSelectedPresetId("none");
+      }
+      await refreshTemplatesSilently();
+    } catch (error) {
+      console.warn("Archive focus template failed:", error);
+    } finally {
+      setTemplateArchivingId(null);
+    }
+  }, [forgetPreset, refreshTemplatesSilently, selectedPresetId, templateArchivingId]);
 
   const handleAddTask = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -247,8 +556,12 @@ export function Tasks() {
         console.warn("Create task failed:", error);
       }
     }
+
     setIsAddingTask(false);
     setEditingTaskId(null);
+    setSelectedPresetId("none");
+    setShowTemplateSaveInput(false);
+    setTemplateNameDraft("");
     setNewTask({ title: "", description: "", priority: "medium", startTime: "09:00", duration: 1, tags: [], repeat: "none", repeatDays: [], timerType: "none", timerDuration: 25 });
   };
 
@@ -386,6 +699,9 @@ export function Tasks() {
         event.preventDefault();
         setEditingTaskId(null);
         setShowAdvancedFields(false);
+        setSelectedPresetId("none");
+        setShowTemplateSaveInput(false);
+        setTemplateNameDraft("");
         setIsAddingTask(true);
       }
 
@@ -505,6 +821,10 @@ export function Tasks() {
   };
 
   const closePomodoroWidget = async () => {
+    if (activeRunId) {
+      const planned = (activeTimerTask?.timerDuration || 25) * 60;
+      await finalizeFocusRun("aborted", Math.max(0, planned - timeLeft));
+    }
     if (document.fullscreenElement && document.exitFullscreen) {
       try {
         await document.exitFullscreen();
@@ -514,6 +834,7 @@ export function Tasks() {
     }
     setActiveTimerTask(null);
     setIsPomodoroFullscreen(false);
+    setIsTimerRunning(false);
   };
 
   return (
@@ -627,7 +948,13 @@ export function Tasks() {
                   </button>
                 </div>
                 <button 
-                  onClick={() => setIsAddingTask(true)}
+                  onClick={() => {
+                    setEditingTaskId(null);
+                    setSelectedPresetId("none");
+                    setShowTemplateSaveInput(false);
+                    setTemplateNameDraft("");
+                    setIsAddingTask(true);
+                  }}
                   className="w-full py-4 border-2 border-dashed border-gray-200 dark:border-gray-700 rounded-2xl text-gray-500 dark:text-gray-400 font-medium hover:border-[#88B5D3] dark:hover:border-[#88B5D3] hover:text-[#88B5D3] dark:hover:text-[#88B5D3] hover:bg-[#88B5D3]/8 transition-all flex items-center justify-center gap-2"
                 >
                   <Plus className="w-5 h-5" /> 打开完整任务表单（Ctrl/Cmd + N）
@@ -637,7 +964,19 @@ export function Tasks() {
               <form id="task-form" onSubmit={handleAddTask} className="glass-soft p-6 rounded-2xl space-y-4 animate-in fade-in zoom-in-95 duration-200">
                 <div className="flex justify-between items-center mb-2">
                   <h4 className="font-semibold text-gray-900 dark:text-white">新建任务 ({selectedDate}) · Ctrl/Cmd + Enter 保存</h4>
-                  <button type="button" onClick={() => setIsAddingTask(false)} className="text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300"><X className="w-5 h-5" /></button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsAddingTask(false);
+                      setEditingTaskId(null);
+                      setSelectedPresetId("none");
+                      setShowTemplateSaveInput(false);
+                      setTemplateNameDraft("");
+                    }}
+                    className="text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
                 </div>
                 
                 <input 
@@ -697,8 +1036,77 @@ export function Tasks() {
                   </div>
                 </div>}
 
-                {/* Advanced Options: Repeat & Timer */}
-                {showAdvancedFields && <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2 border-t border-gray-200">
+                {/* Advanced Options: Focus Preset + Repeat + Timer */}
+                {showAdvancedFields && <div className="space-y-4 pt-2 border-t border-gray-200 dark:border-gray-800">
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-500 dark:text-gray-400 mb-1.5">专注预设</label>
+                    <select
+                      value={selectedPresetId}
+                      onChange={(e) => applyFocusPreset(e.target.value)}
+                      className="w-full bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2 text-sm text-gray-900 dark:text-white focus:outline-none focus:border-[#88B5D3]"
+                    >
+                      <option value="none">无</option>
+                      <optgroup label="快捷预设">
+                        {QUICK_FOCUS_PRESETS.map((preset) => (
+                          <option key={preset.id} value={preset.id}>
+                            {preset.label}
+                          </option>
+                        ))}
+                      </optgroup>
+                      <optgroup label="我的模板">
+                        {focusTemplates.map((template) => (
+                          <option key={template.id} value={`template:${template.id}`}>
+                            {template.name} · {template.duration_minutes}m
+                          </option>
+                        ))}
+                      </optgroup>
+                    </select>
+                    <p className="mt-1 text-[11px] text-gray-400 dark:text-gray-500">选中后会自动填充计时类型、时长和标签</p>
+
+                    {recentPresetOptions.length > 0 && (
+                      <div className="mt-2 flex flex-wrap items-center gap-2">
+                        <span className="text-[11px] text-gray-400 dark:text-gray-500">最近使用</span>
+                        {recentPresetOptions.map((preset) => (
+                          <button
+                            key={preset.id}
+                            type="button"
+                            onClick={() => applyFocusPreset(preset.id)}
+                            className="text-xs px-2.5 py-1 rounded-lg border border-[#88B5D3]/35 text-[#88B5D3] hover:bg-[#88B5D3]/10 transition-colors"
+                          >
+                            {preset.label}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+
+                    {focusTemplates.length > 0 && (
+                      <div className="mt-3 space-y-2">
+                        <p className="text-[11px] text-gray-400 dark:text-gray-500">模板管理</p>
+                        <div className="space-y-1.5 max-h-28 overflow-auto pr-1">
+                          {focusTemplates.map((template) => (
+                            <div
+                              key={template.id}
+                              className="flex items-center justify-between rounded-lg border border-gray-200/80 dark:border-gray-700 px-2.5 py-1.5 text-xs"
+                            >
+                              <span className="text-gray-600 dark:text-gray-300 truncate pr-2">
+                                {template.name} · {template.duration_minutes}m
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => void handleArchiveTemplate(template)}
+                                disabled={templateArchivingId === template.id}
+                                className="text-[#2a3b52] dark:text-[#88B5D3] hover:text-[#FF9900] disabled:opacity-50 transition-colors"
+                              >
+                                {templateArchivingId === template.id ? "处理中" : "删除"}
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
                     <label className="block text-xs font-semibold text-gray-500 dark:text-gray-400 mb-1.5">重复设置</label>
                     <select value={newTask.repeat} onChange={(e) => setNewTask({...newTask, repeat: e.target.value as any})} className="w-full bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2 text-sm text-gray-900 dark:text-white focus:outline-none focus:border-indigo-500 mb-2">
@@ -744,16 +1152,59 @@ export function Tasks() {
                       )}
                     </div>
                   </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowTemplateSaveInput((prev) => !prev);
+                        if (!templateNameDraft.trim()) {
+                          setTemplateNameDraft(newTask.title || "");
+                        }
+                      }}
+                      className="text-xs font-semibold text-[#88B5D3] hover:text-[#6f9fbe] transition-colors"
+                    >
+                      保存当前专注配置为模板
+                    </button>
+
+                    {showTemplateSaveInput && (
+                      <div className="flex flex-col sm:flex-row gap-2">
+                        <input
+                          type="text"
+                          value={templateNameDraft}
+                          onChange={(e) => setTemplateNameDraft(e.target.value)}
+                          placeholder="模板名（默认任务标题）"
+                          className="flex-1 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl px-3 py-2 text-sm text-gray-900 dark:text-white focus:outline-none focus:border-[#88B5D3]"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => void handleCreateTemplateFromCurrentConfig()}
+                          disabled={templateSaving}
+                          className="px-4 py-2 rounded-xl bg-[#88B5D3] hover:bg-[#6f9fbe] text-white text-sm font-semibold disabled:opacity-50"
+                        >
+                          {templateSaving ? "保存中..." : "保存模板"}
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 </div>}
 
                 {newTask.tags && newTask.tags.length > 0 && (
-                  <div className="flex flex-wrap gap-2 pt-2">
+                  <div className="flex flex-wrap gap-2 pt-2 items-center">
                     {newTask.tags.map(tag => (
                       <span key={tag} className="flex items-center gap-1 text-xs text-indigo-600 dark:text-indigo-300 bg-indigo-50 dark:bg-indigo-500/10 px-2.5 py-1 rounded-lg">
                         {tag}
                         <button type="button" onClick={() => setNewTask({...newTask, tags: newTask.tags?.filter(t => t !== tag)})} className="hover:text-indigo-900 dark:hover:text-indigo-200"><X className="w-3 h-3" /></button>
                       </span>
                     ))}
+                    <button
+                      type="button"
+                      onClick={() => setNewTask({ ...newTask, tags: [] })}
+                      className="text-xs text-[#2a3b52] dark:text-[#88B5D3] hover:text-[#FF9900] transition-colors"
+                    >
+                      清空标签
+                    </button>
                   </div>
                 )}
 

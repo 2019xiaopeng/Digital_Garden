@@ -7,7 +7,7 @@ import { fetchWeeklyStats } from "../utils/apiBridge";
 import type { WeeklyStats } from "../utils/apiBridge";
 import { AiService } from "../lib/dataService";
 
-const COLORS = ["#FF4D4F", "#0f172a", "#FF9900", "#2f5f4f", "#88B5D3"];
+const COLORS = ["#88B5D3", "#6F9FBE", "#2A3B52", "#FF9900", "#C7851F"];
 
 const getTodayStr = () => {
   const d = new Date();
@@ -45,7 +45,10 @@ export function WeeklyReview() {
       setError(null);
       try {
         const data = await fetchWeeklyStats(endDate);
-        if (!cancelled) setStats(data);
+
+        if (!cancelled) {
+          setStats(data);
+        }
       } catch (e) {
         if (!cancelled) setError(`加载周统计失败：${e instanceof Error ? e.message : String(e)}`);
       } finally {
@@ -140,7 +143,7 @@ export function WeeklyReview() {
             <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">done / total（过去 7 天）</p>
           </div>
           <div className="w-24 h-24 rounded-full" style={{
-            background: `conic-gradient(#FF4D4F ${completion}%, rgba(136,181,211,0.25) ${completion}% 100%)`
+            background: `conic-gradient(#FF9900 ${completion}%, rgba(136,181,211,0.25) ${completion}% 100%)`
           }}>
             <div className="w-full h-full scale-[0.72] rounded-full bg-white dark:bg-[#0f1826] flex items-center justify-center text-sm font-semibold text-gray-700 dark:text-gray-200">
               {completion.toFixed(0)}%
@@ -185,7 +188,7 @@ export function WeeklyReview() {
           <button
             onClick={handleGenerateAiReview}
             disabled={aiLoading || !stats}
-            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-[#FF4D4F] via-[#FF9900] to-[#2f5f4f] hover:opacity-90 transition-opacity disabled:opacity-50"
+            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-[#2a3b52] via-[#88B5D3] to-[#FF9900] hover:opacity-90 transition-opacity disabled:opacity-50"
           >
             {aiLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
             生成本周学情深度复盘

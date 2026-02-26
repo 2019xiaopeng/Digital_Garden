@@ -1,10 +1,18 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowRight, Target, Play, Square, BarChart3, Activity, AlarmClockCheck, CheckCircle2, Circle, Maximize2, X, Pause, RotateCcw, ChevronDown, ChevronUp } from "lucide-react";
 import { Link } from "react-router-dom";
 import { cn } from "../lib/utils";
 import { FocusService } from "../lib/dataService";
 import type { LegacyTask } from "../lib/dataService";
-import { fetchDashboardStats, modifyTask } from "../utils/apiBridge";
+import {
+  fetchDashboardStats,
+  fetchFocusStats,
+  fetchFocusTemplates,
+  finishFocusRun,
+  modifyTask,
+  startFocusRun,
+  type FocusTemplate,
+} from "../utils/apiBridge";
 import { getSettings, type AppSettings } from "../lib/settings";
 import { useSync } from "../hooks/useSync";
 
@@ -94,6 +102,17 @@ const loadAttendanceMap = (): AttendanceMap => {
     return parsed && typeof parsed === "object" ? parsed : {};
   } catch {
     return {};
+  }
+};
+
+const parseFocusTemplateTags = (template: FocusTemplate | null): string[] => {
+  if (!template) return [];
+  try {
+    const parsed = JSON.parse(template.tags_json);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((tag) => String(tag).trim()).filter(Boolean);
+  } catch {
+    return [];
   }
 };
 
@@ -268,10 +287,21 @@ export function Dashboard() {
   const [sessionNow, setSessionNow] = useState(Date.now());
   const [countdownNow, setCountdownNow] = useState(Date.now());
   const [selectedTaskId, setSelectedTaskId] = useState("");
+  const [pomodoroMode, setPomodoroMode] = useState<"template" | "task" | "quick">("task");
+  const [selectedPomodoroTaskId, setSelectedPomodoroTaskId] = useState("");
+  const [focusTemplates, setFocusTemplates] = useState<FocusTemplate[]>([]);
+  const [selectedTemplateId, setSelectedTemplateId] = useState("");
   const [pomodoroSeconds, setPomodoroSeconds] = useState(25 * 60);
   const [pomodoroTotal, setPomodoroTotal] = useState(25 * 60);
   const [isPomodoroRunning, setIsPomodoroRunning] = useState(false);
+  const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  const [activeRunTemplateId, setActiveRunTemplateId] = useState<string | null>(null);
+  const [lastTemplateName, setLastTemplateName] = useState<string>("");
+  const [lastFocusMinutes, setLastFocusMinutes] = useState(0);
+  const [todayFocusMinutesSnapshot, setTodayFocusMinutesSnapshot] = useState(0);
+  const [templateFocusMinutesSnapshot, setTemplateFocusMinutesSnapshot] = useState(0);
   const [isPomodoroFullscreen, setIsPomodoroFullscreen] = useState(false);
+  const runFinalizeGuardRef = useRef(false);
   const [nervCollapsed, setNervCollapsed] = useState<boolean>(() => {
     if (typeof window === "undefined") return true;
     const raw = localStorage.getItem(NERV_COLLAPSE_STORAGE_KEY);
@@ -287,6 +317,12 @@ export function Dashboard() {
       .catch(() => {});
   }, []);
 
+  const refreshTemplatesSilently = useCallback(() => {
+    fetchFocusTemplates(false)
+      .then((rows) => setFocusTemplates(rows))
+      .catch(() => {});
+  }, []);
+
   useEffect(() => {
     const onSettingsUpdated = () => {
       setExamSettings(getSettings());
@@ -298,6 +334,7 @@ export function Dashboard() {
   // Load tasks from dataService
   useEffect(() => {
     refreshTasksSilently();
+    refreshTemplatesSilently();
     FocusService.getAll().then((sessions) => {
       const mapped: AttendanceMap = {};
       Object.values(sessions).forEach((s) => {
@@ -310,13 +347,49 @@ export function Dashboard() {
       });
       if (Object.keys(mapped).length > 0) setAttendanceMap(mapped);
     }).catch(() => {});
-  }, [refreshTasksSilently]);
+  }, [refreshTasksSilently, refreshTemplatesSilently]);
 
   useSync("SYNC_TASKS", refreshTasksSilently);
+  useSync("SYNC_FOCUS_TEMPLATES", refreshTemplatesSilently);
 
   const todayTasks = useMemo(() => tasks.filter((task) => task.date === today), [tasks, today]);
   const pendingTasks = useMemo(() => todayTasks.filter((task) => task.status !== "done"), [todayTasks]);
   const doneTasks = useMemo(() => todayTasks.filter((task) => task.status === "done"), [todayTasks]);
+  const selectedPomodoroTask = useMemo(
+    () => todayTasks.find((task) => task.id === selectedPomodoroTaskId) || null,
+    [selectedPomodoroTaskId, todayTasks]
+  );
+  const selectedTemplate = useMemo(
+    () => focusTemplates.find((template) => template.id === selectedTemplateId) || null,
+    [focusTemplates, selectedTemplateId]
+  );
+
+  const refreshFocusSnapshots = useCallback(async (templateId?: string | null) => {
+    try {
+      const [tagStats, templateStats] = await Promise.all([
+        fetchFocusStats({ startDate: today, endDate: today, dimension: "tag" }),
+        fetchFocusStats({ startDate: today, endDate: today, dimension: "template" }),
+      ]);
+      setTodayFocusMinutesSnapshot(tagStats.summary.total_focus_minutes || 0);
+
+      if (!templateId) {
+        setTemplateFocusMinutesSnapshot(0);
+        return;
+      }
+
+      const templateName = focusTemplates.find((item) => item.id === templateId)?.name;
+      if (!templateName) {
+        setTemplateFocusMinutesSnapshot(0);
+        return;
+      }
+
+      const matched = templateStats.slices.find((slice) => slice.key === templateName);
+      setTemplateFocusMinutesSnapshot(matched?.minutes || 0);
+    } catch {
+      setTodayFocusMinutesSnapshot(0);
+      setTemplateFocusMinutesSnapshot(0);
+    }
+  }, [focusTemplates, today]);
 
   const todayAttendance = attendanceMap[today] || defaultAttendance();
   const isCheckedIn = Boolean(todayAttendance.checkedInAt);
@@ -359,6 +432,22 @@ export function Dashboard() {
     }, 1000);
     return () => clearInterval(timer);
   }, [isPomodoroRunning, pomodoroSeconds]);
+
+  useEffect(() => {
+    if (pomodoroMode !== "template") return;
+    if (!selectedTemplate) return;
+    const seconds = Math.max(1, selectedTemplate.duration_minutes) * 60;
+    setPomodoroTotal(seconds);
+    setPomodoroSeconds(seconds);
+  }, [pomodoroMode, selectedTemplate]);
+
+  useEffect(() => {
+    if (pomodoroMode !== "task") return;
+    if (!selectedPomodoroTask) return;
+    const seconds = Math.max(1, selectedPomodoroTask.timerDuration || 25) * 60;
+    setPomodoroTotal(seconds);
+    setPomodoroSeconds(seconds);
+  }, [pomodoroMode, selectedPomodoroTask]);
 
   /* ── Attendance ── */
   const updateTodayAttendance = (patch: Partial<DailyAttendance>) => {
@@ -462,9 +551,24 @@ export function Dashboard() {
 
   /* ── Active task name ── */
   const activeTaskTitle = useMemo(() => {
+    if (pomodoroMode === "template" && selectedTemplate) {
+      return selectedTemplate.name;
+    }
+    if (pomodoroMode === "task") {
+      const task = selectedPomodoroTask || pendingTasks[0];
+      if (task) return task.title;
+    }
     const tid = selectedTaskId || todayAttendance.activeTaskId || pendingTasks[0]?.id;
     return todayTasks.find(t => t.id === tid)?.title || pendingTasks[0]?.title || "";
-  }, [selectedTaskId, todayAttendance.activeTaskId, pendingTasks, todayTasks]);
+  }, [
+    pendingTasks,
+    pomodoroMode,
+    selectedPomodoroTask,
+    selectedTaskId,
+    selectedTemplate,
+    todayAttendance.activeTaskId,
+    todayTasks,
+  ]);
 
   const examCountdownDays = useMemo(() => {
     if (!examSettings.examDate) return 0;
@@ -536,6 +640,102 @@ export function Dashboard() {
     setPomodoroTotal(minutes * 60);
   };
 
+  const finishDashboardRun = useCallback(async (
+    status: "completed" | "aborted",
+    explicitSeconds?: number
+  ) => {
+    if (!activeRunId || runFinalizeGuardRef.current) return;
+    runFinalizeGuardRef.current = true;
+    const actualSeconds = typeof explicitSeconds === "number"
+      ? Math.max(0, explicitSeconds)
+      : Math.max(0, pomodoroTotal - pomodoroSeconds);
+
+    try {
+      await finishFocusRun(activeRunId, {
+        actual_seconds: actualSeconds,
+        status,
+      });
+      const minutes = Math.floor(actualSeconds / 60);
+      setLastFocusMinutes(minutes);
+      await refreshFocusSnapshots(activeRunTemplateId);
+    } catch (error) {
+      console.warn("finish dashboard focus run failed:", error);
+    } finally {
+      setActiveRunId(null);
+      setActiveRunTemplateId(null);
+      runFinalizeGuardRef.current = false;
+    }
+  }, [activeRunId, activeRunTemplateId, pomodoroSeconds, pomodoroTotal, refreshFocusSnapshots]);
+
+  useEffect(() => {
+    if (pomodoroSeconds !== 0) return;
+    if (isPomodoroRunning) return;
+    if (!activeRunId) return;
+    void finishDashboardRun("completed", pomodoroTotal);
+  }, [activeRunId, finishDashboardRun, isPomodoroRunning, pomodoroSeconds, pomodoroTotal]);
+
+  const handlePomodoroToggle = async () => {
+    if (isPomodoroRunning) {
+      setIsPomodoroRunning(false);
+      return;
+    }
+
+    if (!activeRunId) {
+      let payloadTemplateId: string | null = null;
+      let payloadTaskId: string | null = null;
+      let payloadTimerType: "pomodoro" | "countdown" = "pomodoro";
+      let payloadTags: string[] = [];
+
+      if (pomodoroMode === "template") {
+        if (!selectedTemplate) return;
+        payloadTemplateId = selectedTemplate.id;
+        payloadTimerType = selectedTemplate.timer_type;
+        payloadTags = parseFocusTemplateTags(selectedTemplate);
+      } else if (pomodoroMode === "task") {
+        const task = selectedPomodoroTask || pendingTasks[0] || null;
+        if (!task) return;
+        payloadTaskId = task.id;
+        payloadTimerType = task.timerType === "countdown" ? "countdown" : "pomodoro";
+        payloadTags = task.tags || [];
+
+        if (task.status === "todo") {
+          const nextTask = { ...task, status: "in-progress" as LegacyTask["status"] };
+          setTasks((prev) => prev.map((item) => (item.id === task.id ? nextTask : item)));
+          modifyTask(task.id, nextTask).catch(() => {});
+        }
+      }
+
+      try {
+        const run = await startFocusRun({
+          source: "dashboard",
+          template_id: payloadTemplateId,
+          task_id: payloadTaskId,
+          timer_type: payloadTimerType,
+          planned_minutes: Math.max(1, Math.floor(pomodoroTotal / 60)),
+          date: today,
+          tags_json: JSON.stringify(payloadTags),
+          note: null,
+        });
+        setActiveRunId(run.id);
+        setActiveRunTemplateId(payloadTemplateId);
+        setLastTemplateName(payloadTemplateId ? (focusTemplates.find((item) => item.id === payloadTemplateId)?.name || "") : "");
+      } catch (error) {
+        console.warn("start dashboard focus run failed:", error);
+        return;
+      }
+    }
+
+    setIsPomodoroRunning(true);
+  };
+
+  const handlePomodoroReset = async () => {
+    setIsPomodoroRunning(false);
+    if (activeRunId) {
+      await finishDashboardRun("aborted", Math.max(0, pomodoroTotal - pomodoroSeconds));
+    }
+    setPomodoroSeconds(pomodoroTotal);
+  };
+
   /* ═══ Fullscreen Mode ═══ */
   if (isPomodoroFullscreen) {
     return (
@@ -544,8 +744,8 @@ export function Dashboard() {
         isRunning={isPomodoroRunning}
         taskTitle={activeTaskTitle}
         totalSeconds={pomodoroTotal}
-        onToggle={() => setIsPomodoroRunning(p => !p)}
-        onReset={() => { setIsPomodoroRunning(false); setPomodoroSeconds(pomodoroTotal); }}
+        onToggle={() => void handlePomodoroToggle()}
+        onReset={() => { void handlePomodoroReset(); }}
         onExit={() => setIsPomodoroFullscreen(false)}
       />
     );
@@ -618,6 +818,67 @@ export function Dashboard() {
               <Maximize2 className="w-4 h-4" />
             </button>
           </div>
+
+          <div className="grid grid-cols-3 gap-2 text-xs">
+            <button
+              onClick={() => setPomodoroMode("template")}
+              className={cn(
+                "py-2 rounded-lg glass-soft hover:border-[#88B5D3]/40 transition-colors",
+                pomodoroMode === "template" && "border-[#88B5D3] bg-[#88B5D3]/10 text-[#88B5D3] font-semibold"
+              )}
+            >
+              按模板
+            </button>
+            <button
+              onClick={() => setPomodoroMode("task")}
+              className={cn(
+                "py-2 rounded-lg glass-soft hover:border-[#88B5D3]/40 transition-colors",
+                pomodoroMode === "task" && "border-[#88B5D3] bg-[#88B5D3]/10 text-[#88B5D3] font-semibold"
+              )}
+            >
+              按任务
+            </button>
+            <button
+              onClick={() => setPomodoroMode("quick")}
+              className={cn(
+                "py-2 rounded-lg glass-soft hover:border-[#88B5D3]/40 transition-colors",
+                pomodoroMode === "quick" && "border-[#88B5D3] bg-[#88B5D3]/10 text-[#88B5D3] font-semibold"
+              )}
+            >
+              快速启动
+            </button>
+          </div>
+
+          {pomodoroMode === "template" && (
+            <select
+              value={selectedTemplateId}
+              onChange={(e) => setSelectedTemplateId(e.target.value)}
+              className="w-full bg-white/90 dark:bg-[#0f1826]/80 border border-gray-200/80 dark:border-[#30435c] rounded-xl px-3 py-2 text-sm text-gray-900 dark:text-white"
+            >
+              <option value="">选择专注模板</option>
+              {focusTemplates.map((template) => (
+                <option key={template.id} value={template.id}>
+                  {template.name} · {template.duration_minutes}m
+                </option>
+              ))}
+            </select>
+          )}
+
+          {pomodoroMode === "task" && (
+            <select
+              value={selectedPomodoroTaskId}
+              onChange={(e) => setSelectedPomodoroTaskId(e.target.value)}
+              className="w-full bg-white/90 dark:bg-[#0f1826]/80 border border-gray-200/80 dark:border-[#30435c] rounded-xl px-3 py-2 text-sm text-gray-900 dark:text-white"
+            >
+              <option value="">自动选择首个未完成任务</option>
+              {todayTasks.map((task) => (
+                <option key={task.id} value={task.id}>
+                  {task.title}
+                </option>
+              ))}
+            </select>
+          )}
+
           <div className="text-center">
             <div className="text-5xl font-mono font-bold text-gray-900 dark:text-white tracking-tight">{formatPomodoro(pomodoroSeconds)}</div>
           </div>
@@ -646,13 +907,20 @@ export function Dashboard() {
             </div>
           </div>
           <div className="grid grid-cols-2 gap-2">
-            <button onClick={() => setIsPomodoroRunning((prev) => !prev)} className="py-2.5 rounded-xl bg-[#88B5D3] hover:bg-[#6f9fbe] text-white text-sm font-semibold">
+            <button onClick={() => void handlePomodoroToggle()} className="py-2.5 rounded-xl bg-[#88B5D3] hover:bg-[#6f9fbe] text-white text-sm font-semibold">
               {isPomodoroRunning ? "暂停" : "开始"}
             </button>
-            <button onClick={() => { setIsPomodoroRunning(false); setPomodoroSeconds(pomodoroTotal); }} className="py-2.5 rounded-xl glass-soft text-sm font-semibold text-gray-700 dark:text-gray-200">
+            <button onClick={() => void handlePomodoroReset()} className="py-2.5 rounded-xl glass-soft text-sm font-semibold text-gray-700 dark:text-gray-200">
               重置
             </button>
           </div>
+          {(lastFocusMinutes > 0 || todayFocusMinutesSnapshot > 0 || templateFocusMinutesSnapshot > 0) && (
+            <div className="rounded-xl bg-[#88B5D3]/10 border border-[#88B5D3]/25 px-3 py-2 text-xs text-[#45617a] dark:text-[#9cc5df] space-y-1">
+              <p>本次专注：{lastFocusMinutes} 分钟</p>
+              <p>今日累计：{todayFocusMinutesSnapshot} 分钟</p>
+              {lastTemplateName && <p>当前模板累计：{templateFocusMinutesSnapshot} 分钟</p>}
+            </div>
+          )}
         </div>
 
         {/* Task Distribution Pie */}

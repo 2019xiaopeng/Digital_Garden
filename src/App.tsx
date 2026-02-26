@@ -12,9 +12,9 @@ import { Blog } from "./pages/Blog";
 import { BlogPost } from "./pages/BlogPost";
 import { Notes } from "./pages/Notes";
 import { Resources } from "./pages/Resources";
-import { Quiz } from "./pages/Quiz";
 import { Tasks } from "./pages/Tasks";
 import { WeeklyReview } from "./pages/WeeklyReview";
+import { FocusInsights } from "./pages/FocusInsights";
 import { Settings } from "./pages/Settings";
 import { isTauriAvailable } from "./lib/dataService";
 import { KnowledgeSelectionProvider } from "./context/KnowledgeSelectionContext";
@@ -77,9 +77,9 @@ export default function App() {
             <Route path="blog/:id" element={<BlogPost />} />
             <Route path="notes" element={<Notes />} />
             <Route path="resources" element={<Resources />} />
-            <Route path="quiz" element={<Quiz />} />
             <Route path="tasks" element={<Tasks />} />
             <Route path="weekly" element={<WeeklyReview />} />
+            <Route path="focus-insights" element={<FocusInsights />} />
             <Route path="settings" element={<SettingsDesktopOnly />} />
           </Route>
         </Routes>

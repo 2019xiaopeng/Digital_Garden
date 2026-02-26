@@ -68,6 +68,84 @@ pub struct FocusSession {
     pub active_task_id: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
+pub struct FocusTemplate {
+    pub id: String,
+    pub name: String,
+    pub timer_type: String,
+    pub duration_minutes: i32,
+    pub tags_json: String,
+    pub linked_task_title: Option<String>,
+    pub color_token: Option<String>,
+    pub is_archived: i32,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
+pub struct FocusRun {
+    pub id: String,
+    pub source: String,
+    pub template_id: Option<String>,
+    pub task_id: Option<String>,
+    pub timer_type: String,
+    pub planned_minutes: i32,
+    pub actual_seconds: i64,
+    pub status: String,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub date: String,
+    pub tags_json: String,
+    pub note: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct StartFocusRunPayload {
+    pub source: String,
+    pub template_id: Option<String>,
+    pub task_id: Option<String>,
+    pub timer_type: String,
+    pub planned_minutes: i32,
+    pub date: Option<String>,
+    pub tags_json: Option<String>,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct FinishFocusRunPayload {
+    pub actual_seconds: i64,
+    pub status: String,
+    pub ended_at: Option<String>,
+    pub tags_json: Option<String>,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct FocusStatsSummary {
+    pub total_focus_minutes: i64,
+    pub completed_runs: i64,
+    pub completion_rate: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct FocusStatsSlice {
+    pub key: String,
+    pub minutes: i64,
+    pub percent: f64,
+    pub runs: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct FocusStatsResult {
+    pub start_date: String,
+    pub end_date: String,
+    pub dimension: String,
+    pub summary: FocusStatsSummary,
+    pub slices: Vec<FocusStatsSlice>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AiProxyRequest {
     pub api_url: String,
@@ -332,6 +410,13 @@ struct WeeklyStatsQuery {
 }
 
 #[derive(Debug, Deserialize)]
+struct FocusStatsQuery {
+    start_date: Option<String>,
+    end_date: Option<String>,
+    dimension: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct NotesFileQuery {
     path: String,
 }
@@ -536,6 +621,476 @@ async fn db_get_weekly_stats(pool: &sqlx::SqlitePool, end_date: &str) -> Result<
     })
 }
 
+fn normalize_focus_dimension(raw: Option<&str>) -> String {
+    match raw.unwrap_or("tag").trim().to_lowercase().as_str() {
+        "template" => "template".to_string(),
+        "timer_type" => "timer_type".to_string(),
+        _ => "tag".to_string(),
+    }
+}
+
+fn resolve_focus_range(
+    start_date: Option<&str>,
+    end_date: Option<&str>,
+) -> Result<(String, String), String> {
+    let resolved_end = if let Some(end) = end_date {
+        chrono::NaiveDate::parse_from_str(end, "%Y-%m-%d")
+            .map_err(|e| format!("Invalid end_date, expected YYYY-MM-DD: {}", e))?
+    } else {
+        Local::now().date_naive()
+    };
+
+    let resolved_start = if let Some(start) = start_date {
+        chrono::NaiveDate::parse_from_str(start, "%Y-%m-%d")
+            .map_err(|e| format!("Invalid start_date, expected YYYY-MM-DD: {}", e))?
+    } else {
+        resolved_end - chrono::Duration::days(6)
+    };
+
+    if resolved_start > resolved_end {
+        return Err("start_date 不能晚于 end_date".to_string());
+    }
+
+    Ok((
+        resolved_start.format("%Y-%m-%d").to_string(),
+        resolved_end.format("%Y-%m-%d").to_string(),
+    ))
+}
+
+fn parse_focus_tags(tags_json: &str) -> Vec<String> {
+    let parsed = serde_json::from_str::<Vec<String>>(tags_json).unwrap_or_default();
+    let mut clean = Vec::<String>::new();
+    for tag in parsed {
+        let normalized = tag.trim();
+        if normalized.is_empty() {
+            continue;
+        }
+        if clean.iter().any(|existing| existing == normalized) {
+            continue;
+        }
+        clean.push(normalized.to_string());
+    }
+
+    if clean.is_empty() {
+        clean.push("未分类".to_string());
+    }
+    clean
+}
+
+fn gen_focus_id(prefix: &str) -> String {
+    format!("{}-{}", prefix, Utc::now().timestamp_micros())
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct FocusSummaryRow {
+    total_seconds: i64,
+    completed_runs: i64,
+    all_runs: i64,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct FocusGroupedRow {
+    key_name: String,
+    total_seconds: i64,
+    run_count: i64,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct FocusTagRow {
+    tags_json: String,
+    actual_seconds: i64,
+}
+
+async fn db_get_focus_templates(
+    pool: &sqlx::SqlitePool,
+    include_archived: bool,
+) -> Result<Vec<FocusTemplate>, String> {
+    let rows = if include_archived {
+        sqlx::query_as::<_, FocusTemplate>(
+            "SELECT id, name, timer_type, duration_minutes, tags_json, linked_task_title, color_token, is_archived, created_at, updated_at FROM focus_templates ORDER BY is_archived ASC, updated_at DESC",
+        )
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("Failed to fetch focus templates: {}", e))?
+    } else {
+        sqlx::query_as::<_, FocusTemplate>(
+            "SELECT id, name, timer_type, duration_minutes, tags_json, linked_task_title, color_token, is_archived, created_at, updated_at FROM focus_templates WHERE is_archived = 0 ORDER BY updated_at DESC",
+        )
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("Failed to fetch active focus templates: {}", e))?
+    };
+    Ok(rows)
+}
+
+async fn db_create_focus_template(
+    pool: &sqlx::SqlitePool,
+    template: &FocusTemplate,
+) -> Result<FocusTemplate, String> {
+    sqlx::query(
+        "INSERT INTO focus_templates (id, name, timer_type, duration_minutes, tags_json, linked_task_title, color_token, is_archived, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&template.id)
+    .bind(&template.name)
+    .bind(&template.timer_type)
+    .bind(template.duration_minutes)
+    .bind(&template.tags_json)
+    .bind(&template.linked_task_title)
+    .bind(&template.color_token)
+    .bind(template.is_archived)
+    .bind(&template.created_at)
+    .bind(&template.updated_at)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to create focus template: {}", e))?;
+
+    Ok(template.clone())
+}
+
+async fn db_update_focus_template(
+    pool: &sqlx::SqlitePool,
+    template: &FocusTemplate,
+) -> Result<FocusTemplate, String> {
+    let result = sqlx::query(
+        "UPDATE focus_templates SET name = ?, timer_type = ?, duration_minutes = ?, tags_json = ?, linked_task_title = ?, color_token = ?, is_archived = ?, updated_at = ? WHERE id = ?",
+    )
+    .bind(&template.name)
+    .bind(&template.timer_type)
+    .bind(template.duration_minutes)
+    .bind(&template.tags_json)
+    .bind(&template.linked_task_title)
+    .bind(&template.color_token)
+    .bind(template.is_archived)
+    .bind(&template.updated_at)
+    .bind(&template.id)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to update focus template: {}", e))?;
+
+    if result.rows_affected() == 0 {
+        return Err("Focus template not found".to_string());
+    }
+
+    Ok(template.clone())
+}
+
+async fn db_archive_focus_template(pool: &sqlx::SqlitePool, id: &str) -> Result<(), String> {
+    let result = sqlx::query(
+        "UPDATE focus_templates SET is_archived = 1, updated_at = ? WHERE id = ?",
+    )
+    .bind(now_iso())
+    .bind(id)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to archive focus template: {}", e))?;
+
+    if result.rows_affected() == 0 {
+        return Err("Focus template not found".to_string());
+    }
+
+    Ok(())
+}
+
+async fn db_start_focus_run(
+    pool: &sqlx::SqlitePool,
+    payload: &StartFocusRunPayload,
+) -> Result<FocusRun, String> {
+    if payload.source.trim().is_empty() {
+        return Err("source 不能为空".to_string());
+    }
+    if payload.planned_minutes <= 0 {
+        return Err("planned_minutes 必须大于 0".to_string());
+    }
+    if payload.timer_type.trim().is_empty() {
+        return Err("timer_type 不能为空".to_string());
+    }
+
+    let now = now_iso();
+    let run = FocusRun {
+        id: gen_focus_id("focus-run"),
+        source: payload.source.trim().to_string(),
+        template_id: payload.template_id.clone(),
+        task_id: payload.task_id.clone(),
+        timer_type: payload.timer_type.trim().to_string(),
+        planned_minutes: payload.planned_minutes,
+        actual_seconds: 0,
+        status: "running".to_string(),
+        started_at: now.clone(),
+        ended_at: None,
+        date: payload
+            .date
+            .clone()
+            .unwrap_or_else(|| Local::now().format("%Y-%m-%d").to_string()),
+        tags_json: payload
+            .tags_json
+            .clone()
+            .unwrap_or_else(|| "[]".to_string()),
+        note: payload.note.clone(),
+        created_at: now.clone(),
+        updated_at: now,
+    };
+
+    sqlx::query(
+        "INSERT INTO focus_runs (id, source, template_id, task_id, timer_type, planned_minutes, actual_seconds, status, started_at, ended_at, date, tags_json, note, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&run.id)
+    .bind(&run.source)
+    .bind(&run.template_id)
+    .bind(&run.task_id)
+    .bind(&run.timer_type)
+    .bind(run.planned_minutes)
+    .bind(run.actual_seconds)
+    .bind(&run.status)
+    .bind(&run.started_at)
+    .bind(&run.ended_at)
+    .bind(&run.date)
+    .bind(&run.tags_json)
+    .bind(&run.note)
+    .bind(&run.created_at)
+    .bind(&run.updated_at)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to start focus run: {}", e))?;
+
+    Ok(run)
+}
+
+async fn db_finish_focus_run(
+    pool: &sqlx::SqlitePool,
+    run_id: &str,
+    payload: &FinishFocusRunPayload,
+) -> Result<FocusRun, String> {
+    let next_status = payload.status.trim().to_lowercase();
+    if next_status != "completed" && next_status != "aborted" {
+        return Err("status 仅支持 completed 或 aborted".to_string());
+    }
+
+    let ended_at = payload.ended_at.clone().unwrap_or_else(now_iso);
+    let updated_at = now_iso();
+
+    let result = sqlx::query(
+        "UPDATE focus_runs SET actual_seconds = ?, status = ?, ended_at = ?, tags_json = COALESCE(?, tags_json), note = COALESCE(?, note), updated_at = ? WHERE id = ?",
+    )
+    .bind(payload.actual_seconds.max(0))
+    .bind(&next_status)
+    .bind(&ended_at)
+    .bind(&payload.tags_json)
+    .bind(&payload.note)
+    .bind(&updated_at)
+    .bind(run_id)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to finish focus run: {}", e))?;
+
+    if result.rows_affected() == 0 {
+        return Err("Focus run not found".to_string());
+    }
+
+    let run = sqlx::query_as::<_, FocusRun>(
+        "SELECT id, source, template_id, task_id, timer_type, planned_minutes, actual_seconds, status, started_at, ended_at, date, tags_json, note, created_at, updated_at FROM focus_runs WHERE id = ?",
+    )
+    .bind(run_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| format!("Failed to fetch finished focus run: {}", e))?;
+
+    Ok(run)
+}
+
+async fn db_get_focus_runs(
+    pool: &sqlx::SqlitePool,
+    start_date: Option<&str>,
+    end_date: Option<&str>,
+    status: Option<&str>,
+) -> Result<Vec<FocusRun>, String> {
+    let (start, end) = resolve_focus_range(start_date, end_date)?;
+    let rows = if let Some(status_value) = status {
+        sqlx::query_as::<_, FocusRun>(
+            "SELECT id, source, template_id, task_id, timer_type, planned_minutes, actual_seconds, status, started_at, ended_at, date, tags_json, note, created_at, updated_at FROM focus_runs WHERE date BETWEEN ? AND ? AND status = ? ORDER BY started_at DESC",
+        )
+        .bind(&start)
+        .bind(&end)
+        .bind(status_value)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("Failed to fetch focus runs by status: {}", e))?
+    } else {
+        sqlx::query_as::<_, FocusRun>(
+            "SELECT id, source, template_id, task_id, timer_type, planned_minutes, actual_seconds, status, started_at, ended_at, date, tags_json, note, created_at, updated_at FROM focus_runs WHERE date BETWEEN ? AND ? ORDER BY started_at DESC",
+        )
+        .bind(&start)
+        .bind(&end)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("Failed to fetch focus runs: {}", e))?
+    };
+    Ok(rows)
+}
+
+async fn db_get_focus_stats(
+    pool: &sqlx::SqlitePool,
+    start_date: Option<&str>,
+    end_date: Option<&str>,
+    dimension: Option<&str>,
+) -> Result<FocusStatsResult, String> {
+    let (start, end) = resolve_focus_range(start_date, end_date)?;
+    let dim = normalize_focus_dimension(dimension);
+
+    let summary_row = sqlx::query_as::<_, FocusSummaryRow>(
+        "SELECT
+            COALESCE(SUM(CASE WHEN status = 'completed' AND actual_seconds >= 60 THEN actual_seconds ELSE 0 END), 0) AS total_seconds,
+            COALESCE(SUM(CASE WHEN status = 'completed' AND actual_seconds >= 60 THEN 1 ELSE 0 END), 0) AS completed_runs,
+            COUNT(*) AS all_runs
+         FROM focus_runs
+         WHERE date BETWEEN ? AND ?",
+    )
+    .bind(&start)
+    .bind(&end)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| format!("Failed to aggregate focus summary: {}", e))?;
+
+    let total_focus_minutes = summary_row.total_seconds / 60;
+    let completion_rate = if summary_row.all_runs > 0 {
+        (summary_row.completed_runs as f64 / summary_row.all_runs as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    let summary = FocusStatsSummary {
+        total_focus_minutes,
+        completed_runs: summary_row.completed_runs,
+        completion_rate,
+    };
+
+    let slices = if dim == "template" {
+        let rows = sqlx::query_as::<_, FocusGroupedRow>(
+            "SELECT
+                COALESCE(NULLIF(ft.name, ''), '未命名模板') AS key_name,
+                COALESCE(SUM(fr.actual_seconds), 0) AS total_seconds,
+                COUNT(*) AS run_count
+             FROM focus_runs fr
+             LEFT JOIN focus_templates ft ON fr.template_id = ft.id
+             WHERE fr.date BETWEEN ? AND ?
+               AND fr.status = 'completed'
+               AND fr.actual_seconds >= 60
+             GROUP BY COALESCE(NULLIF(ft.name, ''), '未命名模板')
+             ORDER BY total_seconds DESC",
+        )
+        .bind(&start)
+        .bind(&end)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("Failed to aggregate focus template slices: {}", e))?;
+
+        rows.into_iter()
+            .map(|row| {
+                let minutes = row.total_seconds / 60;
+                let percent = if total_focus_minutes > 0 {
+                    (minutes as f64 / total_focus_minutes as f64) * 100.0
+                } else {
+                    0.0
+                };
+                FocusStatsSlice {
+                    key: row.key_name,
+                    minutes,
+                    percent,
+                    runs: row.run_count,
+                }
+            })
+            .collect::<Vec<FocusStatsSlice>>()
+    } else if dim == "timer_type" {
+        let rows = sqlx::query_as::<_, FocusGroupedRow>(
+            "SELECT
+                COALESCE(NULLIF(timer_type, ''), 'unknown') AS key_name,
+                COALESCE(SUM(actual_seconds), 0) AS total_seconds,
+                COUNT(*) AS run_count
+             FROM focus_runs
+             WHERE date BETWEEN ? AND ?
+               AND status = 'completed'
+               AND actual_seconds >= 60
+             GROUP BY COALESCE(NULLIF(timer_type, ''), 'unknown')
+             ORDER BY total_seconds DESC",
+        )
+        .bind(&start)
+        .bind(&end)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("Failed to aggregate focus timer_type slices: {}", e))?;
+
+        rows.into_iter()
+            .map(|row| {
+                let minutes = row.total_seconds / 60;
+                let percent = if total_focus_minutes > 0 {
+                    (minutes as f64 / total_focus_minutes as f64) * 100.0
+                } else {
+                    0.0
+                };
+                FocusStatsSlice {
+                    key: row.key_name,
+                    minutes,
+                    percent,
+                    runs: row.run_count,
+                }
+            })
+            .collect::<Vec<FocusStatsSlice>>()
+    } else {
+        let rows = sqlx::query_as::<_, FocusTagRow>(
+            "SELECT tags_json, actual_seconds
+             FROM focus_runs
+             WHERE date BETWEEN ? AND ?
+               AND status = 'completed'
+               AND actual_seconds >= 60",
+        )
+        .bind(&start)
+        .bind(&end)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("Failed to fetch focus run tags for aggregation: {}", e))?;
+
+        let mut tag_map: HashMap<String, (i64, i64)> = HashMap::new();
+        for row in rows {
+            let minutes = row.actual_seconds / 60;
+            if minutes <= 0 {
+                continue;
+            }
+            let tags = parse_focus_tags(&row.tags_json);
+            for tag in tags {
+                let entry = tag_map.entry(tag).or_insert((0, 0));
+                entry.0 += minutes;
+                entry.1 += 1;
+            }
+        }
+
+        let mut slices_vec = tag_map
+            .into_iter()
+            .map(|(key, (minutes, runs))| {
+                let percent = if total_focus_minutes > 0 {
+                    (minutes as f64 / total_focus_minutes as f64) * 100.0
+                } else {
+                    0.0
+                };
+                FocusStatsSlice {
+                    key,
+                    minutes,
+                    percent,
+                    runs,
+                }
+            })
+            .collect::<Vec<FocusStatsSlice>>();
+        slices_vec.sort_by(|a, b| b.minutes.cmp(&a.minutes));
+        slices_vec
+    };
+
+    Ok(FocusStatsResult {
+        start_date: start,
+        end_date: end,
+        dimension: dim,
+        summary,
+        slices,
+    })
+}
+
 async fn db_get_resources_rows(pool: &sqlx::SqlitePool) -> Result<Vec<Resource>, String> {
     let rows = sqlx::query_as::<_, Resource>(
         "SELECT id, name, path, file_type, subject, size_bytes, created_at FROM resources ORDER BY created_at DESC",
@@ -682,6 +1237,161 @@ async fn api_weekly_stats_handler(
     Ok(Json(stats))
 }
 
+async fn api_focus_templates_handler(
+    AxumState(state): AxumState<LanAppState>,
+) -> Result<Json<Vec<FocusTemplate>>, (StatusCode, String)> {
+    let db = state.db.lock().await;
+    let rows = db_get_focus_templates(&db.db, false)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(rows))
+}
+
+async fn api_create_focus_template_handler(
+    AxumState(state): AxumState<LanAppState>,
+    Json(mut template): Json<FocusTemplate>,
+) -> Result<Json<FocusTemplate>, (StatusCode, String)> {
+    if template.name.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "template.name 不能为空".to_string()));
+    }
+    if template.duration_minutes <= 0 {
+        return Err((StatusCode::BAD_REQUEST, "template.duration_minutes 必须大于 0".to_string()));
+    }
+
+    if template.id.trim().is_empty() {
+        template.id = gen_focus_id("focus-template");
+    }
+    if template.timer_type.trim().is_empty() {
+        template.timer_type = "pomodoro".to_string();
+    }
+    if template.tags_json.trim().is_empty() {
+        template.tags_json = "[]".to_string();
+    }
+
+    let now = now_iso();
+    if template.created_at.trim().is_empty() {
+        template.created_at = now.clone();
+    }
+    template.updated_at = now;
+
+    let db = state.db.lock().await;
+    let created = db_create_focus_template(&db.db, &template)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    drop(db);
+    emit_sync_action(&state.sync_hub, "SYNC_FOCUS_TEMPLATES");
+    Ok(Json(created))
+}
+
+async fn api_update_focus_template_handler(
+    AxumState(state): AxumState<LanAppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(mut template): Json<FocusTemplate>,
+) -> Result<Json<FocusTemplate>, (StatusCode, String)> {
+    if template.name.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "template.name 不能为空".to_string()));
+    }
+    if template.duration_minutes <= 0 {
+        return Err((StatusCode::BAD_REQUEST, "template.duration_minutes 必须大于 0".to_string()));
+    }
+
+    template.id = id;
+    if template.timer_type.trim().is_empty() {
+        template.timer_type = "pomodoro".to_string();
+    }
+    if template.tags_json.trim().is_empty() {
+        template.tags_json = "[]".to_string();
+    }
+
+    template.updated_at = now_iso();
+    if template.created_at.trim().is_empty() {
+        template.created_at = template.updated_at.clone();
+    }
+
+    let db = state.db.lock().await;
+    let updated = db_update_focus_template(&db.db, &template)
+        .await
+        .map_err(|e| {
+            if e.contains("not found") {
+                (StatusCode::NOT_FOUND, e)
+            } else {
+                (StatusCode::INTERNAL_SERVER_ERROR, e)
+            }
+        })?;
+    drop(db);
+    emit_sync_action(&state.sync_hub, "SYNC_FOCUS_TEMPLATES");
+    Ok(Json(updated))
+}
+
+async fn api_archive_focus_template_handler(
+    AxumState(state): AxumState<LanAppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let db = state.db.lock().await;
+    db_archive_focus_template(&db.db, &id)
+        .await
+        .map_err(|e| {
+            if e.contains("not found") {
+                (StatusCode::NOT_FOUND, e)
+            } else {
+                (StatusCode::INTERNAL_SERVER_ERROR, e)
+            }
+        })?;
+    drop(db);
+    emit_sync_action(&state.sync_hub, "SYNC_FOCUS_TEMPLATES");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn api_start_focus_run_handler(
+    AxumState(state): AxumState<LanAppState>,
+    Json(payload): Json<StartFocusRunPayload>,
+) -> Result<Json<FocusRun>, (StatusCode, String)> {
+    let db = state.db.lock().await;
+    let started = db_start_focus_run(&db.db, &payload)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    drop(db);
+    emit_sync_action(&state.sync_hub, "SYNC_FOCUS_RUNS");
+    Ok(Json(started))
+}
+
+async fn api_finish_focus_run_handler(
+    AxumState(state): AxumState<LanAppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(payload): Json<FinishFocusRunPayload>,
+) -> Result<Json<FocusRun>, (StatusCode, String)> {
+    let db = state.db.lock().await;
+    let finished = db_finish_focus_run(&db.db, &id, &payload)
+        .await
+        .map_err(|e| {
+            if e.contains("not found") {
+                (StatusCode::NOT_FOUND, e)
+            } else {
+                (StatusCode::BAD_REQUEST, e)
+            }
+        })?;
+    drop(db);
+    emit_sync_action(&state.sync_hub, "SYNC_FOCUS_RUNS");
+    Ok(Json(finished))
+}
+
+async fn api_focus_stats_handler(
+    AxumState(state): AxumState<LanAppState>,
+    Query(params): Query<FocusStatsQuery>,
+) -> Result<Json<FocusStatsResult>, (StatusCode, String)> {
+    let db = state.db.lock().await;
+    let stats = db_get_focus_stats(
+        &db.db,
+        params.start_date.as_deref(),
+        params.end_date.as_deref(),
+        params.dimension.as_deref(),
+    )
+    .await
+    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+    Ok(Json(stats))
+}
+
 async fn api_ws_handler(
     AxumState(state): AxumState<LanAppState>,
     ws: WebSocketUpgrade,
@@ -811,6 +1521,17 @@ async fn toggle_local_server(
         .route("/api/ws", get(api_ws_handler))
         .route("/api/tasks", get(api_tasks_handler).post(api_create_task_handler))
         .route("/api/tasks/{id}", put(api_update_task_handler).delete(api_delete_task_handler))
+        .route(
+            "/api/focus/templates",
+            get(api_focus_templates_handler).post(api_create_focus_template_handler),
+        )
+        .route(
+            "/api/focus/templates/{id}",
+            put(api_update_focus_template_handler).delete(api_archive_focus_template_handler),
+        )
+        .route("/api/focus/runs/start", axum::routing::post(api_start_focus_run_handler))
+        .route("/api/focus/runs/{id}/finish", axum::routing::post(api_finish_focus_run_handler))
+        .route("/api/focus/stats", get(api_focus_stats_handler))
         .route("/api/stats/weekly", get(api_weekly_stats_handler))
         .route("/api/resources", get(api_resources_handler))
         .route(
@@ -913,6 +1634,48 @@ async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, String> {
     .execute(&pool)
     .await
     .map_err(|e| format!("Failed to create focus_sessions table: {}", e))?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS focus_templates (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            timer_type TEXT NOT NULL DEFAULT 'pomodoro',
+            duration_minutes INTEGER NOT NULL DEFAULT 25,
+            tags_json TEXT NOT NULL DEFAULT '[]',
+            linked_task_title TEXT,
+            color_token TEXT,
+            is_archived INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )",
+    )
+    .execute(&pool)
+    .await
+    .map_err(|e| format!("Failed to create focus_templates table: {}", e))?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS focus_runs (
+            id TEXT PRIMARY KEY,
+            source TEXT NOT NULL,
+            template_id TEXT,
+            task_id TEXT,
+            timer_type TEXT NOT NULL,
+            planned_minutes INTEGER NOT NULL,
+            actual_seconds INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'running',
+            started_at TEXT NOT NULL,
+            ended_at TEXT,
+            date TEXT NOT NULL,
+            tags_json TEXT NOT NULL DEFAULT '[]',
+            note TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(template_id) REFERENCES focus_templates(id) ON DELETE SET NULL
+        )",
+    )
+    .execute(&pool)
+    .await
+    .map_err(|e| format!("Failed to create focus_runs table: {}", e))?;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS video_bookmarks (
@@ -1025,6 +1788,26 @@ async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, String> {
         .await
         .ok();
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_focus_sessions_date ON focus_sessions(date)")
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_focus_templates_archived ON focus_templates(is_archived)")
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_focus_templates_updated_at ON focus_templates(updated_at DESC)")
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_focus_runs_date ON focus_runs(date)")
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_focus_runs_status ON focus_runs(status)")
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_focus_runs_template_id ON focus_runs(template_id)")
         .execute(&pool)
         .await
         .ok();
@@ -1508,6 +2291,156 @@ async fn upsert_focus_session(
     .await
     .map_err(|e| format!("Failed to upsert focus session: {}", e))?;
     Ok(session)
+}
+
+#[tauri::command]
+async fn get_focus_templates(
+    include_archived: Option<bool>,
+    db: State<'_, Arc<Mutex<AppDb>>>,
+) -> Result<Vec<FocusTemplate>, String> {
+    let db = db.lock().await;
+    db_get_focus_templates(&db.db, include_archived.unwrap_or(false)).await
+}
+
+#[tauri::command]
+async fn create_focus_template(
+    mut template: FocusTemplate,
+    db: State<'_, Arc<Mutex<AppDb>>>,
+    sync_hub: State<'_, Arc<SyncHub>>,
+) -> Result<FocusTemplate, String> {
+    if template.name.trim().is_empty() {
+        return Err("template.name 不能为空".to_string());
+    }
+    if template.duration_minutes <= 0 {
+        return Err("template.duration_minutes 必须大于 0".to_string());
+    }
+    let now = now_iso();
+    if template.id.trim().is_empty() {
+        template.id = gen_focus_id("focus-template");
+    }
+    if template.timer_type.trim().is_empty() {
+        template.timer_type = "pomodoro".to_string();
+    }
+    if template.tags_json.trim().is_empty() {
+        template.tags_json = "[]".to_string();
+    }
+    if template.created_at.trim().is_empty() {
+        template.created_at = now.clone();
+    }
+    template.updated_at = now;
+
+    let db = db.lock().await;
+    let created = db_create_focus_template(&db.db, &template).await?;
+    drop(db);
+    emit_sync_action(sync_hub.inner().as_ref(), "SYNC_FOCUS_TEMPLATES");
+    Ok(created)
+}
+
+#[tauri::command]
+async fn update_focus_template(
+    id: String,
+    mut template: FocusTemplate,
+    db: State<'_, Arc<Mutex<AppDb>>>,
+    sync_hub: State<'_, Arc<SyncHub>>,
+) -> Result<FocusTemplate, String> {
+    if template.name.trim().is_empty() {
+        return Err("template.name 不能为空".to_string());
+    }
+    if template.duration_minutes <= 0 {
+        return Err("template.duration_minutes 必须大于 0".to_string());
+    }
+    if template.timer_type.trim().is_empty() {
+        template.timer_type = "pomodoro".to_string();
+    }
+    if template.tags_json.trim().is_empty() {
+        template.tags_json = "[]".to_string();
+    }
+
+    template.id = id;
+    template.updated_at = now_iso();
+    if template.created_at.trim().is_empty() {
+        template.created_at = template.updated_at.clone();
+    }
+
+    let db = db.lock().await;
+    let updated = db_update_focus_template(&db.db, &template).await?;
+    drop(db);
+    emit_sync_action(sync_hub.inner().as_ref(), "SYNC_FOCUS_TEMPLATES");
+    Ok(updated)
+}
+
+#[tauri::command]
+async fn archive_focus_template(
+    id: String,
+    db: State<'_, Arc<Mutex<AppDb>>>,
+    sync_hub: State<'_, Arc<SyncHub>>,
+) -> Result<(), String> {
+    let db = db.lock().await;
+    db_archive_focus_template(&db.db, &id).await?;
+    drop(db);
+    emit_sync_action(sync_hub.inner().as_ref(), "SYNC_FOCUS_TEMPLATES");
+    Ok(())
+}
+
+#[tauri::command]
+async fn start_focus_run(
+    payload: StartFocusRunPayload,
+    db: State<'_, Arc<Mutex<AppDb>>>,
+    sync_hub: State<'_, Arc<SyncHub>>,
+) -> Result<FocusRun, String> {
+    let db = db.lock().await;
+    let started = db_start_focus_run(&db.db, &payload).await?;
+    drop(db);
+    emit_sync_action(sync_hub.inner().as_ref(), "SYNC_FOCUS_RUNS");
+    Ok(started)
+}
+
+#[tauri::command]
+async fn finish_focus_run(
+    run_id: String,
+    payload: FinishFocusRunPayload,
+    db: State<'_, Arc<Mutex<AppDb>>>,
+    sync_hub: State<'_, Arc<SyncHub>>,
+) -> Result<FocusRun, String> {
+    let db = db.lock().await;
+    let finished = db_finish_focus_run(&db.db, &run_id, &payload).await?;
+    drop(db);
+    emit_sync_action(sync_hub.inner().as_ref(), "SYNC_FOCUS_RUNS");
+    Ok(finished)
+}
+
+#[tauri::command]
+async fn get_focus_runs(
+    start_date: Option<String>,
+    end_date: Option<String>,
+    status: Option<String>,
+    db: State<'_, Arc<Mutex<AppDb>>>,
+) -> Result<Vec<FocusRun>, String> {
+    let db = db.lock().await;
+    db_get_focus_runs(
+        &db.db,
+        start_date.as_deref(),
+        end_date.as_deref(),
+        status.as_deref(),
+    )
+    .await
+}
+
+#[tauri::command]
+async fn get_focus_stats(
+    start_date: Option<String>,
+    end_date: Option<String>,
+    dimension: Option<String>,
+    db: State<'_, Arc<Mutex<AppDb>>>,
+) -> Result<FocusStatsResult, String> {
+    let db = db.lock().await;
+    db_get_focus_stats(
+        &db.db,
+        start_date.as_deref(),
+        end_date.as_deref(),
+        dimension.as_deref(),
+    )
+    .await
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -3491,6 +4424,14 @@ pub fn run() {
             delete_daily_log,
             get_focus_sessions,
             upsert_focus_session,
+            get_focus_templates,
+            create_focus_template,
+            update_focus_template,
+            archive_focus_template,
+            start_focus_run,
+            finish_focus_run,
+            get_focus_runs,
+            get_focus_stats,
             get_video_bookmarks,
             add_video_bookmark,
             delete_video_bookmark,
