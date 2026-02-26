@@ -4,7 +4,7 @@ import { GlobalClock } from "./GlobalClock";
 import { useEffect } from "react";
 import { getSettings } from "../lib/settings";
 import { useLocation } from "react-router-dom";
-import { BookOpen, CalendarDays, Home, Swords, Target } from "lucide-react";
+import { BookOpen, CalendarDays, Home, Target } from "lucide-react";
 import { cn } from "../lib/utils";
 
 const mobileNavItems = [
@@ -12,7 +12,6 @@ const mobileNavItems = [
   { name: "任务", path: "/tasks", icon: CalendarDays },
   { name: "知识库", path: "/notes", icon: BookOpen },
   { name: "周复盘", path: "/weekly", icon: Target },
-  { name: "练功房", path: "/quiz", icon: Swords },
 ];
 
 export function Layout() {
@@ -60,7 +59,7 @@ export function Layout() {
         </main>
 
         <nav className="fixed bottom-0 inset-x-0 md:hidden z-50 border-t border-white/55 dark:border-[#2a3b52] bg-white/66 dark:bg-[#0e1724]/74 backdrop-blur-xl shadow-[0_-6px_25px_rgba(15,23,42,0.15)]">
-          <div className="grid grid-cols-5 gap-1 px-2 py-2">
+          <div className="grid grid-cols-4 gap-1 px-2 py-2">
             {mobileNavItems.map((item) => {
               const isActive = location.pathname === item.path || (item.path !== "/" && location.pathname.startsWith(item.path));
               return (

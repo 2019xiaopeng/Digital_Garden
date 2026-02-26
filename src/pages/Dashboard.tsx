@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { ArrowRight, Target, Play, Square, BarChart3, Activity, AlarmClockCheck, CheckCircle2, Circle, Maximize2, X, Pause, RotateCcw } from "lucide-react";
+import { ArrowRight, Target, Play, Square, BarChart3, Activity, AlarmClockCheck, CheckCircle2, Circle, Maximize2, X, Pause, RotateCcw, ChevronDown, ChevronUp } from "lucide-react";
 import { Link } from "react-router-dom";
 import { cn } from "../lib/utils";
 import { FocusService } from "../lib/dataService";
@@ -18,6 +18,7 @@ type DailyAttendance = {
 type AttendanceMap = Record<string, DailyAttendance>;
 
 const ATTENDANCE_STORAGE_KEY = "qcb.attendance.v1";
+const NERV_COLLAPSE_STORAGE_KEY = "eva.dashboard.nerv.collapsed.v1";
 
 type SubjectProgress = {
   key: "major" | "math" | "english" | "politics";
@@ -271,6 +272,12 @@ export function Dashboard() {
   const [pomodoroTotal, setPomodoroTotal] = useState(25 * 60);
   const [isPomodoroRunning, setIsPomodoroRunning] = useState(false);
   const [isPomodoroFullscreen, setIsPomodoroFullscreen] = useState(false);
+  const [nervCollapsed, setNervCollapsed] = useState<boolean>(() => {
+    if (typeof window === "undefined") return true;
+    const raw = localStorage.getItem(NERV_COLLAPSE_STORAGE_KEY);
+    if (raw === null) return true;
+    return raw === "1";
+  });
 
   const refreshTasksSilently = useCallback(() => {
     fetchDashboardStats()
@@ -338,6 +345,9 @@ export function Dashboard() {
   }, [isCheckedIn]);
 
   useEffect(() => { localStorage.setItem(ATTENDANCE_STORAGE_KEY, JSON.stringify(attendanceMap)); }, [attendanceMap]);
+  useEffect(() => {
+    localStorage.setItem(NERV_COLLAPSE_STORAGE_KEY, nervCollapsed ? "1" : "0");
+  }, [nervCollapsed]);
 
   useEffect(() => {
     if (!isPomodoroRunning || pomodoroSeconds <= 0) return;
@@ -673,33 +683,63 @@ export function Dashboard() {
           <h3 className="font-semibold text-gray-900 dark:text-white flex items-center gap-2">
             <Activity className="w-4 h-4 text-emerald-500" /> 数据大盘 · NERV 监控
           </h3>
-          <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">30-Day Overview</span>
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest hidden sm:inline">30-Day Overview</span>
+            <button
+              onClick={() => setNervCollapsed((prev) => !prev)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold text-[#88B5D3] bg-[#88B5D3]/10 hover:bg-[#88B5D3]/20 transition-colors"
+            >
+              {nervCollapsed ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronUp className="w-3.5 h-3.5" />}
+              {nervCollapsed ? "展开" : "收起"}
+            </button>
+          </div>
         </div>
-        <div className="grid grid-cols-1 lg:grid-cols-[1fr_auto] gap-6 items-start">
-          {/* Heatmap */}
-          <div>
-            <div className="flex items-center justify-between mb-3">
-              <span className="text-xs font-medium text-gray-500">专注热力图（近30天）</span>
-              <div className="flex items-center gap-1 text-[10px] text-gray-400">
-                <span>少</span>
-                <div className="w-3 h-3 rounded-sm bg-gray-100 dark:bg-gray-800/60" />
-                <div className="w-3 h-3 rounded-sm bg-emerald-200/80 dark:bg-emerald-900/50" />
-                <div className="w-3 h-3 rounded-sm bg-emerald-300/80 dark:bg-emerald-700/60" />
-                <div className="w-3 h-3 rounded-sm bg-emerald-400/90 dark:bg-emerald-600/70" />
-                <div className="w-3 h-3 rounded-sm bg-emerald-500 dark:bg-emerald-500/80" />
-                <span>多</span>
-              </div>
+        {nervCollapsed ? (
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+            <div className="rounded-xl bg-black/[0.03] dark:bg-white/[0.03] border border-white/30 dark:border-[#88B5D3]/10 px-3 py-2 text-center">
+              <p className="text-[10px] text-gray-500 uppercase tracking-widest">连胜</p>
+              <p className="text-lg font-mono font-bold text-[#FF9900]">{streak}<span className="text-xs text-gray-400 ml-1">天</span></p>
             </div>
-            <HeatmapGrid attendanceMap={attendanceMap} todayFocusSeconds={todayFocusSeconds} />
+            <div className="rounded-xl bg-black/[0.03] dark:bg-white/[0.03] border border-white/30 dark:border-[#88B5D3]/10 px-3 py-2 text-center">
+              <p className="text-[10px] text-gray-500 uppercase tracking-widest">今日</p>
+              <p className="text-lg font-mono font-bold text-emerald-500">{(todayFocusSeconds / 3600).toFixed(1)}<span className="text-xs text-gray-400 ml-1">h</span></p>
+            </div>
+            <div className="rounded-xl bg-black/[0.03] dark:bg-white/[0.03] border border-white/30 dark:border-[#88B5D3]/10 px-3 py-2 text-center">
+              <p className="text-[10px] text-gray-500 uppercase tracking-widest">本周</p>
+              <p className="text-lg font-mono font-bold text-[#88B5D3]">{weeklyFocusHours}<span className="text-xs text-gray-400 ml-1">h</span></p>
+            </div>
+            <div className="rounded-xl bg-black/[0.03] dark:bg-white/[0.03] border border-white/30 dark:border-[#88B5D3]/10 px-3 py-2 text-center">
+              <p className="text-[10px] text-gray-500 uppercase tracking-widest">7日均值</p>
+              <p className="text-lg font-mono font-bold text-green-500">{focusStats.avg7h}<span className="text-xs text-gray-400 ml-1">h</span></p>
+            </div>
           </div>
-          {/* NERV Stats Grid */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-2 gap-3 min-w-[180px]">
-            <NervDataBlock label="连胜" value={streak} unit="天" accentColor="#FF9900" glowColor="#FF9900" />
-            <NervDataBlock label="今日" value={(todayFocusSeconds / 3600).toFixed(1)} unit="h" accentColor="#34d399" />
-            <NervDataBlock label="本周" value={weeklyFocusHours} unit="h" accentColor="#88B5D3" />
-            <NervDataBlock label="7日均值" value={focusStats.avg7h} unit="h" accentColor="#22c55e" />
+        ) : (
+          <div className="grid grid-cols-1 lg:grid-cols-[1fr_auto] gap-6 items-start">
+            {/* Heatmap */}
+            <div>
+              <div className="flex items-center justify-between mb-3">
+                <span className="text-xs font-medium text-gray-500">专注热力图（近30天）</span>
+                <div className="flex items-center gap-1 text-[10px] text-gray-400">
+                  <span>少</span>
+                  <div className="w-3 h-3 rounded-sm bg-gray-100 dark:bg-gray-800/60" />
+                  <div className="w-3 h-3 rounded-sm bg-emerald-200/80 dark:bg-emerald-900/50" />
+                  <div className="w-3 h-3 rounded-sm bg-emerald-300/80 dark:bg-emerald-700/60" />
+                  <div className="w-3 h-3 rounded-sm bg-emerald-400/90 dark:bg-emerald-600/70" />
+                  <div className="w-3 h-3 rounded-sm bg-emerald-500 dark:bg-emerald-500/80" />
+                  <span>多</span>
+                </div>
+              </div>
+              <HeatmapGrid attendanceMap={attendanceMap} todayFocusSeconds={todayFocusSeconds} />
+            </div>
+            {/* NERV Stats Grid */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-2 gap-3 min-w-[180px]">
+              <NervDataBlock label="连胜" value={streak} unit="天" accentColor="#FF9900" glowColor="#FF9900" />
+              <NervDataBlock label="今日" value={(todayFocusSeconds / 3600).toFixed(1)} unit="h" accentColor="#34d399" />
+              <NervDataBlock label="本周" value={weeklyFocusHours} unit="h" accentColor="#88B5D3" />
+              <NervDataBlock label="7日均值" value={focusStats.avg7h} unit="h" accentColor="#22c55e" />
+            </div>
           </div>
-        </div>
+        )}
       </div>
 
       {/* ─── Row 3: Today's Tasks ─── */}
