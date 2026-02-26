@@ -255,7 +255,7 @@ export function Blog() {
       if (completedToday.length === 0) {
         // Still generate but with basic info
         const review = await DailyLogService.generateDailyReview([], focusHours);
-        setPosts([review, ...posts]);
+        setPosts((prev) => [review, ...prev]);
       } else {
         // Use AI for richer review
         const aiContent = await AiService.generateReview(completedToday, focusHours, apiKey);
@@ -271,7 +271,7 @@ export function Blog() {
           syncRate: Math.min(100, Math.round((completedToday.length / Math.max(1, completedToday.length + 2)) * 100)),
         };
         const saved = await DailyLogService.create(post);
-        setPosts([saved, ...posts]);
+        setPosts((prev) => [saved, ...prev]);
       }
     } catch (e) {
       console.error("AI review failed:", e);
@@ -280,7 +280,7 @@ export function Blog() {
       const today = new Date().toISOString().split('T')[0];
       const completedToday = allTasks.filter(t => t.date === today && t.status === "done");
       const review = await DailyLogService.generateDailyReview(completedToday, 0);
-      setPosts([review, ...posts]);
+      setPosts((prev) => [review, ...prev]);
     }
     setAiReviewLoading(false);
   };
@@ -313,22 +313,26 @@ export function Blog() {
             一键 AI 复盘
           </button>
           <button
-            onClick={() => {
-              const today = new Date().toISOString().split('T')[0];
-              const post: LegacyPost = {
-                id: `post-${Date.now()}`,
-                title: `留痕 ${today}`,
-                excerpt: "今日同步率记录：",
-                date: today,
-                readTime: "1 min read",
-                category: "Daily",
-                tags: [],
-                mood: "focused",
-                syncRate: 80,
-              };
-              DailyLogService.create(post).then((saved) => {
-                setPosts((prev) => [saved, ...prev]);
-              }).catch(console.error);
+            onClick={async () => {
+              try {
+                const allTasks = await TaskService.getAll();
+                const today = new Date().toISOString().split('T')[0];
+                const completedToday = allTasks.filter((t) => t.date === today && t.status === "done");
+
+                let focusHours = 0;
+                try {
+                  const raw = localStorage.getItem("qcb.attendance.v1");
+                  if (raw) {
+                    const map = JSON.parse(raw);
+                    focusHours = (map[today]?.totalFocusSeconds || 0) / 3600;
+                  }
+                } catch {}
+
+                const generated = await DailyLogService.generateDailyReview(completedToday, focusHours);
+                setPosts((prev) => [generated, ...prev]);
+              } catch (error) {
+                console.error("Generate today log failed:", error);
+              }
             }}
             className="bg-white/90 dark:bg-[#111b29]/85 border border-[#88B5D3]/35 hover:bg-[#88B5D3]/10 text-[#88B5D3] px-4 py-2.5 rounded-2xl text-sm font-semibold transition-all"
           >

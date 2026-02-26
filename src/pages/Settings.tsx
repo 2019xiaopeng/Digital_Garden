@@ -100,6 +100,7 @@ export function Settings() {
   const [maintenanceAction, setMaintenanceAction] = useState<string | null>(null);
   const [pendingClearCache, setPendingClearCache] = useState<{ cacheType: string; label: string } | null>(null);
   const [resetConfirmStage, setResetConfirmStage] = useState<0 | 1 | 2>(0);
+  const [countdownNow, setCountdownNow] = useState(Date.now());
 
   const formatBytes = (bytes: number) => {
     if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
@@ -117,10 +118,16 @@ export function Settings() {
     if (!settings.examDate) return null;
     const exam = new Date(`${settings.examDate}T00:00:00`);
     if (Number.isNaN(exam.getTime())) return null;
-    const now = new Date();
-    const diffMs = exam.getTime() - now.getTime();
+    const diffMs = exam.getTime() - countdownNow;
     return Math.max(0, Math.ceil(diffMs / (1000 * 60 * 60 * 24)));
-  }, [settings.examDate]);
+  }, [settings.examDate, countdownNow]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setCountdownNow(Date.now());
+    }, 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   const loadStorageUsage = useCallback(async () => {
     setStorageLoading(true);

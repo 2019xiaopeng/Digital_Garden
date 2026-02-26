@@ -99,6 +99,20 @@ export function Notes() {
   const chatHistory = activeSessionId ? (chatMessagesBySession[activeSessionId] || []) : [];
   const isDesktopRuntime = isTauriAvailable();
   const readonlyWebHint = "局域网模式下仅支持跨端阅读，请在桌面端进行文件管理";
+  const [isCompactViewport, setIsCompactViewport] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return window.matchMedia("(max-width: 1024px)").matches;
+  });
+  const showAiPanel = isDesktopRuntime && !isCompactViewport;
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const media = window.matchMedia("(max-width: 1024px)");
+    const sync = () => setIsCompactViewport(media.matches);
+    sync();
+    media.addEventListener("change", sync);
+    return () => media.removeEventListener("change", sync);
+  }, []);
 
   const showUploadToast = (type: "success" | "error", message: string) => {
     setUploadToast({ type, message });
@@ -1287,7 +1301,7 @@ export function Notes() {
       <header className="flex items-center justify-between mb-3 flex-shrink-0">
         <div>
           <h1 className="text-3xl font-bold tracking-tight text-gray-900 dark:text-white sm:text-4xl">知识库</h1>
-          <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">管理你的文档、笔记与资料，并使用 AI 辅助阅读。</p>
+          <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">管理你的文档、笔记与资料。</p>
           {!isDesktopRuntime && (
             <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">{readonlyWebHint}</p>
           )}
@@ -1298,8 +1312,11 @@ export function Notes() {
         
         {/* Left Sidebar - Tree View */}
         <div 
-          className="flex flex-col bg-white/38 dark:bg-[#0f1825]/55 flex-shrink-0 border-r border-white/50 dark:border-[#2a3b52] backdrop-blur-md"
-          style={{ width: leftWidth }}
+          className={cn(
+            "flex flex-col bg-white/38 dark:bg-[#0f1825]/55 backdrop-blur-md",
+            showAiPanel ? "flex-shrink-0 border-r border-white/50 dark:border-[#2a3b52]" : "flex-1"
+          )}
+          style={showAiPanel ? { width: leftWidth } : undefined}
         >
           <div className="p-4 border-b border-gray-200/60 dark:border-gray-800 flex items-center justify-between">
             <div className="relative flex-1">
@@ -1386,13 +1403,15 @@ export function Notes() {
         </div>
 
         {/* Resizer */}
-        <div 
-          className="w-1 bg-gray-200 dark:bg-gray-800 hover:bg-[#88B5D3] dark:hover:bg-[#88B5D3] cursor-col-resize transition-colors z-10"
-          onMouseDown={handleMouseDown}
-        />
+        {showAiPanel && (
+          <div 
+            className="w-1 bg-gray-200 dark:bg-gray-800 hover:bg-[#88B5D3] dark:hover:bg-[#88B5D3] cursor-col-resize transition-colors z-10"
+            onMouseDown={handleMouseDown}
+          />
+        )}
 
         {/* Right Area - AI Chat */}
-        <div className="flex-1 flex bg-white/40 dark:bg-[#0f1826]/58 min-w-[760px] backdrop-blur-md">
+        {showAiPanel && <div className="flex-1 flex bg-white/40 dark:bg-[#0f1826]/58 min-w-[760px] backdrop-blur-md">
           <aside className="w-56 xl:w-64 border-r border-white/45 dark:border-[#2a3b52] p-3 space-y-3 hidden lg:block">
             <button
               onClick={() => createSession()}
@@ -1531,7 +1550,7 @@ export function Notes() {
               </form>
             </div>
           </div>
-        </div>
+        </div>}
       </div>
 
       {/* Prompt Dialogs - rendered unconditionally */}

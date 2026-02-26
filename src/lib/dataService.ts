@@ -455,8 +455,14 @@ export const DailyLogService = {
   /** Auto-generate today's review entry from completed tasks */
   async generateDailyReview(completedTasks: LegacyTask[], focusHours: number): Promise<LegacyPost> {
     const today = todayStr();
-    const taskSummary = completedTasks.map(t => `- ✅ ${t.title}`).join("\n");
-    const content = `## 今日复盘 ${today}\n\n**专注时长**: ${focusHours.toFixed(1)}h\n**完成任务**: ${completedTasks.length} 项\n\n${taskSummary}\n\n---\n*系统自动生成*`;
+    const taskSummary = completedTasks.length > 0
+      ? completedTasks.map((t, idx) => `- ${idx + 1}. ✅ ${t.title}${t.tags.length ? `（#${t.tags.join(" #")}）` : ""}`).join("\n")
+      : "- 今日暂无已完成任务，建议先完成 1 个最小闭环任务。";
+    const focusTag = focusHours >= 6 ? "高强度" : focusHours >= 3 ? "稳态" : "低负荷";
+    const nextStep = completedTasks.length > 0
+      ? `1) 延续今天最顺手的任务节奏\n2) 优先处理 1 个高优先级事项\n3) 晚间进行 15 分钟错题回顾`
+      : `1) 先完成 25 分钟番茄钟\n2) 处理 1 个最短任务建立启动感\n3) 睡前补一条 3 行复盘`;
+    const content = `## 今日留痕 ${today}\n\n### 数据快照\n- 专注时长：${focusHours.toFixed(1)}h（${focusTag}）\n- 完成任务：${completedTasks.length} 项\n\n### 完成清单\n${taskSummary}\n\n### 复盘结论\n- 今天的执行节奏：${focusHours >= 3 ? "稳定" : "需要提速"}\n- 阻塞点：请补充 1 条最主要干扰源\n\n### 明日三步\n${nextStep}\n\n---\n*系统模板生成，可继续手动补充细节*`;
     
     const post: LegacyPost = {
       id: `auto-${Date.now()}`,
@@ -703,16 +709,22 @@ export const AiService = {
 
   /** Generate daily review summary */
   async generateReview(completedTasks: LegacyTask[], focusHours: number, apiKey: string): Promise<string> {
-    const taskList = completedTasks.map(t => `- ${t.title} (${t.tags.join(",")})`).join("\n");
+    const taskList = completedTasks.length > 0
+      ? completedTasks.map((t, idx) => `- ${idx + 1}. ${t.title}${t.tags.length ? `（${t.tags.join(", ")}）` : ""}`).join("\n")
+      : "- 今日暂无已完成任务";
 
-    const systemPrompt = `你是EVA系统的复盘助手，语调清冷、极简，像绫波丽。
-用户今天完成了以下任务和专注时长，请生成一段极简的复盘日记(100-200字)。
-要求:
-1. 用Markdown格式
-2. 包含鼓励但保持克制冷淡的语调
-3. 总结关键成就
-4. 简短建议明天的方向
-不要加标题，直接输出正文内容。`;
+    const systemPrompt = `你是 EVA 终端的复盘教练，风格冷静、克制、具体。
+请严格输出 Markdown，结构必须包含以下四段并按顺序：
+### 今日结论
+### 做对了什么
+### 主要阻塞
+### 明日行动（3条）
+
+约束：
+1) 总字数控制在 160-260 字；
+2) 不空喊口号，必须引用输入中的任务或时长事实；
+3) “明日行动”必须是可执行动作（动词开头）；
+4) 若今日完成任务为 0，给出“最小启动方案”（25分钟起步）。`;
 
     const userMessage = `今日日期: ${todayStr()}
 专注时长: ${focusHours.toFixed(1)}小时
@@ -725,7 +737,7 @@ ${taskList || "无完成任务"}`;
       model: "deepseek-chat",
       system_prompt: systemPrompt,
       user_message: userMessage,
-      temperature: 0.7,
+      temperature: 0.45,
       max_tokens: 512,
     });
 

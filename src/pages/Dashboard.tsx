@@ -18,7 +18,6 @@ type DailyAttendance = {
 type AttendanceMap = Record<string, DailyAttendance>;
 
 const ATTENDANCE_STORAGE_KEY = "qcb.attendance.v1";
-const EXAM_DATE_ISO = "2026-12-20T00:00:00";
 
 type SubjectProgress = {
   key: "major" | "math" | "english" | "politics";
@@ -260,13 +259,13 @@ const FullscreenPomodoro = ({
    Dashboard Component
    ═══════════════════════════════════════════════════════════ */
 export function Dashboard() {
-  const [timeLeft, setTimeLeft] = useState(() => getCountdown(EXAM_DATE_ISO));
   const today = getTodayStr();
 
   const [tasks, setTasks] = useState<LegacyTask[]>([]);
   const [examSettings, setExamSettings] = useState<AppSettings>(() => getSettings());
   const [attendanceMap, setAttendanceMap] = useState<AttendanceMap>(() => (typeof window === "undefined" ? {} : loadAttendanceMap()));
   const [sessionNow, setSessionNow] = useState(Date.now());
+  const [countdownNow, setCountdownNow] = useState(Date.now());
   const [selectedTaskId, setSelectedTaskId] = useState("");
   const [pomodoroSeconds, setPomodoroSeconds] = useState(25 * 60);
   const [pomodoroTotal, setPomodoroTotal] = useState(25 * 60);
@@ -319,10 +318,14 @@ export function Dashboard() {
     : 0;
   const todayFocusSeconds = todayAttendance.totalFocusSeconds + sessionSeconds;
 
+  const targetExamDate = useMemo(() => examSettings.examDate || "2026-12-20", [examSettings.examDate]);
+  const targetExamIso = useMemo(() => `${targetExamDate}T00:00:00`, [targetExamDate]);
+  const timeLeft = useMemo(() => getCountdown(targetExamIso), [targetExamIso, countdownNow]);
+
   /* ── Timers ── */
   useEffect(() => {
     const countdownTimer = setInterval(() => {
-      setTimeLeft(getCountdown(EXAM_DATE_ISO));
+      setCountdownNow(Date.now());
     }, 30_000);
     window.addEventListener("focus", refreshTasksSilently);
     return () => { clearInterval(countdownTimer); window.removeEventListener("focus", refreshTasksSilently); };
@@ -457,9 +460,9 @@ export function Dashboard() {
     if (!examSettings.examDate) return 0;
     const examDate = new Date(`${examSettings.examDate}T00:00:00`);
     if (Number.isNaN(examDate.getTime())) return 0;
-    const diff = examDate.getTime() - Date.now();
+    const diff = examDate.getTime() - countdownNow;
     return Math.max(0, Math.ceil(diff / (1000 * 60 * 60 * 24)));
-  }, [examSettings.examDate]);
+  }, [examSettings.examDate, countdownNow]);
 
   const hasExamGoalConfigured = useMemo(() => {
     return Boolean(examSettings.targetUniversity?.trim() && examSettings.examDate?.trim());
@@ -556,7 +559,7 @@ export function Dashboard() {
         <div className="glass-card rounded-2xl px-6 py-3 flex items-center gap-6">
           <div className="flex flex-col">
             <span className="text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-widest mb-1">Target Date</span>
-            <span className="font-mono font-semibold text-gray-900 dark:text-white">2026.12.20</span>
+            <span className="font-mono font-semibold text-gray-900 dark:text-white">{targetExamDate.replace(/-/g, ".")}</span>
           </div>
           <div className="w-px h-8 bg-gray-200 dark:bg-gray-700" />
           <div className="flex items-baseline gap-2">
