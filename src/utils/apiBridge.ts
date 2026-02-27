@@ -210,8 +210,17 @@ export const SYNC_WEEKLY_REVIEW_ITEMS = "SYNC_WEEKLY_REVIEW_ITEMS";
 
 function isTauriRuntime(): boolean {
   if (typeof window === "undefined") return false;
-  const win = window as Window & { __TAURI__?: unknown; __TAURI_INTERNALS__?: unknown; __TAURI_IPC__?: unknown };
-  if (win.__TAURI__ || win.__TAURI_INTERNALS__ || win.__TAURI_IPC__) return true;
+  const win = window as Window & {
+    __TAURI__?: { core?: { invoke?: unknown } };
+    __TAURI_INTERNALS__?: { invoke?: unknown };
+    __TAURI_IPC__?: unknown;
+  };
+  const hasIpc = typeof win.__TAURI_IPC__ === "function";
+  const hasCoreInvoke = typeof win.__TAURI__?.core?.invoke === "function";
+  const hasInternalsInvoke = typeof win.__TAURI_INTERNALS__?.invoke === "function";
+  const ua = (typeof navigator !== "undefined" ? navigator.userAgent : "") || "";
+  const hasTauriUa = /tauri/i.test(ua);
+  if (hasIpc || hasCoreInvoke || hasInternalsInvoke || hasTauriUa) return true;
   const protocol = window.location.protocol.toLowerCase();
   const host = window.location.hostname.toLowerCase();
   return protocol === "tauri:" || host.endsWith(".localhost") || host === "tauri.localhost";
@@ -236,6 +245,18 @@ export async function invokeDesktop<T = unknown>(
 function getLanBaseUrl(): string {
   const host = window.location.hostname || "127.0.0.1";
   return `http://${host}:9527`;
+}
+
+function shouldDebugImages(): boolean {
+  if (typeof window === "undefined") return false;
+  const forced = window.localStorage?.getItem("eva.debug.images") === "1";
+  const dev = Boolean((import.meta as { env?: { DEV?: boolean } }).env?.DEV);
+  return forced || dev;
+}
+
+function logImageResolution(stage: string, payload: Record<string, unknown>) {
+  if (!shouldDebugImages()) return;
+  console.info("[image-debug]", stage, payload);
 }
 
 function nowIso(): string {
@@ -940,7 +961,10 @@ export async function uploadChatImage(imageData: Uint8Array, ext: string): Promi
 
 export function getImageUrl(relativePath: string): string {
   const raw = (relativePath || "").trim();
-  if (!raw) return "";
+  if (!raw) {
+    logImageResolution("empty-input", { raw: relativePath });
+    return "";
+  }
 
   const assetMatch = raw.match(/^https?:\/\/asset\.localhost\/(.+)$/i);
   const decodedAssetPath = assetMatch ? decodeURIComponent(assetMatch[1] || "") : "";
@@ -985,20 +1009,46 @@ export function getImageUrl(relativePath: string): string {
     ? extractRelativeFromAbsolute(source)
     : (absolute ? extractRelativeFromAbsolute(absolute) : clean));
 
+  const baseDebug = {
+    raw,
+    source,
+    clean,
+    relativeFromApi,
+    resolvedRelative,
+    workspaceRoot,
+    absolute,
+    isAbsolutePath,
+    isTauri: isTauriRuntime(),
+    location: typeof window !== "undefined"
+      ? `${window.location.protocol}//${window.location.host}`
+      : "n/a",
+    userAgent: typeof navigator !== "undefined" ? navigator.userAgent : "n/a",
+  };
+
   if (isTauriRuntime()) {
     const tauriAbsolute = absolute || (workspaceRoot
       ? `${workspaceRoot.replace(/[\\/]+$/, "")}/${resolvedRelative || clean}`.replace(/\\/g, "/")
       : "");
-    if (!tauriAbsolute) return "";
+    if (!tauriAbsolute) {
+      logImageResolution("tauri-empty-absolute", baseDebug);
+      return "";
+    }
     try {
-      return convertFileSrc(tauriAbsolute);
+      const finalUrl = convertFileSrc(tauriAbsolute);
+      logImageResolution("tauri-convertFileSrc", { ...baseDebug, tauriAbsolute, finalUrl });
+      return finalUrl;
     } catch {
+      logImageResolution("tauri-convertFileSrc-failed", { ...baseDebug, tauriAbsolute });
       return "";
     }
   }
 
   if (resolvedRelative) {
-    return `${getLanBaseUrl()}/api/images/${encodeURI(resolvedRelative)}`;
+    const finalUrl = `${getLanBaseUrl()}/api/images/${encodeURI(resolvedRelative)}`;
+    logImageResolution("web-relative", { ...baseDebug, finalUrl });
+    return finalUrl;
   }
-  return `${getLanBaseUrl()}/api/images/${encodeURI(clean)}`;
+  const fallbackUrl = `${getLanBaseUrl()}/api/images/${encodeURI(clean)}`;
+  logImageResolution("web-fallback", { ...baseDebug, finalUrl: fallbackUrl });
+  return fallbackUrl;
 }

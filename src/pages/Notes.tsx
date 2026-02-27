@@ -1804,6 +1804,13 @@ export function Notes() {
                           src={getImageUrl(msg.imagePath)}
                           alt="题图"
                           className="w-28 h-28 object-cover rounded-xl border border-[#88B5D3]/30"
+                          onError={(e) => {
+                            console.error("[image-debug] notes-chat-image-load-failed", {
+                              rawPath: msg.imagePath,
+                              resolvedUrl: getImageUrl(msg.imagePath || ""),
+                              currentSrc: (e.currentTarget as HTMLImageElement).currentSrc,
+                            });
+                          }}
                         />
                       </button>
                     )}
@@ -1815,6 +1822,26 @@ export function Notes() {
                           <ReactMarkdown
                             remarkPlugins={[remarkGfm, remarkMath]}
                             rehypePlugins={[rehypeKatex, rehypeHighlight]}
+                            components={{
+                              img: ({ src, alt }) => {
+                                const rawSrc = String(src || "");
+                                const resolvedSrc = getImageUrl(rawSrc);
+                                return (
+                                  <img
+                                    src={resolvedSrc}
+                                    alt={alt || "图片"}
+                                    className="max-h-96 rounded-xl border border-[#88B5D3]/30"
+                                    onError={(e) => {
+                                      console.error("[image-debug] notes-markdown-image-load-failed", {
+                                        rawSrc,
+                                        resolvedSrc,
+                                        currentSrc: (e.currentTarget as HTMLImageElement).currentSrc,
+                                      });
+                                    }}
+                                  />
+                                );
+                              },
+                            }}
                           >
                             {normalizeMathDelimiters(msg.text)}
                           </ReactMarkdown>
@@ -2137,6 +2164,13 @@ export function Notes() {
             alt="大图预览"
             className="relative max-h-[86vh] max-w-[90vw] rounded-2xl border border-white/20 shadow-2xl"
             onClick={(e) => e.stopPropagation()}
+            onError={(e) => {
+              console.error("[image-debug] notes-preview-image-load-failed", {
+                rawPath: previewImagePath,
+                resolvedUrl: getImageUrl(previewImagePath || ""),
+                currentSrc: (e.currentTarget as HTMLImageElement).currentSrc,
+              });
+            }}
           />
         </div>
       )}

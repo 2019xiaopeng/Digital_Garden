@@ -118,6 +118,12 @@
   - 桌面端（Tauri）改为强制优先 `convertFileSrc(绝对路径)`，不再回落到 `http://<host>:9527`，避免本地服务未启时 `ERR_CONNECTION_REFUSED`。
   - 浏览器端继续使用 `http://<host>:9527/api/images/...`，维持局域网访问能力。
 
+### 修复补丁（同日九次追加）
+- 修复 Tauri 开发态图片仍报错 `asset.localhost ... ERR_CONNECTION_REFUSED`：
+  - `tauri.conf.json` 启用 `app.security.assetProtocol.enable = true`。
+  - 资产协议作用域增加 `$DOCUMENT/**`，允许 `convertFileSrc` 访问 `Documents/EVA_Knowledge_Base/ErrorImages/...`。
+  - 保留前端 `image-debug` 日志，便于继续追踪极端路径样本。
+
 ### 版本准备
 - 版本号统一提升为 `v1.4.0`（`package.json` / `src-tauri/Cargo.toml` / `src-tauri/tauri.conf.json`）。
 

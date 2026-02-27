@@ -320,10 +320,44 @@ export function ErrorBook() {
           <div className="relative w-full max-w-4xl max-h-[88vh] overflow-y-auto rounded-3xl bg-white dark:bg-[#0f1826] border border-[#88B5D3]/25 p-6 space-y-4">
             <h3 className="text-xl font-semibold text-gray-900 dark:text-white">[{detail.subject}] 错题详情</h3>
             {detail.question_image_path && (
-              <img src={getImageUrl(detail.question_image_path)} alt="题图" className="max-h-72 rounded-xl border border-[#88B5D3]/30" />
+              <img
+                src={getImageUrl(detail.question_image_path)}
+                alt="题图"
+                className="max-h-72 rounded-xl border border-[#88B5D3]/30"
+                onError={(e) => {
+                  console.error("[image-debug] errorbook-header-image-load-failed", {
+                    rawPath: detail.question_image_path,
+                    resolvedUrl: getImageUrl(detail.question_image_path || ""),
+                    currentSrc: (e.currentTarget as HTMLImageElement).currentSrc,
+                  });
+                }}
+              />
             )}
             <article className="prose prose-sm dark:prose-invert max-w-none">
-              <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex, rehypeHighlight]}>
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm, remarkMath]}
+                rehypePlugins={[rehypeKatex, rehypeHighlight]}
+                components={{
+                  img: ({ src, alt }) => {
+                    const rawSrc = String(src || "");
+                    const resolvedSrc = getImageUrl(rawSrc);
+                    return (
+                      <img
+                        src={resolvedSrc}
+                        alt={alt || "题图"}
+                        className="max-h-96 rounded-xl border border-[#88B5D3]/30"
+                        onError={(e) => {
+                          console.error("[image-debug] errorbook-question-markdown-image-load-failed", {
+                            rawSrc,
+                            resolvedSrc,
+                            currentSrc: (e.currentTarget as HTMLImageElement).currentSrc,
+                          });
+                        }}
+                      />
+                    );
+                  },
+                }}
+              >
                 {normalizeMathDelimiters(`### 题目\n${formatQuestionLayout(detail.question_content)}`)}
               </ReactMarkdown>
             </article>
@@ -338,7 +372,30 @@ export function ErrorBook() {
             </div>
             {showSolution && (
               <article className="prose prose-sm dark:prose-invert max-w-none">
-                <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex, rehypeHighlight]}>
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm, remarkMath]}
+                  rehypePlugins={[rehypeKatex, rehypeHighlight]}
+                  components={{
+                    img: ({ src, alt }) => {
+                      const rawSrc = String(src || "");
+                      const resolvedSrc = getImageUrl(rawSrc);
+                      return (
+                        <img
+                          src={resolvedSrc}
+                          alt={alt || "题图"}
+                          className="max-h-96 rounded-xl border border-[#88B5D3]/30"
+                          onError={(e) => {
+                            console.error("[image-debug] errorbook-solution-markdown-image-load-failed", {
+                              rawSrc,
+                              resolvedSrc,
+                              currentSrc: (e.currentTarget as HTMLImageElement).currentSrc,
+                            });
+                          }}
+                        />
+                      );
+                    },
+                  }}
+                >
                   {normalizeMathDelimiters(`### 解答\n${detail.ai_solution}\n\n### 笔记\n${detail.user_note || "（暂无）"}`)}
                 </ReactMarkdown>
               </article>
