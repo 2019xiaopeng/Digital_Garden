@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
-import { Archive, BookOpenCheck, Plus, Search } from "lucide-react";
+import { Archive, BookOpenCheck, Plus, Search, Trash2 } from "lucide-react";
 import {
   archiveWrongQuestion,
   carryWeeklyReviewItemsToNextWeek,
   createWrongQuestion,
+  deleteWrongQuestion,
   fetchWeeklyReviewItems,
   fetchWrongQuestionStats,
   fetchWrongQuestions,
@@ -19,6 +20,7 @@ import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import rehypeHighlight from "rehype-highlight";
 import { useSearchParams } from "react-router-dom";
+import { normalizeMathDelimiters, toQuestionTitle } from "../lib/markdown";
 import "katex/dist/katex.min.css";
 
 const subjects = ["全部", "数学", "408", "英语", "政治", "其他"];
@@ -48,6 +50,7 @@ export function ErrorBook() {
   const [list, setList] = useState<WrongQuestion[]>([]);
   const [stats, setStats] = useState<WrongQuestionStats | null>(null);
   const [subject, setSubject] = useState("全部");
+  const [showArchived, setShowArchived] = useState(false);
   const [mastery, setMastery] = useState<string>("全部");
   const [keyword, setKeyword] = useState("");
   const [loading, setLoading] = useState(false);
@@ -70,7 +73,7 @@ export function ErrorBook() {
     setLoading(true);
     try {
       const [rows, summary, weekly] = await Promise.all([
-        fetchWrongQuestions({ is_archived: 0 }),
+        fetchWrongQuestions({ is_archived: showArchived ? 1 : 0 }),
         fetchWrongQuestionStats(),
         fetchWeeklyReviewItems(weekStart),
       ]);
@@ -84,7 +87,7 @@ export function ErrorBook() {
 
   useEffect(() => {
     void loadData();
-  }, [weekStart]);
+  }, [weekStart, showArchived]);
 
   const weeklyMap = useMemo(() => {
     const map = new Map<string, WeeklyReviewItem>();
@@ -122,12 +125,20 @@ export function ErrorBook() {
           <h1 className="text-3xl font-bold text-gray-900 dark:text-white">错题本</h1>
           <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">本周待复习 {pendingWeekly.length} 道</p>
         </div>
-        <button
-          onClick={() => setShowCreate(true)}
-          className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-[#88B5D3] hover:bg-[#6f9fbe] text-white text-sm font-semibold"
-        >
-          <Plus className="w-4 h-4" /> 手动新增
-        </button>
+        <div className="flex flex-wrap gap-2">
+          <button
+            onClick={() => setShowCreate(true)}
+            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-[#88B5D3] hover:bg-[#6f9fbe] text-white text-sm font-semibold"
+          >
+            <Plus className="w-4 h-4" /> 手动新增
+          </button>
+          <button
+            onClick={() => setShowArchived((prev) => !prev)}
+            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl border border-[#88B5D3]/35 text-[#88B5D3] hover:bg-[#88B5D3]/10 text-sm font-semibold"
+          >
+            {showArchived ? "查看进行中错题" : "查看已归档"}
+          </button>
+        </div>
       </header>
 
       <section className="glass-card rounded-2xl p-4 grid grid-cols-1 md:grid-cols-4 gap-3">
@@ -154,49 +165,51 @@ export function ErrorBook() {
         <div className="glass-card rounded-2xl p-4">本周新增 <span className="font-bold text-gray-900 dark:text-white">{stats?.this_week_new || 0}</span> 道</div>
       </section>
 
-      <section className="glass-card rounded-2xl p-4 space-y-3">
-        <div className="flex items-center justify-between">
-          <h2 className="font-semibold text-gray-900 dark:text-white flex items-center gap-2"><BookOpenCheck className="w-4 h-4 text-[#88B5D3]" /> 本周待复习清单</h2>
-          <button
-            onClick={async () => {
-              const ids = carrySelection.filter(Boolean);
-              if (!ids.length) return;
-              await carryWeeklyReviewItemsToNextWeek(ids, weekStart);
-              await loadData();
-            }}
-            className="text-xs px-3 py-1.5 rounded-lg border border-[#88B5D3]/30 text-[#88B5D3] hover:bg-[#88B5D3]/10"
-          >
-            延续到下周
-          </button>
-        </div>
-        <div className="space-y-2">
-          {pendingWeekly.length === 0 ? (
-            <p className="text-sm text-gray-500 dark:text-gray-400">本周待复习项为空</p>
-          ) : pendingWeekly.map((item) => {
-            const q = list.find((x) => x.id === item.wrong_question_id);
-            return (
-              <label key={item.id} className="flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  checked={carrySelection.includes(item.id)}
-                  onChange={(e) => {
-                    setCarrySelection((prev) => e.target.checked ? [...prev, item.id] : prev.filter((id) => id !== item.id));
-                  }}
-                />
-                <button
-                  className="text-left flex-1 hover:text-[#88B5D3]"
-                  onClick={async () => {
-                    await toggleWeeklyReviewItemDone(item.id, true);
-                    await loadData();
-                  }}
-                >
-                  {q ? q.question_content.slice(0, 48) : item.title_snapshot}
-                </button>
-              </label>
-            );
-          })}
-        </div>
-      </section>
+      {!showArchived && (
+        <section className="glass-card rounded-2xl p-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <h2 className="font-semibold text-gray-900 dark:text-white flex items-center gap-2"><BookOpenCheck className="w-4 h-4 text-[#88B5D3]" /> 本周待复习清单</h2>
+            <button
+              onClick={async () => {
+                const ids = carrySelection.filter(Boolean);
+                if (!ids.length) return;
+                await carryWeeklyReviewItemsToNextWeek(ids, weekStart);
+                await loadData();
+              }}
+              className="text-xs px-3 py-1.5 rounded-lg border border-[#88B5D3]/30 text-[#88B5D3] hover:bg-[#88B5D3]/10"
+            >
+              延续到下周
+            </button>
+          </div>
+          <div className="space-y-2">
+            {pendingWeekly.length === 0 ? (
+              <p className="text-sm text-gray-500 dark:text-gray-400">本周待复习项为空</p>
+            ) : pendingWeekly.map((item) => {
+              const q = list.find((x) => x.id === item.wrong_question_id);
+              return (
+                <label key={item.id} className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={carrySelection.includes(item.id)}
+                    onChange={(e) => {
+                      setCarrySelection((prev) => e.target.checked ? [...prev, item.id] : prev.filter((id) => id !== item.id));
+                    }}
+                  />
+                  <button
+                    className="text-left flex-1 hover:text-[#88B5D3]"
+                    onClick={async () => {
+                      await toggleWeeklyReviewItemDone(item.id, true);
+                      await loadData();
+                    }}
+                  >
+                    {q ? toQuestionTitle(q.question_content, 48) : toQuestionTitle(item.title_snapshot, 48)}
+                  </button>
+                </label>
+              );
+            })}
+          </div>
+        </section>
+      )}
 
       <section className="space-y-3">
         {loading ? (
@@ -208,13 +221,13 @@ export function ErrorBook() {
           return (
             <article key={item.id} className="glass-card rounded-2xl p-4 border border-[#88B5D3]/20">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <h3 className="font-semibold text-gray-900 dark:text-white">[{item.subject}] {item.question_content.slice(0, 42)}</h3>
+                <h3 className="font-semibold text-gray-900 dark:text-white">[{item.subject}] {toQuestionTitle(item.question_content, 42)}</h3>
                 <span className="text-xs text-gray-500">{masteryLabel(item.mastery_level)}</span>
               </div>
               <p className="mt-2 text-xs text-gray-500">状态：{weekly?.status || "未加入本周清单"} · 难度 {item.difficulty} 星</p>
               <div className="mt-3 flex flex-wrap gap-2">
                 <button onClick={() => setDetail(item)} className="px-3 py-1.5 text-xs rounded-lg border border-[#88B5D3]/30 text-[#88B5D3] hover:bg-[#88B5D3]/10">查看</button>
-                {weekly && (
+                {!showArchived && weekly && (
                   <button
                     onClick={async () => {
                       await toggleWeeklyReviewItemDone(weekly.id, weekly.status !== "done");
@@ -225,15 +238,27 @@ export function ErrorBook() {
                     {weekly.status === "done" ? "标记未完成" : "标记完成"}
                   </button>
                 )}
-                <button
-                  onClick={async () => {
-                    await archiveWrongQuestion(item.id);
-                    await loadData();
-                  }}
-                  className="inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-lg border border-red-300/60 text-red-500 hover:bg-red-500/10"
-                >
-                  <Archive className="w-3.5 h-3.5" /> 归档
-                </button>
+                {!showArchived ? (
+                  <button
+                    onClick={async () => {
+                      await archiveWrongQuestion(item.id);
+                      await loadData();
+                    }}
+                    className="inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-lg border border-red-300/60 text-red-500 hover:bg-red-500/10"
+                  >
+                    <Archive className="w-3.5 h-3.5" /> 归档
+                  </button>
+                ) : (
+                  <button
+                    onClick={async () => {
+                      await deleteWrongQuestion(item.id);
+                      await loadData();
+                    }}
+                    className="inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-lg border border-red-400/70 text-red-600 hover:bg-red-500/10"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" /> 删除
+                  </button>
+                )}
               </div>
             </article>
           );
@@ -250,7 +275,7 @@ export function ErrorBook() {
             )}
             <article className="prose prose-sm dark:prose-invert max-w-none">
               <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex, rehypeHighlight]}>
-                {`### 题目\n${detail.question_content}\n\n### 解答\n${detail.ai_solution}\n\n### 笔记\n${detail.user_note || "（暂无）"}`}
+                {normalizeMathDelimiters(`### 题目\n${detail.question_content}\n\n### 解答\n${detail.ai_solution}\n\n### 笔记\n${detail.user_note || "（暂无）"}`)}
               </ReactMarkdown>
             </article>
           </div>

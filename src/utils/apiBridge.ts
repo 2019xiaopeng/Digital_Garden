@@ -1,4 +1,6 @@
 import type { LegacyTask } from "../lib/dataService";
+import { getSettings } from "../lib/settings";
+import { convertFileSrc } from "@tauri-apps/api/core";
 
 export type QuizQuestion = {
   id: string;
@@ -793,6 +795,25 @@ export async function archiveWrongQuestion(id: string): Promise<void> {
   }
 }
 
+export async function deleteWrongQuestion(id: string): Promise<void> {
+  if (!id.trim()) throw new Error("id 不能为空");
+
+  if (isTauriRuntime()) {
+    const invoke = await getInvoke();
+    await invoke("delete_wrong_question", { id });
+    return;
+  }
+
+  const response = await fetch(`${getLanBaseUrl()}/api/wrong-questions/${encodeURIComponent(id)}/hard-delete`, {
+    method: "DELETE",
+  });
+
+  if (!response.ok && response.status !== 204) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`HTTP 请求失败 (${response.status}): ${text || response.statusText}`);
+  }
+}
+
 export async function fetchWrongQuestionStats(): Promise<WrongQuestionStats> {
   if (isTauriRuntime()) {
     const invoke = await getInvoke();
@@ -917,9 +938,17 @@ export async function uploadChatImage(imageData: Uint8Array, ext: string): Promi
 export function getImageUrl(relativePath: string): string {
   const clean = relativePath.trim().replace(/\\/g, "/").replace(/^\/+/, "");
   if (!clean) return "";
-  const workspaceRoot = localStorage.getItem("eva.workspace.root") || "";
-  if (isTauriRuntime() && workspaceRoot) {
-    return `${workspaceRoot.replace(/[\\/]+$/, "")}/${clean}`;
+  if (isTauriRuntime()) {
+    const settings = getSettings();
+    const workspaceRoot = (settings.docRoot || localStorage.getItem("eva.workspace.root") || "").trim();
+    if (workspaceRoot) {
+      const absolute = `${workspaceRoot.replace(/[\\/]+$/, "")}/${clean}`.replace(/\\/g, "/");
+      try {
+        return convertFileSrc(absolute);
+      } catch {
+        return `file:///${absolute.replace(/^\/+/, "")}`;
+      }
+    }
   }
   return `${getLanBaseUrl()}/api/images/${encodeURI(clean)}`;
 }

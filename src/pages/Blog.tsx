@@ -7,6 +7,7 @@ import { MarkdownEditor } from "../components/MarkdownEditor";
 import { DailyLogService, TaskService, AiService, isTauriAvailable } from "../lib/dataService";
 import { buildVideoUrlWithTimestamp, getVideoUrlFromMarkdown, openExternalUrl, parseFrontmatter, TIMESTAMP_REGEX, timestampToSeconds } from "../lib/videoBookmark";
 import type { LegacyPost } from "../lib/dataService";
+import { normalizeMathDelimiters, toPlainPreview } from "../lib/markdown";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -126,7 +127,8 @@ export function Blog() {
     const videoUrl = frontmatter.video || null;
     if (!videoUrl) return body;
 
-    return body.replace(TIMESTAMP_REGEX, (full) => {
+    const normalized = normalizeMathDelimiters(body);
+    return normalized.replace(TIMESTAMP_REGEX, (full) => {
       const secs = timestampToSeconds(full);
       if (secs === null) return full;
       return `[${full}](#video-timestamp-${secs})`;
@@ -457,7 +459,7 @@ export function Blog() {
                     </ReactMarkdown>
                   </span>
                 ) : (
-                  post.excerpt.replace(/[#*`\-\[\]]/g, '').slice(0, 200) + (post.excerpt.length > 200 ? '...' : '')
+                  toPlainPreview(post.excerpt, 180)
                 )}
               </p>
               <button

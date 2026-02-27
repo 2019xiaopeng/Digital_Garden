@@ -5,6 +5,7 @@ import { DailyLogService } from "../lib/dataService";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { buildVideoUrlWithTimestamp, getVideoUrlFromMarkdown, openExternalUrl, parseFrontmatter, TIMESTAMP_REGEX, timestampToSeconds } from "../lib/videoBookmark";
 import type { LegacyPost } from "../lib/dataService";
+import { normalizeMathDelimiters } from "../lib/markdown";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -18,7 +19,8 @@ const toRenderableMarkdown = (md: string) => {
   const videoUrl = frontmatter.video || null;
   if (!videoUrl) return body;
 
-  return body.replace(TIMESTAMP_REGEX, (full) => {
+  const normalized = normalizeMathDelimiters(body);
+  return normalized.replace(TIMESTAMP_REGEX, (full) => {
     const secs = timestampToSeconds(full);
     if (secs === null) return full;
     return `[${full}](#video-timestamp-${secs})`;

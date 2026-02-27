@@ -26,6 +26,7 @@ import rehypeHighlight from "rehype-highlight";
 import { useKnowledgeSelection } from "../context/KnowledgeSelectionContext";
 import { chatCompletion, visionChatCompletion } from "../utils/aiClient";
 import { DailyLogService } from "../lib/dataService";
+import { normalizeMathDelimiters } from "../lib/markdown";
 import "katex/dist/katex.min.css";
 import "highlight.js/styles/github-dark.css";
 
@@ -1777,7 +1778,10 @@ export function Notes() {
                       <button
                         type="button"
                         className="mb-2 block"
-                        onClick={() => setPreviewImagePath(msg.imagePath || null)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setPreviewImagePath(msg.imagePath || null);
+                        }}
                       >
                         <img
                           src={getImageUrl(msg.imagePath)}
@@ -1795,7 +1799,7 @@ export function Notes() {
                             remarkPlugins={[remarkGfm, remarkMath]}
                             rehypePlugins={[rehypeKatex, rehypeHighlight]}
                           >
-                            {msg.text}
+                            {normalizeMathDelimiters(msg.text)}
                           </ReactMarkdown>
                         </div>
                         <div className="mt-3 flex justify-end">
@@ -2101,12 +2105,13 @@ export function Notes() {
       )}
 
       {previewImagePath && (
-        <div className="fixed inset-0 z-[130] flex items-center justify-center p-6" onClick={() => setPreviewImagePath(null)}>
-          <div className="absolute inset-0 bg-black/70" />
+        <div className="fixed inset-0 z-[130] flex items-center justify-center p-6">
+          <div className="absolute inset-0 bg-black/70" onClick={() => setPreviewImagePath(null)} />
           <img
             src={getImageUrl(previewImagePath)}
             alt="大图预览"
             className="relative max-h-[86vh] max-w-[90vw] rounded-2xl border border-white/20 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
           />
         </div>
       )}

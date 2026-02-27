@@ -3,6 +3,8 @@ import { Loader2, Sparkles, Target } from "lucide-react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
 import {
   carryWeeklyReviewItemsToNextWeek,
   fetchWeeklyReviewItems,
@@ -14,6 +16,7 @@ import {
 } from "../utils/apiBridge";
 import type { WeeklyStats } from "../utils/apiBridge";
 import { AiService } from "../lib/dataService";
+import { normalizeMathDelimiters, toQuestionTitle } from "../lib/markdown";
 
 const COLORS = ["#88B5D3", "#6F9FBE", "#2A3B52", "#FF9900", "#C7851F"];
 
@@ -221,7 +224,7 @@ export function WeeklyReview() {
                     }}
                     className="flex-1 text-left hover:text-[#88B5D3]"
                   >
-                    [{item.status === "done" ? "x" : " "}] {target?.question_content.slice(0, 48) || item.title_snapshot}
+                    [{item.status === "done" ? "x" : " "}] {target ? toQuestionTitle(target.question_content, 48) : toQuestionTitle(item.title_snapshot, 48)}
                   </button>
                 </div>
               );
@@ -278,7 +281,7 @@ export function WeeklyReview() {
             </div>
           ) : aiResult ? (
             <article className="prose prose-sm max-w-none dark:prose-invert prose-headings:text-gray-900 dark:prose-headings:text-white prose-p:text-gray-700 dark:prose-p:text-gray-300 prose-strong:text-[#FF9900]">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{aiResult}</ReactMarkdown>
+              <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{normalizeMathDelimiters(aiResult)}</ReactMarkdown>
             </article>
           ) : (
             <div className="h-full flex items-center text-sm text-gray-500 dark:text-gray-400">

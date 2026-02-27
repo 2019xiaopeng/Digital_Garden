@@ -1374,6 +1374,27 @@ async fn db_archive_wrong_question(pool: &sqlx::SqlitePool, id: &str) -> Result<
     if result.rows_affected() == 0 {
         return Err("Wrong question not found".to_string());
     }
+
+    sqlx::query("DELETE FROM weekly_review_items WHERE wrong_question_id = ?")
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("Failed to cleanup weekly review items on archive: {}", e))?;
+
+    Ok(())
+}
+
+async fn db_delete_wrong_question(pool: &sqlx::SqlitePool, id: &str) -> Result<(), String> {
+    let result = sqlx::query("DELETE FROM wrong_questions WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("Failed to delete wrong question: {}", e))?;
+
+    if result.rows_affected() == 0 {
+        return Err("Wrong question not found".to_string());
+    }
+
     Ok(())
 }
 
@@ -1427,6 +1448,7 @@ async fn db_get_weekly_review_items(
         "SELECT id, week_start, week_end, wrong_question_id, title_snapshot, status, carried_from_week, completed_at, created_at, updated_at
          FROM weekly_review_items
          WHERE week_start = ?
+           AND wrong_question_id IN (SELECT id FROM wrong_questions WHERE is_archived = 0)
          ORDER BY status ASC, created_at ASC",
     )
     .bind(start)
@@ -1527,7 +1549,9 @@ async fn db_get_wrong_question_stats(pool: &sqlx::SqlitePool) -> Result<WrongQue
 
     let current_week_start = current_week_start_str();
     let weekly_pending_count = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM weekly_review_items WHERE week_start = ? AND status = 'pending'",
+        "SELECT COUNT(*) FROM weekly_review_items w
+         JOIN wrong_questions q ON q.id = w.wrong_question_id
+         WHERE w.week_start = ? AND w.status = 'pending' AND q.is_archived = 0",
     )
     .bind(&current_week_start)
     .fetch_one(pool)
@@ -1535,7 +1559,9 @@ async fn db_get_wrong_question_stats(pool: &sqlx::SqlitePool) -> Result<WrongQue
     .map_err(|e| format!("Failed to count weekly pending items: {}", e))?;
 
     let weekly_done_count = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM weekly_review_items WHERE week_start = ? AND status = 'done'",
+        "SELECT COUNT(*) FROM weekly_review_items w
+         JOIN wrong_questions q ON q.id = w.wrong_question_id
+         WHERE w.week_start = ? AND w.status = 'done' AND q.is_archived = 0",
     )
     .bind(&current_week_start)
     .fetch_one(pool)
@@ -2009,6 +2035,27 @@ async fn api_archive_wrong_question_handler(
         })?;
     drop(db);
     emit_sync_action(&state.sync_hub, "SYNC_WRONG_QUESTIONS");
+    emit_sync_action(&state.sync_hub, "SYNC_WEEKLY_REVIEW_ITEMS");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn api_delete_wrong_question_handler(
+    AxumState(state): AxumState<LanAppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let db = state.db.lock().await;
+    db_delete_wrong_question(&db.db, &id)
+        .await
+        .map_err(|e| {
+            if e.contains("not found") {
+                (StatusCode::NOT_FOUND, e)
+            } else {
+                (StatusCode::INTERNAL_SERVER_ERROR, e)
+            }
+        })?;
+    drop(db);
+    emit_sync_action(&state.sync_hub, "SYNC_WRONG_QUESTIONS");
+    emit_sync_action(&state.sync_hub, "SYNC_WEEKLY_REVIEW_ITEMS");
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2291,6 +2338,10 @@ async fn toggle_local_server(
         .route(
             "/api/wrong-questions/{id}",
             put(api_update_wrong_question_handler).delete(api_archive_wrong_question_handler),
+        )
+        .route(
+            "/api/wrong-questions/{id}/hard-delete",
+            axum::routing::delete(api_delete_wrong_question_handler),
         )
         .route("/api/wrong-questions/stats", get(api_wrong_question_stats_handler))
         .route("/api/weekly-review/items", get(api_weekly_review_items_handler))
@@ -3396,6 +3447,21 @@ async fn archive_wrong_question(
     db_archive_wrong_question(&db.db, &id).await?;
     drop(db);
     emit_sync_action(sync_hub.inner().as_ref(), "SYNC_WRONG_QUESTIONS");
+    emit_sync_action(sync_hub.inner().as_ref(), "SYNC_WEEKLY_REVIEW_ITEMS");
+    Ok(())
+}
+
+#[tauri::command]
+async fn delete_wrong_question(
+    id: String,
+    db: State<'_, Arc<Mutex<AppDb>>>,
+    sync_hub: State<'_, Arc<SyncHub>>,
+) -> Result<(), String> {
+    let db = db.lock().await;
+    db_delete_wrong_question(&db.db, &id).await?;
+    drop(db);
+    emit_sync_action(sync_hub.inner().as_ref(), "SYNC_WRONG_QUESTIONS");
+    emit_sync_action(sync_hub.inner().as_ref(), "SYNC_WEEKLY_REVIEW_ITEMS");
     Ok(())
 }
 
@@ -5452,6 +5518,7 @@ pub fn run() {
             create_wrong_question,
             update_wrong_question,
             archive_wrong_question,
+            delete_wrong_question,
             get_weekly_review_items,
             toggle_weekly_review_item_done,
             carry_weekly_review_items_to_next_week,
