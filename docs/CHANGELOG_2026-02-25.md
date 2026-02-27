@@ -112,6 +112,12 @@
 - 周日期文案优化：
   - 将 `endDate` 说明改为“选择任意一天，系统自动按该周周一到周日聚合”，降低理解成本。
 
+### 修复补丁（同日八次追加）
+- 图片地址链路最终收敛：
+  - `getImageUrl` 新增 `/api/images/...` 历史 URL 反解析，统一回退为相对路径再重建目标地址，兼容旧数据。
+  - 桌面端（Tauri）改为强制优先 `convertFileSrc(绝对路径)`，不再回落到 `http://<host>:9527`，避免本地服务未启时 `ERR_CONNECTION_REFUSED`。
+  - 浏览器端继续使用 `http://<host>:9527/api/images/...`，维持局域网访问能力。
+
 ### 版本准备
 - 版本号统一提升为 `v1.4.0`（`package.json` / `src-tauri/Cargo.toml` / `src-tauri/tauri.conf.json`）。
 

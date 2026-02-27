@@ -940,12 +940,24 @@ export async function uploadChatImage(imageData: Uint8Array, ext: string): Promi
 
 export function getImageUrl(relativePath: string): string {
   const raw = (relativePath || "").trim();
+  if (!raw) return "";
+
   const assetMatch = raw.match(/^https?:\/\/asset\.localhost\/(.+)$/i);
   const decodedAssetPath = assetMatch ? decodeURIComponent(assetMatch[1] || "") : "";
-  const source = (decodedAssetPath || raw).replace(/\\/g, "/");
+  const source = (decodedAssetPath || raw).replace(/\\/g, "/").trim();
+
+  const normalizedSource = source.replace(/^\/+/, "");
   const isAbsolutePath = /^[a-zA-Z]:\//.test(source) || source.startsWith("/");
-  const clean = source.replace(/^\/+/, "");
+
+  const parseApiRelative = (value: string): string => {
+    const match = value.match(/\/api\/images\/(.+)$/i);
+    return match ? decodeURIComponent(match[1] || "").replace(/^\/+/, "") : "";
+  };
+
+  const relativeFromApi = parseApiRelative(source);
+  const clean = relativeFromApi || normalizedSource;
   if (!clean) return "";
+
   const absoluteFromInput = isAbsolutePath ? source : "";
   const settings = getSettings();
   const workspaceRoot = (settings.docRoot || localStorage.getItem("eva.workspace.root") || "").trim();
@@ -969,22 +981,24 @@ export function getImageUrl(relativePath: string): string {
     return "";
   };
 
-  const resolvedRelative = isAbsolutePath
+  const resolvedRelative = relativeFromApi || (isAbsolutePath
     ? extractRelativeFromAbsolute(source)
-    : (absolute ? extractRelativeFromAbsolute(absolute) : clean);
+    : (absolute ? extractRelativeFromAbsolute(absolute) : clean));
 
-  if (resolvedRelative) {
-    return `${getLanBaseUrl()}/api/images/${encodeURI(resolvedRelative)}`;
-  }
-
-  if (absolute) {
+  if (isTauriRuntime()) {
+    const tauriAbsolute = absolute || (workspaceRoot
+      ? `${workspaceRoot.replace(/[\\/]+$/, "")}/${resolvedRelative || clean}`.replace(/\\/g, "/")
+      : "");
+    if (!tauriAbsolute) return "";
     try {
-      return convertFileSrc(absolute);
+      return convertFileSrc(tauriAbsolute);
     } catch {
       return "";
     }
   }
 
-  if (isTauriRuntime()) return "";
+  if (resolvedRelative) {
+    return `${getLanBaseUrl()}/api/images/${encodeURI(resolvedRelative)}`;
+  }
   return `${getLanBaseUrl()}/api/images/${encodeURI(clean)}`;
 }
