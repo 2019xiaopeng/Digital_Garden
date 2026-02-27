@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Loader2, Sparkles, Target } from "lucide-react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
 import { useNavigate } from "react-router-dom";
@@ -17,7 +17,8 @@ import {
 } from "../utils/apiBridge";
 import type { WeeklyStats } from "../utils/apiBridge";
 import { AiService } from "../lib/dataService";
-import { extractReviewSummary, normalizeMathDelimiters, toQuestionTitle } from "../lib/markdown";
+import { extractReviewSummary, normalizeMathDelimiters } from "../lib/markdown";
+import { useSync } from "../hooks/useSync";
 
 const COLORS = ["#88B5D3", "#6F9FBE", "#2A3B52", "#FF9900", "#C7851F"];
 
@@ -62,34 +63,35 @@ export function WeeklyReview() {
 
   const completion = Math.max(0, Math.min(100, stats?.completion_rate || 0));
 
-  useEffect(() => {
-    let cancelled = false;
-    const load = async () => {
-      setLoading(true);
-      setError(null);
-      try {
-        const [data, items, wrongs] = await Promise.all([
-          fetchWeeklyStats(endDate),
-          fetchWeeklyReviewItems(weekStart),
-          fetchWrongQuestions({ is_archived: 0 }),
-        ]);
-
-        if (!cancelled) {
-          setStats(data);
-          setWeeklyItems(items);
-          setWrongQuestions(wrongs);
-        }
-      } catch (e) {
-        if (!cancelled) setError(`加载周统计失败：${e instanceof Error ? e.message : String(e)}`);
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    };
-    load();
-    return () => {
-      cancelled = true;
-    };
+  const refreshWeeklyData = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const [data, items, wrongs] = await Promise.all([
+        fetchWeeklyStats(endDate),
+        fetchWeeklyReviewItems(weekStart),
+        fetchWrongQuestions({ is_archived: 0 }),
+      ]);
+      setStats(data);
+      setWeeklyItems(items);
+      setWrongQuestions(wrongs);
+    } catch (e) {
+      setError(`加载周统计失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setLoading(false);
+    }
   }, [endDate, weekStart]);
+
+  useEffect(() => {
+    void refreshWeeklyData();
+  }, [refreshWeeklyData]);
+
+  useSync("SYNC_WEEKLY_REVIEW_ITEMS", () => {
+    void refreshWeeklyData();
+  });
+  useSync("SYNC_WRONG_QUESTIONS", () => {
+    void refreshWeeklyData();
+  });
 
   const handleGenerateAiReview = async () => {
     if (!stats) return;
@@ -222,7 +224,7 @@ export function WeeklyReview() {
                     onClick={() => navigate(`/error-book?questionId=${encodeURIComponent(item.wrong_question_id)}&mode=review`)}
                     className="flex-1 text-left hover:text-[#88B5D3] leading-relaxed break-words"
                   >
-                    {target ? extractReviewSummary(target.question_content, target.ai_solution, 48) : toQuestionTitle(item.title_snapshot, 48)}
+                    {target ? extractReviewSummary(target.question_content, target.ai_solution, 48) : item.title_snapshot}
                   </button>
                   <button
                     type="button"

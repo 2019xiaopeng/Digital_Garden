@@ -26,7 +26,7 @@ import rehypeHighlight from "rehype-highlight";
 import { useKnowledgeSelection } from "../context/KnowledgeSelectionContext";
 import { chatCompletion, visionChatCompletion } from "../utils/aiClient";
 import { DailyLogService } from "../lib/dataService";
-import { normalizeMathDelimiters } from "../lib/markdown";
+import { extractQuestionType, normalizeMathDelimiters } from "../lib/markdown";
 import "katex/dist/katex.min.css";
 import "highlight.js/styles/github-dark.css";
 
@@ -84,6 +84,7 @@ type PendingImage = {
 
 type CaptureFormState = {
   subject: string;
+  questionType: string;
   tags: string;
   difficulty: number;
   userNote: string;
@@ -887,53 +888,61 @@ export function Notes() {
   const extractQuestionAndSolution = (assistantTextRaw: string, userTextRaw?: string | null) => {
     const assistantText = normalizeCaptureText(assistantTextRaw || "");
     const userText = normalizeCaptureText(userTextRaw || "");
+    const detectedQuestionType = extractQuestionType(assistantText);
 
-    const pipelineMatch = assistantText.match(
+    const assistantCore = assistantText
+      .replace(/^(?:[-*#>\s]*)?(?:题型总结|题型|知识点|本题类型)\s*[：:].*?(?:\n+|$)/i, "")
+      .trim();
+
+    const pipelineMatch = assistantCore.match(
       /\*\*\s*【?题目识别】?\s*\*\*([\s\S]*?)\*\*\s*【?(?:详细)?解答】?\s*\*\*([\s\S]*)/i,
     );
     if (pipelineMatch) {
       const q = normalizeCaptureText(pipelineMatch[1]);
       const s = normalizeCaptureText(pipelineMatch[2]);
-      if (q && s) return { questionContent: q, aiSolution: s };
+      if (q && s) return { questionType: detectedQuestionType, questionContent: q, aiSolution: s };
     }
 
-    const plainMatch = assistantText.match(
+    const plainMatch = assistantCore.match(
       /(?:题目原文(?:如下)?|题目识别|题目)\s*[：:]?\s*([\s\S]*?)(?:解题步骤(?:如下)?|详细解答|解答|解析)\s*[：:]?\s*([\s\S]*)/i,
     );
     if (plainMatch) {
       const q = normalizeCaptureText(plainMatch[1]);
       const s = normalizeCaptureText(plainMatch[2]);
-      if (q && s) return { questionContent: q, aiSolution: s };
+      if (q && s) return { questionType: detectedQuestionType, questionContent: q, aiSolution: s };
     }
 
-    const markdownHeadingMatch = assistantText.match(
+    const markdownHeadingMatch = assistantCore.match(
       /(?:^|\n)#{1,6}\s*(?:题目|题目识别|题目原文)\s*\n([\s\S]*?)(?:\n#{1,6}\s*(?:详细解答|解答|解析)\s*\n)([\s\S]*)/i,
     );
     if (markdownHeadingMatch) {
       const q = normalizeCaptureText(markdownHeadingMatch[1]);
       const s = normalizeCaptureText(markdownHeadingMatch[2]);
-      if (q && s) return { questionContent: q, aiSolution: s };
+      if (q && s) return { questionType: detectedQuestionType, questionContent: q, aiSolution: s };
     }
 
     const genericUserPrompt = /识别|图片|这道题|详细解答|题目并/i.test(userText);
-    const paragraphs = assistantText.split(/\n{2,}/).map(normalizeCaptureText).filter(Boolean);
+    const paragraphs = assistantCore.split(/\n{2,}/).map(normalizeCaptureText).filter(Boolean);
     if (genericUserPrompt && paragraphs.length >= 2) {
       return {
+        questionType: detectedQuestionType,
         questionContent: paragraphs[0],
         aiSolution: paragraphs.slice(1).join("\n\n"),
       };
     }
 
-    if (assistantText) {
+    if (assistantCore) {
       return {
+        questionType: detectedQuestionType,
         questionContent: userText || paragraphs[0] || "",
-        aiSolution: assistantText,
+        aiSolution: assistantCore,
       };
     }
 
     return {
+      questionType: detectedQuestionType,
       questionContent: userText,
-      aiSolution: assistantText,
+      aiSolution: assistantCore,
     };
   };
 
@@ -1292,6 +1301,7 @@ export function Notes() {
     const extracted = extractQuestionAndSolution(assistantMsg.text || "", previousUser?.text || "");
     setCaptureForm({
       subject: "数学",
+      questionType: extracted.questionType || "",
       tags: "",
       difficulty: 3,
       userNote: "",
@@ -1322,7 +1332,9 @@ export function Notes() {
         tags_json: JSON.stringify(tags),
         question_content: captureForm.questionContent,
         question_image_path: captureTarget.userMsg?.imagePath || null,
-        ai_solution: captureForm.aiSolution,
+        ai_solution: captureForm.questionType.trim()
+          ? `题型总结：${captureForm.questionType.trim()}\n\n${captureForm.aiSolution}`
+          : captureForm.aiSolution,
         user_note: captureForm.userNote || null,
         source: "ai_chat",
         ai_session_id: captureTarget.sessionId,
@@ -1352,7 +1364,7 @@ export function Notes() {
         await DailyLogService.create({
           id: "",
           title: `错题 · ${captureForm.subject} · ${date}`,
-          excerpt: `## 错题收录 - ${captureForm.subject}\n\n### 题目\n${captureForm.questionContent}\n\n### AI 解答\n${captureForm.aiSolution}\n\n### 我的笔记\n${captureForm.userNote || "（暂无）"}\n\n---\n*由 EVA 错题快录自动生成*`,
+          excerpt: `## 错题收录 - ${captureForm.subject}\n\n${captureForm.questionType.trim() ? `**题型总结：** ${captureForm.questionType.trim()}\n\n` : ""}### 题目\n${captureForm.questionContent}\n\n### AI 解答\n${captureForm.aiSolution}\n\n### 我的笔记\n${captureForm.userNote || "（暂无）"}\n\n---\n*由 EVA 错题快录自动生成*`,
           date,
           readTime: "1 min read",
           category: "Manual",
@@ -2022,6 +2034,15 @@ export function Notes() {
                   <option value="政治">政治</option>
                   <option value="其他">其他</option>
                 </select>
+              </div>
+              <div>
+                <label className="text-xs font-semibold text-gray-500">题目类型</label>
+                <input
+                  value={captureForm.questionType}
+                  onChange={(e) => setCaptureForm({ ...captureForm, questionType: e.target.value })}
+                  placeholder="例如：函数根的存在性与实数根个数"
+                  className="mt-1 w-full rounded-xl border border-gray-200/80 dark:border-[#30435c] bg-white/90 dark:bg-[#0f1826]/80 px-3 py-2 text-sm"
+                />
               </div>
               <div>
                 <label className="text-xs font-semibold text-gray-500">标签（逗号分隔）</label>

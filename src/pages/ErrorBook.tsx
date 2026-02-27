@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Archive, BookOpenCheck, Plus, Search, Trash2 } from "lucide-react";
 import {
   archiveWrongQuestion,
@@ -20,7 +20,8 @@ import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import rehypeHighlight from "rehype-highlight";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { extractReviewSummary, formatQuestionLayout, normalizeMathDelimiters, toQuestionTitle } from "../lib/markdown";
+import { extractQuestionType, extractReviewSummary, formatQuestionLayout, normalizeMathDelimiters } from "../lib/markdown";
+import { useSync } from "../hooks/useSync";
 import "katex/dist/katex.min.css";
 
 const subjects = ["全部", "数学", "408", "英语", "政治", "其他"];
@@ -51,17 +52,18 @@ export function ErrorBook() {
   const [list, setList] = useState<WrongQuestion[]>([]);
   const [stats, setStats] = useState<WrongQuestionStats | null>(null);
   const [subject, setSubject] = useState("全部");
+  const [questionTypeFilter, setQuestionTypeFilter] = useState("全部题型");
   const [showArchived, setShowArchived] = useState(false);
   const [mastery, setMastery] = useState<string>("全部");
   const [keyword, setKeyword] = useState("");
   const [loading, setLoading] = useState(false);
   const [weeklyItems, setWeeklyItems] = useState<WeeklyReviewItem[]>([]);
-  const [carrySelection, setCarrySelection] = useState<string[]>([]);
   const [detail, setDetail] = useState<WrongQuestion | null>(null);
   const [showSolution, setShowSolution] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [createForm, setCreateForm] = useState({
     subject: "数学",
+    questionType: "",
     tags: "",
     question: "",
     solution: "",
@@ -71,7 +73,7 @@ export function ErrorBook() {
 
   const weekStart = useMemo(() => getWeekStart(todayStr()), []);
 
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     setLoading(true);
     try {
       const [rows, summary, weekly] = await Promise.all([
@@ -85,11 +87,14 @@ export function ErrorBook() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [showArchived, weekStart]);
 
   useEffect(() => {
     void loadData();
-  }, [weekStart, showArchived]);
+  }, [loadData]);
+
+  useSync("SYNC_WEEKLY_REVIEW_ITEMS", () => { void loadData(); });
+  useSync("SYNC_WRONG_QUESTIONS", () => { void loadData(); });
 
   const weeklyMap = useMemo(() => {
     const map = new Map<string, WeeklyReviewItem>();
@@ -100,6 +105,10 @@ export function ErrorBook() {
   const filtered = useMemo(() => {
     return list.filter((item) => {
       if (subject !== "全部" && item.subject !== subject) return false;
+      if (questionTypeFilter !== "全部题型") {
+        const itemType = extractQuestionType(item.ai_solution) || "未分类";
+        if (itemType !== questionTypeFilter) return false;
+      }
       if (mastery !== "全部") {
         const target = mastery === "未掌握" ? 0 : mastery === "模糊" ? 1 : mastery === "基本掌握" ? 2 : 3;
         if (item.mastery_level !== target) return false;
@@ -110,15 +119,18 @@ export function ErrorBook() {
       }
       return true;
     });
-  }, [keyword, list, mastery, subject]);
+  }, [keyword, list, mastery, questionTypeFilter, subject]);
+
+  const questionTypeOptions = useMemo(() => {
+    const set = new Set<string>();
+    list.forEach((item) => {
+      const t = extractQuestionType(item.ai_solution);
+      if (t) set.add(t);
+    });
+    return ["全部题型", ...Array.from(set)];
+  }, [list]);
 
   const pendingWeekly = useMemo(() => weeklyItems.filter((item) => item.status === "pending"), [weeklyItems]);
-
-  useEffect(() => {
-    if (searchParams.get("mode") === "review") {
-      setCarrySelection(pendingWeekly.map((item) => item.id));
-    }
-  }, [pendingWeekly, searchParams]);
 
   useEffect(() => {
     const questionId = (searchParams.get("questionId") || "").trim();
@@ -163,14 +175,26 @@ export function ErrorBook() {
         </div>
       </header>
 
-      <section className="glass-card rounded-2xl p-4 grid grid-cols-1 md:grid-cols-4 gap-3">
-        <select value={subject} onChange={(e) => setSubject(e.target.value)} className="rounded-xl border border-gray-200/80 dark:border-[#30435c] bg-white/90 dark:bg-[#0f1826]/80 px-3 py-2 text-sm">
-          {subjects.map((s) => <option key={s} value={s}>{s}</option>)}
-        </select>
-        <select value={mastery} onChange={(e) => setMastery(e.target.value)} className="rounded-xl border border-gray-200/80 dark:border-[#30435c] bg-white/90 dark:bg-[#0f1826]/80 px-3 py-2 text-sm">
-          {["全部", "未掌握", "模糊", "基本掌握", "熟练"].map((s) => <option key={s} value={s}>{s}</option>)}
-        </select>
-        <div className="md:col-span-2 relative">
+      <section className="glass-card rounded-2xl p-4 grid grid-cols-1 md:grid-cols-3 gap-3">
+        <label className="space-y-1">
+          <span className="text-xs font-semibold text-gray-500">学科筛选</span>
+          <select value={subject} onChange={(e) => setSubject(e.target.value)} className="w-full rounded-xl border border-gray-200/80 dark:border-[#30435c] bg-white/90 dark:bg-[#0f1826]/80 px-3 py-2 text-sm">
+            {subjects.map((s) => <option key={s} value={s}>{s}</option>)}
+          </select>
+        </label>
+        <label className="space-y-1">
+          <span className="text-xs font-semibold text-gray-500">题型筛选</span>
+          <select value={questionTypeFilter} onChange={(e) => setQuestionTypeFilter(e.target.value)} className="w-full rounded-xl border border-gray-200/80 dark:border-[#30435c] bg-white/90 dark:bg-[#0f1826]/80 px-3 py-2 text-sm">
+            {questionTypeOptions.map((s) => <option key={s} value={s}>{s}</option>)}
+          </select>
+        </label>
+        <label className="space-y-1">
+          <span className="text-xs font-semibold text-gray-500">熟练度筛选</span>
+          <select value={mastery} onChange={(e) => setMastery(e.target.value)} className="w-full rounded-xl border border-gray-200/80 dark:border-[#30435c] bg-white/90 dark:bg-[#0f1826]/80 px-3 py-2 text-sm">
+            {["全部", "未掌握", "模糊", "基本掌握", "熟练"].map((s) => <option key={s} value={s}>{s}</option>)}
+          </select>
+        </label>
+        <div className="md:col-span-3 relative">
           <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
           <input
             value={keyword}
@@ -193,14 +217,14 @@ export function ErrorBook() {
             <h2 className="font-semibold text-gray-900 dark:text-white flex items-center gap-2"><BookOpenCheck className="w-4 h-4 text-[#88B5D3]" /> 本周待复习清单</h2>
             <button
               onClick={async () => {
-                const ids = carrySelection.filter(Boolean);
+                const ids = pendingWeekly.map((item) => item.id);
                 if (!ids.length) return;
                 await carryWeeklyReviewItemsToNextWeek(ids, weekStart);
                 await loadData();
               }}
               className="text-xs px-3 py-1.5 rounded-lg border border-[#88B5D3]/30 text-[#88B5D3] hover:bg-[#88B5D3]/10"
             >
-              延续到下周
+              延续未完成到下周
             </button>
           </div>
           <div className="space-y-2">
@@ -212,9 +236,10 @@ export function ErrorBook() {
                 <label key={item.id} className="flex items-center gap-2 text-sm">
                   <input
                     type="checkbox"
-                    checked={carrySelection.includes(item.id)}
-                    onChange={(e) => {
-                      setCarrySelection((prev) => e.target.checked ? [...prev, item.id] : prev.filter((id) => id !== item.id));
+                    checked={item.status === "done"}
+                    onChange={async (e) => {
+                      await toggleWeeklyReviewItemDone(item.id, e.target.checked);
+                      await loadData();
                     }}
                   />
                   <button
@@ -226,17 +251,7 @@ export function ErrorBook() {
                       }
                     }}
                   >
-                    {q ? extractReviewSummary(q.question_content, q.ai_solution, 48) : toQuestionTitle(item.title_snapshot, 48)}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      await toggleWeeklyReviewItemDone(item.id, true);
-                      await loadData();
-                    }}
-                    className="px-2 py-1 rounded-md border border-gray-200/80 dark:border-[#30435c] text-xs text-gray-600 dark:text-gray-300"
-                  >
-                    标记完成
+                    {q ? extractReviewSummary(q.question_content, q.ai_solution, 48) : item.title_snapshot}
                   </button>
                 </label>
               );
@@ -341,6 +356,7 @@ export function ErrorBook() {
               <select value={createForm.subject} onChange={(e) => setCreateForm({ ...createForm, subject: e.target.value })} className="rounded-xl border border-gray-200/80 dark:border-[#30435c] bg-white/90 dark:bg-[#0f1826]/80 px-3 py-2 text-sm">
                 {subjects.filter((s) => s !== "全部").map((s) => <option key={s} value={s}>{s}</option>)}
               </select>
+              <input value={createForm.questionType} onChange={(e) => setCreateForm({ ...createForm, questionType: e.target.value })} placeholder="题目类型（如：函数根的存在性与实数根个数）" className="rounded-xl border border-gray-200/80 dark:border-[#30435c] bg-white/90 dark:bg-[#0f1826]/80 px-3 py-2 text-sm" />
               <input value={createForm.tags} onChange={(e) => setCreateForm({ ...createForm, tags: e.target.value })} placeholder="标签，逗号分隔" className="rounded-xl border border-gray-200/80 dark:border-[#30435c] bg-white/90 dark:bg-[#0f1826]/80 px-3 py-2 text-sm" />
             </div>
             <textarea rows={4} value={createForm.question} onChange={(e) => setCreateForm({ ...createForm, question: e.target.value })} placeholder="题目（支持 Markdown + LaTeX）" className="w-full rounded-xl border border-gray-200/80 dark:border-[#30435c] bg-white/90 dark:bg-[#0f1826]/80 px-3 py-2 text-sm" />
@@ -358,7 +374,9 @@ export function ErrorBook() {
                     tags_json: JSON.stringify(createForm.tags.split(",").map((x) => x.trim()).filter(Boolean)),
                     question_content: createForm.question,
                     question_image_path: null,
-                    ai_solution: createForm.solution,
+                    ai_solution: createForm.questionType.trim()
+                      ? `题型总结：${createForm.questionType.trim()}\n\n${createForm.solution}`
+                      : createForm.solution,
                     user_note: createForm.note || null,
                     source: "manual",
                     ai_session_id: null,

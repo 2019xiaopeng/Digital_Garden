@@ -1511,6 +1511,16 @@ async fn db_toggle_weekly_review_item_done(
     item_id: &str,
     done: bool,
 ) -> Result<WeeklyReviewItem, String> {
+    let previous = sqlx::query_as::<_, WeeklyReviewItem>(
+        "SELECT id, week_start, week_end, wrong_question_id, title_snapshot, status, carried_from_week, completed_at, created_at, updated_at
+         FROM weekly_review_items WHERE id = ?",
+    )
+    .bind(item_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("Failed to read weekly review item before toggle: {}", e))?
+    .ok_or_else(|| "Weekly review item not found".to_string())?;
+
     let status = if done { "done" } else { "pending" };
     let completed_at = if done { Some(now_iso()) } else { None };
     let result = sqlx::query(
@@ -1526,6 +1536,50 @@ async fn db_toggle_weekly_review_item_done(
 
     if result.rows_affected() == 0 {
         return Err("Weekly review item not found".to_string());
+    }
+
+    if done && previous.status != "done" {
+        let review_count = sqlx::query_scalar::<_, i64>(
+            "SELECT review_count FROM wrong_questions WHERE id = ?",
+        )
+        .bind(&previous.wrong_question_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| format!("Failed to read wrong question review_count: {}", e))?
+        .unwrap_or(0)
+        + 1;
+
+        let next_mastery = if review_count >= 3 { 3 } else { review_count as i32 };
+        let auto_archive = review_count >= 4;
+        let now = now_iso();
+
+        sqlx::query(
+            "UPDATE wrong_questions
+             SET review_count = ?,
+                 mastery_level = ?,
+                 last_review_date = ?,
+                 is_archived = CASE WHEN ? THEN 1 ELSE is_archived END,
+                 updated_at = ?
+             WHERE id = ?",
+        )
+        .bind(review_count)
+        .bind(next_mastery)
+        .bind(&now)
+        .bind(auto_archive)
+        .bind(&now)
+        .bind(&previous.wrong_question_id)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("Failed to update wrong question review progress: {}", e))?;
+
+        if auto_archive {
+            sqlx::query("DELETE FROM weekly_review_items WHERE wrong_question_id = ? AND id <> ?")
+                .bind(&previous.wrong_question_id)
+                .bind(item_id)
+                .execute(pool)
+                .await
+                .map_err(|e| format!("Failed to cleanup weekly items after auto archive: {}", e))?;
+        }
     }
 
     sqlx::query_as::<_, WeeklyReviewItem>(
@@ -2152,6 +2206,7 @@ async fn api_weekly_review_toggle_handler(
         })?;
     drop(db);
     emit_sync_action(&state.sync_hub, "SYNC_WEEKLY_REVIEW_ITEMS");
+    emit_sync_action(&state.sync_hub, "SYNC_WRONG_QUESTIONS");
     Ok(Json(row))
 }
 
@@ -3534,6 +3589,7 @@ async fn toggle_weekly_review_item_done(
     let row = db_toggle_weekly_review_item_done(&db.db, &item_id, done).await?;
     drop(db);
     emit_sync_action(sync_hub.inner().as_ref(), "SYNC_WEEKLY_REVIEW_ITEMS");
+    emit_sync_action(sync_hub.inner().as_ref(), "SYNC_WRONG_QUESTIONS");
     Ok(row)
 }
 

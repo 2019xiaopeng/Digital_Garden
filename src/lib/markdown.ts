@@ -72,20 +72,33 @@ export function toQuestionTitle(markdown: string, maxLength = 48): string {
   return `${plain.slice(0, maxLength)}...`;
 }
 
-export function extractReviewSummary(questionMarkdown: string, solutionMarkdown?: string | null, maxLength = 48): string {
+export function extractQuestionType(solutionMarkdown?: string | null): string {
   const solution = normalizeMathDelimiters(solutionMarkdown || "");
   const lines = solution
     .split(/\n+/)
     .map((line) => line.replace(/^[-*#>\s]+/, "").trim())
     .filter(Boolean);
 
-  const summaryLine = lines.find((line) => /^(题型总结|题型|知识点|本题类型)\s*[：:]/.test(line));
-  if (summaryLine) {
-    const normalized = summaryLine.replace(/^(题型总结|题型|知识点|本题类型)\s*[：:]\s*/i, "").trim();
-    if (normalized) {
-      if (normalized.length <= maxLength) return normalized;
-      return `${normalized.slice(0, maxLength)}...`;
-    }
+  const summaryLine = lines.find((line) => /^(题型总结|题型|知识点|本题类型)\s*[：:]/i.test(line));
+  if (!summaryLine) return "";
+
+  let value = summaryLine
+    .replace(/^(题型总结|题型|知识点|本题类型)\s*[：:]\s*/i, "")
+    .trim();
+
+  const stopMatch = value.match(/^(.*?)(?:\s+(?:题目|已知|设|若|求|对于|给定)\b|[。！？]|$)/);
+  if (stopMatch?.[1]) {
+    value = stopMatch[1].trim();
+  }
+
+  return value;
+}
+
+export function extractReviewSummary(questionMarkdown: string, solutionMarkdown?: string | null, maxLength = 48): string {
+  const questionType = extractQuestionType(solutionMarkdown);
+  if (questionType) {
+    if (questionType.length <= maxLength) return questionType;
+    return `${questionType.slice(0, maxLength)}...`;
   }
 
   return toQuestionTitle(questionMarkdown, maxLength);
