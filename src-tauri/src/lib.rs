@@ -1222,7 +1222,29 @@ fn make_title_snapshot(content: &str) -> String {
         .find(|line| !line.trim().is_empty())
         .unwrap_or("未命名错题")
         .trim();
-    let mut title = first_line.chars().take(50).collect::<String>();
+
+    let mut title = first_line
+        .replace("[公式]", " ")
+        .replace("\\(", " ")
+        .replace("\\)", " ")
+        .replace("\\[", " ")
+        .replace("\\]", " ")
+        .replace("$$", " ")
+        .replace('$', " ");
+
+    if let Some(idx) = title.find("选项") {
+        title = title[..idx].trim().to_string();
+    }
+
+    title = title
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    if title.chars().count() > 50 {
+        title = title.chars().take(50).collect::<String>();
+    }
+
     if title.is_empty() {
         title = "未命名错题".to_string();
     }

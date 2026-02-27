@@ -20,7 +20,7 @@ import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import rehypeHighlight from "rehype-highlight";
 import { useSearchParams } from "react-router-dom";
-import { normalizeMathDelimiters, toQuestionTitle } from "../lib/markdown";
+import { formatQuestionLayout, normalizeMathDelimiters, toQuestionTitle } from "../lib/markdown";
 import "katex/dist/katex.min.css";
 
 const subjects = ["全部", "数学", "408", "英语", "政治", "其他"];
@@ -196,7 +196,7 @@ export function ErrorBook() {
                     }}
                   />
                   <button
-                    className="text-left flex-1 hover:text-[#88B5D3]"
+                    className="text-left flex-1 hover:text-[#88B5D3] leading-relaxed break-words"
                     onClick={async () => {
                       await toggleWeeklyReviewItemDone(item.id, true);
                       await loadData();
@@ -221,7 +221,7 @@ export function ErrorBook() {
           return (
             <article key={item.id} className="glass-card rounded-2xl p-4 border border-[#88B5D3]/20">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <h3 className="font-semibold text-gray-900 dark:text-white">[{item.subject}] {toQuestionTitle(item.question_content, 42)}</h3>
+                <h3 className="font-semibold text-gray-900 dark:text-white leading-relaxed break-words">[{item.subject}] {toQuestionTitle(item.question_content, 42)}</h3>
                 <span className="text-xs text-gray-500">{masteryLabel(item.mastery_level)}</span>
               </div>
               <p className="mt-2 text-xs text-gray-500">状态：{weekly?.status || "未加入本周清单"} · 难度 {item.difficulty} 星</p>
@@ -275,7 +275,7 @@ export function ErrorBook() {
             )}
             <article className="prose prose-sm dark:prose-invert max-w-none">
               <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex, rehypeHighlight]}>
-                {normalizeMathDelimiters(`### 题目\n${detail.question_content}\n\n### 解答\n${detail.ai_solution}\n\n### 笔记\n${detail.user_note || "（暂无）"}`)}
+                {normalizeMathDelimiters(`### 题目\n${formatQuestionLayout(detail.question_content)}\n\n### 解答\n${detail.ai_solution}\n\n### 笔记\n${detail.user_note || "（暂无）"}`)}
               </ReactMarkdown>
             </article>
           </div>

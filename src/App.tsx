@@ -55,6 +55,7 @@ export default function App() {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
         const root = await invoke<string>("get_workspace_root");
+        localStorage.setItem("eva.workspace.root", root);
         const current = getSettings();
         const docRoot = (current.docRoot || "").trim();
         if (!docRoot || docRoot.includes("~") || !isAbsolutePath(docRoot)) {

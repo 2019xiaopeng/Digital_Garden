@@ -940,11 +940,13 @@ export async function uploadChatImage(imageData: Uint8Array, ext: string): Promi
 
 export function getImageUrl(relativePath: string): string {
   const raw = (relativePath || "").trim();
-  const normalizedRaw = raw.replace(/\\/g, "/");
-  const isAbsolutePath = /^[a-zA-Z]:\//.test(normalizedRaw) || normalizedRaw.startsWith("/");
-  const clean = normalizedRaw.replace(/^\/+/, "");
+  const assetMatch = raw.match(/^https?:\/\/asset\.localhost\/(.+)$/i);
+  const decodedAssetPath = assetMatch ? decodeURIComponent(assetMatch[1] || "") : "";
+  const source = (decodedAssetPath || raw).replace(/\\/g, "/");
+  const isAbsolutePath = /^[a-zA-Z]:\//.test(source) || source.startsWith("/");
+  const clean = source.replace(/^\/+/, "");
   if (!clean) return "";
-  const absoluteFromInput = isAbsolutePath ? normalizedRaw : "";
+  const absoluteFromInput = isAbsolutePath ? source : "";
   const settings = getSettings();
   const workspaceRoot = (settings.docRoot || localStorage.getItem("eva.workspace.root") || "").trim();
   const absolute = absoluteFromInput || (workspaceRoot
@@ -952,10 +954,12 @@ export function getImageUrl(relativePath: string): string {
     : "");
 
   if (absolute) {
+    const fileUrl = `file:///${absolute.replace(/^\/+/, "")}`;
+    if (isTauriRuntime()) return encodeURI(fileUrl);
     try {
       return convertFileSrc(absolute);
     } catch {
-      return `file:///${absolute.replace(/^\/+/, "")}`;
+      return encodeURI(fileUrl);
     }
   }
 

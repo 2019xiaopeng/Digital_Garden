@@ -44,6 +44,19 @@
   - 强化 Tauri 运行态检测（`__TAURI__` / `__TAURI_INTERNALS__` / `__TAURI_IPC__` + `tauri:`/`*.localhost`）。
   - `getImageUrl` 统一支持绝对路径与相对路径，优先 `convertFileSrc` 生成可访问 URL。
 
+### 修复补丁（同日四次追加）
+- AI 图片路径稳定性增强：
+  - 应用启动时持久化 `eva.workspace.root`，避免相对路径无法解析。
+  - `getImageUrl` 新增 `asset.localhost` 旧地址反解支持；桌面端优先输出 `file:///` URL，规避 `asset.localhost` 连接失败场景。
+- 错题标题可读性优化（周复盘/错题本/周清单）：
+  - 题目摘要不再以 `[公式]` 占位符为主，改为可读文本快照。
+  - 自动弱化“选项段”噪音，标题更接近日常阅读直觉。
+  - 后端 `make_title_snapshot` 同步清洗规则，避免新增数据继续污染标题。
+- 选择题排版优化：
+  - 错题详情中的 `选项 A/B/C/D` 自动分行，避免挤在同一行。
+  - 周清单与错题卡片标题支持换行显示，长题面不再挤压布局。
+- 文档更新：`README.md` 按最新 PRD 与当前能力完成重写（功能矩阵、运行模式、数据目录）。
+
 ### 版本准备
 - 版本号统一提升为 `v1.4.0`（`package.json` / `src-tauri/Cargo.toml` / `src-tauri/tauri.conf.json`）。
 

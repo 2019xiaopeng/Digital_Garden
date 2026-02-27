@@ -222,7 +222,7 @@ export function WeeklyReview() {
                       const items = await fetchWeeklyReviewItems(weekStart);
                       setWeeklyItems(items);
                     }}
-                    className="flex-1 text-left hover:text-[#88B5D3]"
+                    className="flex-1 text-left hover:text-[#88B5D3] leading-relaxed break-words"
                   >
                     [{item.status === "done" ? "x" : " "}] {target ? toQuestionTitle(target.question_content, 48) : toQuestionTitle(item.title_snapshot, 48)}
                   </button>
