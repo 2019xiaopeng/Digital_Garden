@@ -19,8 +19,8 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import rehypeHighlight from "rehype-highlight";
-import { useSearchParams } from "react-router-dom";
-import { formatQuestionLayout, normalizeMathDelimiters, toQuestionTitle } from "../lib/markdown";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import { extractReviewSummary, formatQuestionLayout, normalizeMathDelimiters, toQuestionTitle } from "../lib/markdown";
 import "katex/dist/katex.min.css";
 
 const subjects = ["全部", "数学", "408", "英语", "政治", "其他"];
@@ -46,7 +46,8 @@ function masteryLabel(level: number) {
 }
 
 export function ErrorBook() {
-  const [searchParams] = useSearchParams();
+  const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [list, setList] = useState<WrongQuestion[]>([]);
   const [stats, setStats] = useState<WrongQuestionStats | null>(null);
   const [subject, setSubject] = useState("全部");
@@ -57,6 +58,7 @@ export function ErrorBook() {
   const [weeklyItems, setWeeklyItems] = useState<WeeklyReviewItem[]>([]);
   const [carrySelection, setCarrySelection] = useState<string[]>([]);
   const [detail, setDetail] = useState<WrongQuestion | null>(null);
+  const [showSolution, setShowSolution] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [createForm, setCreateForm] = useState({
     subject: "数学",
@@ -117,6 +119,26 @@ export function ErrorBook() {
       setCarrySelection(pendingWeekly.map((item) => item.id));
     }
   }, [pendingWeekly, searchParams]);
+
+  useEffect(() => {
+    const questionId = (searchParams.get("questionId") || "").trim();
+    if (!questionId || list.length === 0) return;
+    const target = list.find((item) => item.id === questionId);
+    if (target) {
+      setDetail(target);
+      setShowSolution(false);
+    }
+  }, [searchParams, list]);
+
+  const closeDetail = () => {
+    setDetail(null);
+    setShowSolution(false);
+    if (searchParams.get("questionId")) {
+      const next = new URLSearchParams(searchParams);
+      next.delete("questionId");
+      setSearchParams(next, { replace: true });
+    }
+  };
 
   return (
     <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-700 ease-out">
@@ -197,12 +219,24 @@ export function ErrorBook() {
                   />
                   <button
                     className="text-left flex-1 hover:text-[#88B5D3] leading-relaxed break-words"
+                    onClick={() => {
+                      if (q) {
+                        setDetail(q);
+                        setShowSolution(false);
+                      }
+                    }}
+                  >
+                    {q ? extractReviewSummary(q.question_content, q.ai_solution, 48) : toQuestionTitle(item.title_snapshot, 48)}
+                  </button>
+                  <button
+                    type="button"
                     onClick={async () => {
                       await toggleWeeklyReviewItemDone(item.id, true);
                       await loadData();
                     }}
+                    className="px-2 py-1 rounded-md border border-gray-200/80 dark:border-[#30435c] text-xs text-gray-600 dark:text-gray-300"
                   >
-                    {q ? toQuestionTitle(q.question_content, 48) : toQuestionTitle(item.title_snapshot, 48)}
+                    标记完成
                   </button>
                 </label>
               );
@@ -221,12 +255,12 @@ export function ErrorBook() {
           return (
             <article key={item.id} className="glass-card rounded-2xl p-4 border border-[#88B5D3]/20">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <h3 className="font-semibold text-gray-900 dark:text-white leading-relaxed break-words">[{item.subject}] {toQuestionTitle(item.question_content, 42)}</h3>
+                <h3 className="font-semibold text-gray-900 dark:text-white leading-relaxed break-words">[{item.subject}] {extractReviewSummary(item.question_content, item.ai_solution, 42)}</h3>
                 <span className="text-xs text-gray-500">{masteryLabel(item.mastery_level)}</span>
               </div>
               <p className="mt-2 text-xs text-gray-500">状态：{weekly?.status || "未加入本周清单"} · 难度 {item.difficulty} 星</p>
               <div className="mt-3 flex flex-wrap gap-2">
-                <button onClick={() => setDetail(item)} className="px-3 py-1.5 text-xs rounded-lg border border-[#88B5D3]/30 text-[#88B5D3] hover:bg-[#88B5D3]/10">查看</button>
+                <button onClick={() => { setDetail(item); setShowSolution(false); navigate(`/error-book?questionId=${encodeURIComponent(item.id)}${showArchived ? "" : "&mode=review"}`); }} className="px-3 py-1.5 text-xs rounded-lg border border-[#88B5D3]/30 text-[#88B5D3] hover:bg-[#88B5D3]/10">查看</button>
                 {!showArchived && weekly && (
                   <button
                     onClick={async () => {
@@ -267,7 +301,7 @@ export function ErrorBook() {
 
       {detail && (
         <div className="fixed inset-0 z-[120] flex items-center justify-center p-4">
-          <div className="absolute inset-0 bg-black/60" onClick={() => setDetail(null)} />
+          <div className="absolute inset-0 bg-black/60" onClick={closeDetail} />
           <div className="relative w-full max-w-4xl max-h-[88vh] overflow-y-auto rounded-3xl bg-white dark:bg-[#0f1826] border border-[#88B5D3]/25 p-6 space-y-4">
             <h3 className="text-xl font-semibold text-gray-900 dark:text-white">[{detail.subject}] 错题详情</h3>
             {detail.question_image_path && (
@@ -275,9 +309,25 @@ export function ErrorBook() {
             )}
             <article className="prose prose-sm dark:prose-invert max-w-none">
               <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex, rehypeHighlight]}>
-                {normalizeMathDelimiters(`### 题目\n${formatQuestionLayout(detail.question_content)}\n\n### 解答\n${detail.ai_solution}\n\n### 笔记\n${detail.user_note || "（暂无）"}`)}
+                {normalizeMathDelimiters(`### 题目\n${formatQuestionLayout(detail.question_content)}`)}
               </ReactMarkdown>
             </article>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setShowSolution((prev) => !prev)}
+                className="px-3 py-1.5 text-xs rounded-lg border border-[#88B5D3]/30 text-[#88B5D3] hover:bg-[#88B5D3]/10"
+              >
+                {showSolution ? "隐藏解析" : "显示解析与答案"}
+              </button>
+            </div>
+            {showSolution && (
+              <article className="prose prose-sm dark:prose-invert max-w-none">
+                <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex, rehypeHighlight]}>
+                  {normalizeMathDelimiters(`### 解答\n${detail.ai_solution}\n\n### 笔记\n${detail.user_note || "（暂无）"}`)}
+                </ReactMarkdown>
+              </article>
+            )}
           </div>
         </div>
       )}

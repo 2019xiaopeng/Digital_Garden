@@ -1207,7 +1207,7 @@ export function Notes() {
       if (pendingImage) {
         for await (const chunk of visionChatCompletion({
           imageBase64: pendingImage.dataUrl,
-          userPrompt: `${userMsg}\n\n${selectedContext}`,
+          userPrompt: `${userMsg}\n\n请按以下规则回答：第一行写“题型总结：...”；若是数学题，至少给两种思路（主解法+备选思路）。\n\n${selectedContext}`,
           reasoningModel: selectedModel,
           signal: undefined,
         })) {
@@ -1220,7 +1220,7 @@ export function Notes() {
           messages: [
             {
               role: "system",
-              content: `你是EVA系统的知识库AI助手，简洁清晰地回答问题。${context}${selectedContext}`,
+              content: `你是EVA系统的知识库AI助手，简洁清晰地回答问题。若用户在问题/解题，第一行先输出“题型总结：...”。如果是数学题，请至少给两种思路（主解法+备选思路）。${context}${selectedContext}`,
             },
             {
               role: "user",

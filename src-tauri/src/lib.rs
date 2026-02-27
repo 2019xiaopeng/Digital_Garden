@@ -1216,12 +1216,39 @@ async fn db_get_focus_stats(
     })
 }
 
-fn make_title_snapshot(content: &str) -> String {
-    let first_line = content
+fn make_title_snapshot(content: &str, ai_solution: &str) -> String {
+    let summary_line = ai_solution
         .lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or("未命名错题")
-        .trim();
+        .map(|line| line.trim())
+        .find(|line| {
+            !line.is_empty()
+                && (line.starts_with("题型总结:")
+                    || line.starts_with("题型总结：")
+                    || line.starts_with("题型:")
+                    || line.starts_with("题型：")
+                    || line.starts_with("知识点:")
+                    || line.starts_with("知识点："))
+        })
+        .map(|line| {
+            line.trim_start_matches("题型总结:")
+                .trim_start_matches("题型总结：")
+                .trim_start_matches("题型:")
+                .trim_start_matches("题型：")
+                .trim_start_matches("知识点:")
+                .trim_start_matches("知识点：")
+                .trim()
+                .to_string()
+        })
+        .filter(|line| !line.is_empty());
+
+    let first_line = summary_line.unwrap_or_else(|| {
+        content
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or("未命名错题")
+            .trim()
+            .to_string()
+    });
 
     let mut title = first_line
         .replace("[公式]", " ")
@@ -2006,7 +2033,7 @@ async fn api_create_wrong_question_handler(
             &week_start,
             &week_end,
             &created.id,
-            &make_title_snapshot(&created.question_content),
+            &make_title_snapshot(&created.question_content, &created.ai_solution),
             None,
         )
         .await
@@ -3431,7 +3458,7 @@ async fn create_wrong_question(
             &week_start,
             &week_end,
             &created.id,
-            &make_title_snapshot(&created.question_content),
+            &make_title_snapshot(&created.question_content, &created.ai_solution),
             None,
         )
         .await?;

@@ -179,7 +179,7 @@ export async function* visionChatCompletion(options: {
   const visionModel = normalizeVisionModel(options.visionModel);
 
   if (mode === "single") {
-    const systemPrompt = "你是一位考研辅导名师。请仔细看图中的题目，用 LaTeX 格式写出题目原文，然后给出完整详细的解题步骤。所有数学公式使用 LaTeX（行内 $...$，行间 $$...$$）。";
+    const systemPrompt = "你是一位考研辅导名师。请严格按以下格式输出：\n1) 第一行必须是：题型总结：<一句话，例如\"高数定积分计算\"/\"线代特征值计算\">。\n2) 然后给出题目原文（LaTeX）。\n3) 给出详细解答。若是数学题，至少给两种思路：主解法 + 备选思路（可简略对比优劣）。\n所有数学公式使用 LaTeX（行内 $...$，行间 $$...$$）。";
     const messages: OpenAIChatMessage[] = [
       {
         role: "system",
@@ -245,7 +245,7 @@ export async function* visionChatCompletion(options: {
   yield `**【题目识别】**\n\n${cleaned}\n\n---\n\n**【详细解答】**\n\n`;
 
   const reasoningModel = options.reasoningModel?.trim() || resolveModel("deepseek-ai/DeepSeek-R1");
-  const solvingPrompt = "你是一位考研辅导名师。以下是学生的题目，请给出完整详细的解题步骤，必要时分情况讨论，所有数学公式使用 LaTeX（行内 $...$，行间 $$...$$）。";
+  const solvingPrompt = "你是一位考研辅导名师。请严格按以下格式输出：\n1) 第一行必须是：题型总结：<一句话总结题目类型/知识点>。\n2) 然后给出完整详细解题步骤。\n3) 若为数学题，至少给两种思路：主解法 + 备选思路（可简述适用条件与优劣）。\n所有数学公式使用 LaTeX（行内 $...$，行间 $$...$$）。";
   const solvingMessages: OpenAIChatMessage[] = [
     { role: "system", content: solvingPrompt },
     {

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Loader2, Sparkles, Target } from "lucide-react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
+import { useNavigate } from "react-router-dom";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -16,7 +17,7 @@ import {
 } from "../utils/apiBridge";
 import type { WeeklyStats } from "../utils/apiBridge";
 import { AiService } from "../lib/dataService";
-import { normalizeMathDelimiters, toQuestionTitle } from "../lib/markdown";
+import { extractReviewSummary, normalizeMathDelimiters, toQuestionTitle } from "../lib/markdown";
 
 const COLORS = ["#88B5D3", "#6F9FBE", "#2A3B52", "#FF9900", "#C7851F"];
 
@@ -32,6 +33,7 @@ function formatFocusMinutes(totalMinutes: number) {
 }
 
 export function WeeklyReview() {
+  const navigate = useNavigate();
   const [endDate, setEndDate] = useState(getTodayStr());
   const [stats, setStats] = useState<WeeklyStats | null>(null);
   const [loading, setLoading] = useState(false);
@@ -217,14 +219,21 @@ export function WeeklyReview() {
                     onChange={(e) => setCarryIds((prev) => e.target.checked ? [...prev, item.id] : prev.filter((id) => id !== item.id))}
                   />
                   <button
+                    onClick={() => navigate(`/error-book?questionId=${encodeURIComponent(item.wrong_question_id)}&mode=review`)}
+                    className="flex-1 text-left hover:text-[#88B5D3] leading-relaxed break-words"
+                  >
+                    {target ? extractReviewSummary(target.question_content, target.ai_solution, 48) : toQuestionTitle(item.title_snapshot, 48)}
+                  </button>
+                  <button
+                    type="button"
                     onClick={async () => {
                       await toggleWeeklyReviewItemDone(item.id, item.status !== "done");
                       const items = await fetchWeeklyReviewItems(weekStart);
                       setWeeklyItems(items);
                     }}
-                    className="flex-1 text-left hover:text-[#88B5D3] leading-relaxed break-words"
+                    className="px-2 py-1 rounded-md border border-gray-200/80 dark:border-[#30435c] text-xs text-gray-600 dark:text-gray-300"
                   >
-                    [{item.status === "done" ? "x" : " "}] {target ? toQuestionTitle(target.question_content, 48) : toQuestionTitle(item.title_snapshot, 48)}
+                    {item.status === "done" ? "改为未完成" : "标记完成"}
                   </button>
                 </div>
               );

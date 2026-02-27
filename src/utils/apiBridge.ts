@@ -954,12 +954,21 @@ export function getImageUrl(relativePath: string): string {
     : "");
 
   if (absolute) {
-    const fileUrl = `file:///${absolute.replace(/^\/+/, "")}`;
-    if (isTauriRuntime()) return encodeURI(fileUrl);
-    try {
-      return convertFileSrc(absolute);
-    } catch {
-      return encodeURI(fileUrl);
+    if (isTauriRuntime()) {
+      try {
+        return convertFileSrc(absolute);
+      } catch {
+        return "";
+      }
+    }
+
+    if (workspaceRoot) {
+      const rootNormalized = workspaceRoot.replace(/\\/g, "/").replace(/[\\/]+$/, "");
+      const absNormalized = absolute.replace(/\\/g, "/");
+      if (absNormalized.startsWith(`${rootNormalized}/`)) {
+        const rel = absNormalized.slice(rootNormalized.length + 1);
+        return `${getLanBaseUrl()}/api/images/${encodeURI(rel)}`;
+      }
     }
   }
 
