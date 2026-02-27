@@ -4718,6 +4718,7 @@ async fn ensure_workspace_dirs(app: &tauri::AppHandle) -> Result<String, String>
     let required = [
         root.clone(),
         root.join("Database"),
+        root.join("ErrorImages"),
         root.join("Logs"),
         root.join("Notes"),
         root.join("Resources"),
@@ -4741,6 +4742,7 @@ async fn ensure_workspace_dirs_at(root: &str) -> Result<String, String> {
     let required = [
         root_path.clone(),
         root_path.join("Database"),
+        root_path.join("ErrorImages"),
         root_path.join("Logs"),
         root_path.join("Notes"),
         root_path.join("Resources"),

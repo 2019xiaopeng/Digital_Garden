@@ -608,6 +608,7 @@ export function Settings() {
           <p>留痕 MD → <code className="text-xs bg-gray-200 dark:bg-gray-800 px-1.5 py-0.5 rounded">{settings.docRoot}/Logs/</code></p>
           <p>知识库 → <code className="text-xs bg-gray-200 dark:bg-gray-800 px-1.5 py-0.5 rounded">{settings.docRoot}/Notes/</code></p>
           <p>资源文件 → <code className="text-xs bg-gray-200 dark:bg-gray-800 px-1.5 py-0.5 rounded">{settings.docRoot}/Resources/</code></p>
+          <p>错题图片 → <code className="text-xs bg-gray-200 dark:bg-gray-800 px-1.5 py-0.5 rounded">{settings.docRoot}/ErrorImages/</code></p>
           <p>数据库 → <code className="text-xs bg-gray-200 dark:bg-gray-800 px-1.5 py-0.5 rounded">{settings.docRoot}/Database/eva.db</code></p>
         </div>
       </div>

@@ -892,6 +892,13 @@ export function Notes() {
     return /(请|帮我|麻烦|能否).*(识别|解答|解析|分析)|^(请|帮我).*(这道题|题目)|详细解答|一步一步|给出思路/.test(normalized);
   };
 
+  const looksLikeSolutionText = (text: string) => {
+    const normalized = normalizeCaptureText(text || "");
+    if (!normalized) return false;
+    const signalCount = (normalized.match(/步骤|解析|思路|先|再|然后|因此|所以|可得|解：|证明：|最终答案|故选/g) || []).length;
+    return signalCount >= 4;
+  };
+
   const pickQuestionFromAssistant = (assistantCoreRaw: string) => {
     const normalized = normalizeCaptureText(assistantCoreRaw);
     if (!normalized) return "";
@@ -912,6 +919,26 @@ export function Notes() {
 
     const paragraphs = stripped.split(/\n{2,}/).map(normalizeCaptureText).filter(Boolean);
     return paragraphs[0] || "";
+  };
+
+  const sanitizeQuestionCandidate = (candidate: string, userText: string) => {
+    const normalized = normalizeCaptureText(candidate || "");
+    const safeUser = normalizeCaptureText(userText || "");
+    const safeUserAvailable = safeUser && !looksLikeInstructionPrompt(safeUser) && safeUser.length > 8;
+
+    if (!normalized) return safeUserAvailable ? safeUser : "";
+
+    if (looksLikeSolutionText(normalized)) {
+      return safeUserAvailable ? safeUser : "";
+    }
+
+    if (normalized.length > 900) {
+      const firstBlock = normalized.split(/\n{2,}/).map(normalizeCaptureText).find(Boolean) || "";
+      if (firstBlock && !looksLikeSolutionText(firstBlock)) return firstBlock;
+      return safeUserAvailable ? safeUser : "";
+    }
+
+    return normalized;
   };
 
   const extractQuestionAndSolution = (assistantTextRaw: string, userTextRaw?: string | null) => {
@@ -953,15 +980,16 @@ export function Notes() {
     const genericUserPrompt = /识别|图片|这道题|详细解答|题目并/i.test(userText) || looksLikeInstructionPrompt(userText);
     const paragraphs = assistantCore.split(/\n{2,}/).map(normalizeCaptureText).filter(Boolean);
     if (genericUserPrompt && paragraphs.length >= 2) {
+      const questionCandidate = sanitizeQuestionCandidate(pickQuestionFromAssistant(assistantCore) || paragraphs[0], userText);
       return {
         questionType: detectedQuestionType,
-        questionContent: pickQuestionFromAssistant(assistantCore) || paragraphs[0],
+        questionContent: questionCandidate || paragraphs[0],
         aiSolution: paragraphs.slice(1).join("\n\n"),
       };
     }
 
     if (assistantCore) {
-      const assistantQuestionCandidate = pickQuestionFromAssistant(assistantCore);
+      const assistantQuestionCandidate = sanitizeQuestionCandidate(pickQuestionFromAssistant(assistantCore), userText);
       const shouldUseUserText = Boolean(userText && !looksLikeInstructionPrompt(userText) && userText.length > 8);
       return {
         questionType: detectedQuestionType,
@@ -1247,7 +1275,7 @@ export function Notes() {
       if (pendingImage) {
         for await (const chunk of visionChatCompletion({
           imageBase64: pendingImage.dataUrl,
-          userPrompt: `${userMsg}\n\n请按以下规则回答：第一行写“题型总结：...”；若是数学题，至少给两种思路（主解法+备选思路）。\n\n${selectedContext}`,
+          userPrompt: `${userMsg}\n\n请严格按以下格式回答：\n题型总结：...\n【题目识别】\n(只写题目原文，选择题需保留并分行列出 A/B/C/D 选项)\n【详细解答】\n(完整步骤；数学题至少两种思路：主解法+备选思路)\n\n${selectedContext}`,
           reasoningModel: selectedModel,
           signal: undefined,
         })) {
@@ -1260,7 +1288,7 @@ export function Notes() {
           messages: [
             {
               role: "system",
-              content: `你是EVA系统的知识库AI助手，简洁清晰地回答问题。若用户在问题/解题，第一行先输出“题型总结：...”。如果是数学题，请至少给两种思路（主解法+备选思路）。${context}${selectedContext}`,
+              content: `你是EVA系统的知识库AI助手，简洁清晰地回答问题。若用户在问题/解题，请严格按以下格式输出：第一行“题型总结：...”；随后“【题目识别】”区仅保留题目原文（选择题选项分行）；再输出“【详细解答】”区。如果是数学题，请至少给两种思路（主解法+备选思路）。${context}${selectedContext}`,
             },
             {
               role: "user",
