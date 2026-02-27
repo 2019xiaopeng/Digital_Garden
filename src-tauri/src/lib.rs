@@ -1492,7 +1492,36 @@ async fn db_get_weekly_review_items(
     pool: &sqlx::SqlitePool,
     week_start: &str,
 ) -> Result<Vec<WeeklyReviewItem>, String> {
-    let (start, _) = parse_week_start_monday(week_start)?;
+    let (start, end) = parse_week_start_monday(week_start)?;
+
+    let start_date = chrono::NaiveDate::parse_from_str(&start, "%Y-%m-%d")
+        .map_err(|e| format!("Invalid week_start: {}", e))?;
+    let prev_start = (start_date - chrono::Duration::days(7)).format("%Y-%m-%d").to_string();
+
+    let prev_pending = sqlx::query_as::<_, WeeklyReviewItem>(
+        "SELECT id, week_start, week_end, wrong_question_id, title_snapshot, status, carried_from_week, completed_at, created_at, updated_at
+         FROM weekly_review_items
+         WHERE week_start = ?
+           AND status = 'pending'
+           AND wrong_question_id IN (SELECT id FROM wrong_questions WHERE is_archived = 0)",
+    )
+    .bind(&prev_start)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to fetch previous week pending items: {}", e))?;
+
+    for item in prev_pending {
+        db_create_weekly_review_item_if_absent(
+            pool,
+            &start,
+            &end,
+            &item.wrong_question_id,
+            &item.title_snapshot,
+            Some(&prev_start),
+        )
+        .await?;
+    }
+
     sqlx::query_as::<_, WeeklyReviewItem>(
         "SELECT id, week_start, week_end, wrong_question_id, title_snapshot, status, carried_from_week, completed_at, created_at, updated_at
          FROM weekly_review_items

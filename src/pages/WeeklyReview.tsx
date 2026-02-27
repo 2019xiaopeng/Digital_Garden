@@ -7,7 +7,6 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import {
-  carryWeeklyReviewItemsToNextWeek,
   fetchWeeklyReviewItems,
   fetchWeeklyStats,
   fetchWrongQuestions,
@@ -44,7 +43,6 @@ export function WeeklyReview() {
   const [aiResult, setAiResult] = useState<string>("");
   const [weeklyItems, setWeeklyItems] = useState<WeeklyReviewItem[]>([]);
   const [wrongQuestions, setWrongQuestions] = useState<WrongQuestion[]>([]);
-  const [carryIds, setCarryIds] = useState<string[]>([]);
 
   const weekStart = useMemo(() => {
     const date = new Date(`${endDate}T00:00:00`);
@@ -152,13 +150,14 @@ export function WeeklyReview() {
           <p className="mt-3 text-lg text-gray-600 dark:text-gray-400 leading-relaxed">系统多算计，用户少操作。直接看本周作战数据与学情诊断。</p>
         </div>
         <div className="glass-soft rounded-2xl px-4 py-3">
-          <label className="block text-xs font-semibold text-gray-500 dark:text-gray-400 mb-1">本周基准日（endDate）</label>
+          <label className="block text-xs font-semibold text-gray-500 dark:text-gray-400 mb-1">查看周（周一~周日）</label>
           <input
             type="date"
             value={endDate}
             onChange={(e) => setEndDate(e.target.value)}
             className="bg-white/90 dark:bg-[#0f1826]/80 border border-gray-200/80 dark:border-[#30435c] rounded-xl px-3 py-2 text-sm text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-[#88B5D3]/25 focus:border-[#88B5D3]"
           />
+          <p className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">选择任意一天，系统自动按该周周一到周日聚合。</p>
         </div>
       </header>
 
@@ -195,18 +194,7 @@ export function WeeklyReview() {
         <div className="mb-6 rounded-2xl border border-[#88B5D3]/25 bg-[#88B5D3]/6 p-4">
           <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
             <h3 className="font-semibold text-gray-900 dark:text-white">本周待复习错题（标题清单）</h3>
-            <button
-              onClick={async () => {
-                if (!carryIds.length) return;
-                await carryWeeklyReviewItemsToNextWeek(carryIds, weekStart);
-                const items = await fetchWeeklyReviewItems(weekStart);
-                setWeeklyItems(items);
-                setCarryIds([]);
-              }}
-              className="px-3 py-1.5 rounded-lg border border-[#88B5D3]/30 text-[#88B5D3] text-xs font-semibold hover:bg-[#88B5D3]/10"
-            >
-              延续到下周
-            </button>
+            <p className="text-xs text-gray-500 dark:text-gray-400">未完成项会在下周自动顺延</p>
           </div>
           <div className="space-y-2">
             {weeklyItems.length === 0 ? (
@@ -215,14 +203,9 @@ export function WeeklyReview() {
               const target = wrongQuestions.find((q) => q.id === item.wrong_question_id);
               return (
                 <div key={item.id} className="flex items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={carryIds.includes(item.id)}
-                    onChange={(e) => setCarryIds((prev) => e.target.checked ? [...prev, item.id] : prev.filter((id) => id !== item.id))}
-                  />
                   <button
                     onClick={() => navigate(`/error-book?questionId=${encodeURIComponent(item.wrong_question_id)}&mode=review`)}
-                    className="flex-1 text-left hover:text-[#88B5D3] leading-relaxed break-words"
+                    className={`flex-1 text-left hover:text-[#88B5D3] leading-relaxed break-words ${item.status === "done" ? "line-through text-gray-400 dark:text-gray-500" : ""}`}
                   >
                     {target ? extractReviewSummary(target.question_content, target.ai_solution, 48) : item.title_snapshot}
                   </button>

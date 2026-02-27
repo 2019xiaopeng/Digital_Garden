@@ -953,22 +953,35 @@ export function getImageUrl(relativePath: string): string {
     ? `${workspaceRoot.replace(/[\\/]+$/, "")}/${clean}`.replace(/\\/g, "/")
     : "");
 
-  if (absolute) {
-    if (isTauriRuntime()) {
-      try {
-        return convertFileSrc(absolute);
-      } catch {
-        return "";
-      }
+  const extractRelativeFromAbsolute = (abs: string): string => {
+    const normalized = abs.replace(/\\/g, "/");
+    const marker = "/EVA_Knowledge_Base/";
+    const markerIndex = normalized.indexOf(marker);
+    if (markerIndex >= 0) {
+      return normalized.slice(markerIndex + marker.length).replace(/^\/+/, "");
     }
-
     if (workspaceRoot) {
       const rootNormalized = workspaceRoot.replace(/\\/g, "/").replace(/[\\/]+$/, "");
-      const absNormalized = absolute.replace(/\\/g, "/");
-      if (absNormalized.startsWith(`${rootNormalized}/`)) {
-        const rel = absNormalized.slice(rootNormalized.length + 1);
-        return `${getLanBaseUrl()}/api/images/${encodeURI(rel)}`;
+      if (normalized.startsWith(`${rootNormalized}/`)) {
+        return normalized.slice(rootNormalized.length + 1).replace(/^\/+/, "");
       }
+    }
+    return "";
+  };
+
+  const resolvedRelative = isAbsolutePath
+    ? extractRelativeFromAbsolute(source)
+    : (absolute ? extractRelativeFromAbsolute(absolute) : clean);
+
+  if (resolvedRelative) {
+    return `${getLanBaseUrl()}/api/images/${encodeURI(resolvedRelative)}`;
+  }
+
+  if (absolute) {
+    try {
+      return convertFileSrc(absolute);
+    } catch {
+      return "";
     }
   }
 
