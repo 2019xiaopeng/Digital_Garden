@@ -265,6 +265,8 @@ export function Settings() {
     localStorage.setItem("eva.ai.apiKey", settings.aiApiKey);
     localStorage.setItem("eva.ai.api.key", settings.aiApiKey);
     localStorage.setItem("eva.ai.model", aiModel);
+    localStorage.setItem("eva.ai.visionModel", settings.aiVisionModel);
+    localStorage.setItem("eva.ai.visionMode", settings.aiVisionMode);
 
     if (settings.docRoot.trim() && settings.docRoot !== initialDocRoot) {
       try {
@@ -526,6 +528,47 @@ export function Settings() {
             <option value="deepseek-ai/DeepSeek-V3.2">deepseek-ai/DeepSeek-V3.2（推荐）</option>
             <option value="deepseek-ai/DeepSeek-R1">deepseek-ai/DeepSeek-R1</option>
           </select>
+        </div>
+        <div className="glass-card rounded-2xl p-5 space-y-4">
+          <div>
+            <label className="text-xs font-semibold text-gray-500">视觉模型（图片识题）</label>
+            <div className="mt-2 flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => setSettings({ ...settings, aiVisionModel: "Pro/Qwen/Qwen2.5-VL-7B-Instruct" })}
+                className="px-3 py-1.5 rounded-lg border border-gray-200/80 dark:border-[#30435c] text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#1b2a41]"
+              >
+                Qwen2.5-VL-7B
+              </button>
+              <button
+                type="button"
+                onClick={() => setSettings({ ...settings, aiVisionModel: "Pro/OpenGVLab/InternVL2.5-26B" })}
+                className="px-3 py-1.5 rounded-lg border border-gray-200/80 dark:border-[#30435c] text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#1b2a41]"
+              >
+                InternVL2.5-26B
+              </button>
+            </div>
+            <input
+              value={settings.aiVisionModel}
+              onChange={(e) => setSettings({ ...settings, aiVisionModel: e.target.value })}
+              placeholder="输入视觉模型名（可自定义）"
+              className={inputClass + " mt-2"}
+            />
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-gray-500">图片识题模式</label>
+            <select
+              value={settings.aiVisionMode}
+              onChange={(e) => setSettings({ ...settings, aiVisionMode: e.target.value as AppSettings["aiVisionMode"] })}
+              className={selectClass}
+            >
+              <option value="single">单步模式（视觉模型直接解题）</option>
+              <option value="pipeline">流水线模式（先提取题面，再推理详解）</option>
+            </select>
+          </div>
+          <p className="text-xs text-gray-400 dark:text-gray-500">
+            发送图片时使用的视觉模型。若识别不准确，可手动编辑题面后重新提问。
+          </p>
         </div>
       </section>
     );

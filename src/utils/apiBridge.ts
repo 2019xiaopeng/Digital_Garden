@@ -145,6 +145,67 @@ export type FetchFocusStatsOptions = {
   dimension?: "tag" | "template" | "timer_type";
 };
 
+export type WrongQuestion = {
+  id: string;
+  subject: string;
+  tags_json: string;
+  question_content: string;
+  question_image_path?: string | null;
+  ai_solution: string;
+  user_note?: string | null;
+  source: "ai_chat" | "manual" | string;
+  ai_session_id?: string | null;
+  ai_message_ids_json?: string | null;
+  difficulty: number;
+  mastery_level: number;
+  review_count: number;
+  next_review_date?: string | null;
+  last_review_date?: string | null;
+  ease_factor: number;
+  interval_days: number;
+  is_archived: 0 | 1 | number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type WrongQuestionFilter = {
+  subject?: string;
+  mastery_level?: number;
+  search_keyword?: string;
+  is_archived?: number;
+};
+
+export type WeeklyReviewItem = {
+  id: string;
+  week_start: string;
+  week_end: string;
+  wrong_question_id: string;
+  title_snapshot: string;
+  status: "pending" | "done" | string;
+  carried_from_week?: string | null;
+  completed_at?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type SubjectStat = {
+  subject: string;
+  count: number;
+  unmastered: number;
+};
+
+export type WrongQuestionStats = {
+  total_count: number;
+  unmastered_count: number;
+  weekly_pending_count: number;
+  weekly_done_count: number;
+  this_week_new: number;
+  by_subject: SubjectStat[];
+};
+
+export const SYNC_WRONG_QUESTIONS = "SYNC_WRONG_QUESTIONS";
+export const SYNC_WEEKLY_REVIEW_ITEMS = "SYNC_WEEKLY_REVIEW_ITEMS";
+
 function isTauriRuntime(): boolean {
   if (typeof window === "undefined") return false;
   const win = window as Window & { __TAURI__?: unknown; __TAURI_INTERNALS__?: unknown };
@@ -631,4 +692,234 @@ export async function fetchFocusStats(options: FetchFocusStatsOptions = {}): Pro
   }
 
   return (await response.json()) as FocusStatsResult;
+}
+
+export async function fetchWrongQuestions(filter: WrongQuestionFilter = {}): Promise<WrongQuestion[]> {
+  if (isTauriRuntime()) {
+    const invoke = await getInvoke();
+    const rows = await invoke<WrongQuestion[]>("get_wrong_questions", { filter });
+    return Array.isArray(rows) ? rows : [];
+  }
+
+  const query = new URLSearchParams();
+  if (filter.subject?.trim()) query.set("subject", filter.subject.trim());
+  if (typeof filter.mastery_level === "number") query.set("mastery_level", String(filter.mastery_level));
+  if (filter.search_keyword?.trim()) query.set("search_keyword", filter.search_keyword.trim());
+  if (typeof filter.is_archived === "number") query.set("is_archived", String(filter.is_archived));
+  const qs = query.toString();
+  const response = await fetch(`${getLanBaseUrl()}/api/wrong-questions${qs ? `?${qs}` : ""}`);
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`HTTP 请求失败 (${response.status}): ${text || response.statusText}`);
+  }
+  const rows = (await response.json()) as WrongQuestion[];
+  return Array.isArray(rows) ? rows : [];
+}
+
+export async function createWrongQuestion(
+  question: Partial<WrongQuestion>,
+  addToCurrentWeek = false
+): Promise<WrongQuestion> {
+  if (isTauriRuntime()) {
+    const invoke = await getInvoke();
+    return await invoke<WrongQuestion>("create_wrong_question", {
+      question,
+      addToCurrentWeek,
+    });
+  }
+
+  const response = await fetch(`${getLanBaseUrl()}/api/wrong-questions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      question,
+      add_to_current_week: addToCurrentWeek,
+    }),
+  });
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`HTTP 请求失败 (${response.status}): ${text || response.statusText}`);
+  }
+
+  return (await response.json()) as WrongQuestion;
+}
+
+export async function updateWrongQuestion(id: string, question: Partial<WrongQuestion>): Promise<WrongQuestion> {
+  if (!id.trim()) throw new Error("id 不能为空");
+
+  if (isTauriRuntime()) {
+    const invoke = await getInvoke();
+    return await invoke<WrongQuestion>("update_wrong_question", {
+      id,
+      question,
+    });
+  }
+
+  const response = await fetch(`${getLanBaseUrl()}/api/wrong-questions/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ ...question, id }),
+  });
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`HTTP 请求失败 (${response.status}): ${text || response.statusText}`);
+  }
+
+  return (await response.json()) as WrongQuestion;
+}
+
+export async function archiveWrongQuestion(id: string): Promise<void> {
+  if (!id.trim()) throw new Error("id 不能为空");
+
+  if (isTauriRuntime()) {
+    const invoke = await getInvoke();
+    await invoke("archive_wrong_question", { id });
+    return;
+  }
+
+  const response = await fetch(`${getLanBaseUrl()}/api/wrong-questions/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+
+  if (!response.ok && response.status !== 204) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`HTTP 请求失败 (${response.status}): ${text || response.statusText}`);
+  }
+}
+
+export async function fetchWrongQuestionStats(): Promise<WrongQuestionStats> {
+  if (isTauriRuntime()) {
+    const invoke = await getInvoke();
+    return await invoke<WrongQuestionStats>("get_wrong_question_stats");
+  }
+
+  const response = await fetch(`${getLanBaseUrl()}/api/wrong-questions/stats`);
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`HTTP 请求失败 (${response.status}): ${text || response.statusText}`);
+  }
+  return (await response.json()) as WrongQuestionStats;
+}
+
+export async function fetchWeeklyReviewItems(weekStart: string): Promise<WeeklyReviewItem[]> {
+  if (!weekStart.trim()) throw new Error("weekStart 不能为空");
+
+  if (isTauriRuntime()) {
+    const invoke = await getInvoke();
+    const rows = await invoke<WeeklyReviewItem[]>("get_weekly_review_items", {
+      weekStart,
+    });
+    return Array.isArray(rows) ? rows : [];
+  }
+
+  const response = await fetch(
+    `${getLanBaseUrl()}/api/weekly-review/items?week_start=${encodeURIComponent(weekStart)}`
+  );
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`HTTP 请求失败 (${response.status}): ${text || response.statusText}`);
+  }
+  const rows = (await response.json()) as WeeklyReviewItem[];
+  return Array.isArray(rows) ? rows : [];
+}
+
+export async function toggleWeeklyReviewItemDone(itemId: string, done: boolean): Promise<WeeklyReviewItem> {
+  if (!itemId.trim()) throw new Error("itemId 不能为空");
+
+  if (isTauriRuntime()) {
+    const invoke = await getInvoke();
+    return await invoke<WeeklyReviewItem>("toggle_weekly_review_item_done", {
+      itemId,
+      done,
+    });
+  }
+
+  const response = await fetch(`${getLanBaseUrl()}/api/weekly-review/items/${encodeURIComponent(itemId)}/toggle`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ done }),
+  });
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`HTTP 请求失败 (${response.status}): ${text || response.statusText}`);
+  }
+  return (await response.json()) as WeeklyReviewItem;
+}
+
+export async function carryWeeklyReviewItemsToNextWeek(itemIds: string[], fromWeekStart: string): Promise<void> {
+  if (!fromWeekStart.trim()) throw new Error("fromWeekStart 不能为空");
+  if (!itemIds.length) return;
+
+  if (isTauriRuntime()) {
+    const invoke = await getInvoke();
+    await invoke("carry_weekly_review_items_to_next_week", {
+      itemIds,
+      fromWeekStart,
+    });
+    return;
+  }
+
+  const response = await fetch(`${getLanBaseUrl()}/api/weekly-review/carry-next-week`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ item_ids: itemIds, from_week_start: fromWeekStart }),
+  });
+  if (!response.ok && response.status !== 204) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`HTTP 请求失败 (${response.status}): ${text || response.statusText}`);
+  }
+}
+
+export async function uploadChatImage(imageData: Uint8Array, ext: string): Promise<string> {
+  if (!imageData?.length) {
+    throw new Error("imageData 不能为空");
+  }
+
+  if (isTauriRuntime()) {
+    const invoke = await getInvoke();
+    return await invoke<string>("save_chat_image", {
+      imageData: Array.from(imageData),
+      ext,
+    });
+  }
+
+  const blob = new Blob([imageData], { type: ext ? `image/${ext.replace(/^\./, "")}` : "application/octet-stream" });
+  const formData = new FormData();
+  formData.append("file", blob, `upload.${ext.replace(/^\./, "") || "png"}`);
+
+  const response = await fetch(`${getLanBaseUrl()}/api/images/upload`, {
+    method: "POST",
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`HTTP 请求失败 (${response.status}): ${text || response.statusText}`);
+  }
+
+  const result = (await response.json()) as { path?: string };
+  if (!result.path) {
+    throw new Error("图片上传成功但返回路径为空");
+  }
+  return result.path;
+}
+
+export function getImageUrl(relativePath: string): string {
+  const clean = relativePath.trim().replace(/\\/g, "/").replace(/^\/+/, "");
+  if (!clean) return "";
+  const workspaceRoot = localStorage.getItem("eva.workspace.root") || "";
+  if (isTauriRuntime() && workspaceRoot) {
+    return `${workspaceRoot.replace(/[\\/]+$/, "")}/${clean}`;
+  }
+  return `${getLanBaseUrl()}/api/images/${encodeURI(clean)}`;
 }

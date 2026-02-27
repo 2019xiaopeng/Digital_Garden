@@ -1,11 +1,11 @@
 use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path as AxumPath, Query, State as AxumState};
+use axum::extract::{Multipart, Path as AxumPath, Query, State as AxumState};
 use axum::http::{header, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, put};
 use axum::{Json, Router};
-use chrono::{Local, Utc};
+use chrono::{Datelike, Local, Utc};
 use mime_guess::from_path;
 use rust_embed::RustEmbed;
 use serde_json::json;
@@ -217,7 +217,71 @@ pub struct AiMessage {
     pub session_id: String,
     pub role: String,
     pub content: String,
+    pub image_path: Option<String>,
     pub created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
+pub struct WrongQuestion {
+    pub id: String,
+    pub subject: String,
+    pub tags_json: String,
+    pub question_content: String,
+    pub question_image_path: Option<String>,
+    pub ai_solution: String,
+    pub user_note: Option<String>,
+    pub source: String,
+    pub ai_session_id: Option<String>,
+    pub ai_message_ids_json: Option<String>,
+    pub difficulty: i32,
+    pub mastery_level: i32,
+    pub review_count: i32,
+    pub next_review_date: Option<String>,
+    pub last_review_date: Option<String>,
+    pub ease_factor: f64,
+    pub interval_days: i32,
+    pub is_archived: i32,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
+pub struct WeeklyReviewItem {
+    pub id: String,
+    pub week_start: String,
+    pub week_end: String,
+    pub wrong_question_id: String,
+    pub title_snapshot: String,
+    pub status: String,
+    pub carried_from_week: Option<String>,
+    pub completed_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct WrongQuestionFilter {
+    pub subject: Option<String>,
+    pub mastery_level: Option<i32>,
+    pub search_keyword: Option<String>,
+    pub is_archived: Option<i32>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
+pub struct SubjectStat {
+    pub subject: String,
+    pub count: i64,
+    pub unmastered: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct WrongQuestionStats {
+    pub total_count: i64,
+    pub unmastered_count: i64,
+    pub weekly_pending_count: i64,
+    pub weekly_done_count: i64,
+    pub this_week_new: i64,
+    pub by_subject: Vec<SubjectStat>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -284,6 +348,7 @@ struct SyncHub {
 struct LanAppState {
     db: Arc<Mutex<AppDb>>,
     sync_hub: Arc<SyncHub>,
+    workspace_root: String,
 }
 
 fn emit_sync_action(sync_hub: &SyncHub, action: &str) {
@@ -417,6 +482,36 @@ struct FocusStatsQuery {
 }
 
 #[derive(Debug, Deserialize)]
+struct WrongQuestionsQuery {
+    subject: Option<String>,
+    mastery_level: Option<i32>,
+    search_keyword: Option<String>,
+    is_archived: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WeeklyReviewItemsQuery {
+    week_start: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WeeklyReviewToggleBody {
+    done: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct CarryNextWeekBody {
+    from_week_start: String,
+    item_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateWrongQuestionRequest {
+    question: WrongQuestion,
+    add_to_current_week: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
 struct NotesFileQuery {
     path: String,
 }
@@ -428,6 +523,11 @@ pub struct WeeklyStats {
     pub subject_distribution: HashMap<String, f64>,
 }
 
+#[derive(Debug, Serialize)]
+struct ImageUploadResponse {
+    path: String,
+}
+
 fn resolve_week_window(end_date: &str) -> Result<(String, String), String> {
     let parsed_end = chrono::NaiveDate::parse_from_str(end_date, "%Y-%m-%d")
         .map_err(|e| format!("Invalid end_date, expected YYYY-MM-DD: {}", e))?;
@@ -435,6 +535,31 @@ fn resolve_week_window(end_date: &str) -> Result<(String, String), String> {
     Ok((
         start.format("%Y-%m-%d").to_string(),
         parsed_end.format("%Y-%m-%d").to_string(),
+    ))
+}
+
+fn week_bounds(date: chrono::NaiveDate) -> (chrono::NaiveDate, chrono::NaiveDate) {
+    let offset = i64::from(date.weekday().num_days_from_monday());
+    let start = date - chrono::Duration::days(offset);
+    let end = start + chrono::Duration::days(6);
+    (start, end)
+}
+
+fn current_week_start_str() -> String {
+    let (start, _) = week_bounds(Local::now().date_naive());
+    start.format("%Y-%m-%d").to_string()
+}
+
+fn parse_week_start_monday(week_start: &str) -> Result<(String, String), String> {
+    let parsed = chrono::NaiveDate::parse_from_str(week_start, "%Y-%m-%d")
+        .map_err(|e| format!("Invalid week_start, expected YYYY-MM-DD: {}", e))?;
+    let (start, end) = week_bounds(parsed);
+    if start != parsed {
+        return Err("week_start 必须是周一（YYYY-MM-DD）".to_string());
+    }
+    Ok((
+        start.format("%Y-%m-%d").to_string(),
+        end.format("%Y-%m-%d").to_string(),
     ))
 }
 
@@ -1091,6 +1216,385 @@ async fn db_get_focus_stats(
     })
 }
 
+fn make_title_snapshot(content: &str) -> String {
+    let first_line = content
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("未命名错题")
+        .trim();
+    let mut title = first_line.chars().take(50).collect::<String>();
+    if title.is_empty() {
+        title = "未命名错题".to_string();
+    }
+    title
+}
+
+async fn db_get_wrong_questions(
+    pool: &sqlx::SqlitePool,
+    filter: &WrongQuestionFilter,
+) -> Result<Vec<WrongQuestion>, String> {
+    let mut builder = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+        "SELECT id, subject, tags_json, question_content, question_image_path, ai_solution, user_note, source, ai_session_id, ai_message_ids_json, difficulty, mastery_level, review_count, next_review_date, last_review_date, ease_factor, interval_days, is_archived, created_at, updated_at FROM wrong_questions WHERE 1=1",
+    );
+
+    builder.push(" AND is_archived = ");
+    builder.push_bind(filter.is_archived.unwrap_or(0));
+
+    if let Some(subject) = filter.subject.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        builder.push(" AND subject = ");
+        builder.push_bind(subject);
+    }
+
+    if let Some(level) = filter.mastery_level {
+        builder.push(" AND mastery_level = ");
+        builder.push_bind(level);
+    }
+
+    if let Some(keyword) = filter.search_keyword.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        let like = format!("%{}%", keyword);
+        builder.push(" AND (question_content LIKE ");
+        builder.push_bind(like.clone());
+        builder.push(" OR ai_solution LIKE ");
+        builder.push_bind(like.clone());
+        builder.push(" OR COALESCE(user_note,'') LIKE ");
+        builder.push_bind(like);
+        builder.push(")");
+    }
+
+    builder.push(" ORDER BY created_at DESC");
+
+    builder
+        .build_query_as::<WrongQuestion>()
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("Failed to fetch wrong questions: {}", e))
+}
+
+async fn db_create_wrong_question(
+    pool: &sqlx::SqlitePool,
+    input: &WrongQuestion,
+) -> Result<WrongQuestion, String> {
+    sqlx::query(
+        "INSERT INTO wrong_questions (id, subject, tags_json, question_content, question_image_path, ai_solution, user_note, source, ai_session_id, ai_message_ids_json, difficulty, mastery_level, review_count, next_review_date, last_review_date, ease_factor, interval_days, is_archived, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&input.id)
+    .bind(&input.subject)
+    .bind(&input.tags_json)
+    .bind(&input.question_content)
+    .bind(&input.question_image_path)
+    .bind(&input.ai_solution)
+    .bind(&input.user_note)
+    .bind(&input.source)
+    .bind(&input.ai_session_id)
+    .bind(&input.ai_message_ids_json)
+    .bind(input.difficulty)
+    .bind(input.mastery_level)
+    .bind(input.review_count)
+    .bind(&input.next_review_date)
+    .bind(&input.last_review_date)
+    .bind(input.ease_factor)
+    .bind(input.interval_days)
+    .bind(input.is_archived)
+    .bind(&input.created_at)
+    .bind(&input.updated_at)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to create wrong question: {}", e))?;
+
+    Ok(input.clone())
+}
+
+async fn db_update_wrong_question(
+    pool: &sqlx::SqlitePool,
+    input: &WrongQuestion,
+) -> Result<WrongQuestion, String> {
+    let result = sqlx::query(
+        "UPDATE wrong_questions SET
+           subject = ?,
+           tags_json = ?,
+           question_content = ?,
+           question_image_path = ?,
+           ai_solution = ?,
+           user_note = ?,
+           source = ?,
+           ai_session_id = ?,
+           ai_message_ids_json = ?,
+           difficulty = ?,
+           mastery_level = ?,
+           review_count = ?,
+           next_review_date = ?,
+           last_review_date = ?,
+           ease_factor = ?,
+           interval_days = ?,
+           is_archived = ?,
+           updated_at = ?
+         WHERE id = ?",
+    )
+    .bind(&input.subject)
+    .bind(&input.tags_json)
+    .bind(&input.question_content)
+    .bind(&input.question_image_path)
+    .bind(&input.ai_solution)
+    .bind(&input.user_note)
+    .bind(&input.source)
+    .bind(&input.ai_session_id)
+    .bind(&input.ai_message_ids_json)
+    .bind(input.difficulty)
+    .bind(input.mastery_level)
+    .bind(input.review_count)
+    .bind(&input.next_review_date)
+    .bind(&input.last_review_date)
+    .bind(input.ease_factor)
+    .bind(input.interval_days)
+    .bind(input.is_archived)
+    .bind(&input.updated_at)
+    .bind(&input.id)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to update wrong question: {}", e))?;
+
+    if result.rows_affected() == 0 {
+        return Err("Wrong question not found".to_string());
+    }
+
+    Ok(input.clone())
+}
+
+async fn db_archive_wrong_question(pool: &sqlx::SqlitePool, id: &str) -> Result<(), String> {
+    let result = sqlx::query(
+        "UPDATE wrong_questions SET is_archived = 1, updated_at = ? WHERE id = ?",
+    )
+    .bind(now_iso())
+    .bind(id)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to archive wrong question: {}", e))?;
+
+    if result.rows_affected() == 0 {
+        return Err("Wrong question not found".to_string());
+    }
+    Ok(())
+}
+
+async fn db_create_weekly_review_item_if_absent(
+    pool: &sqlx::SqlitePool,
+    week_start: &str,
+    week_end: &str,
+    wrong_question_id: &str,
+    title_snapshot: &str,
+    carried_from_week: Option<&str>,
+) -> Result<(), String> {
+    let existing = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM weekly_review_items WHERE week_start = ? AND wrong_question_id = ?",
+    )
+    .bind(week_start)
+    .bind(wrong_question_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| format!("Failed to check weekly review item duplication: {}", e))?;
+
+    if existing > 0 {
+        return Ok(());
+    }
+
+    let now = now_iso();
+    sqlx::query(
+        "INSERT INTO weekly_review_items (id, week_start, week_end, wrong_question_id, title_snapshot, status, carried_from_week, completed_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 'pending', ?, NULL, ?, ?)",
+    )
+    .bind(gen_focus_id("weekly-item"))
+    .bind(week_start)
+    .bind(week_end)
+    .bind(wrong_question_id)
+    .bind(title_snapshot)
+    .bind(carried_from_week)
+    .bind(&now)
+    .bind(&now)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to create weekly review item: {}", e))?;
+
+    Ok(())
+}
+
+async fn db_get_weekly_review_items(
+    pool: &sqlx::SqlitePool,
+    week_start: &str,
+) -> Result<Vec<WeeklyReviewItem>, String> {
+    let (start, _) = parse_week_start_monday(week_start)?;
+    sqlx::query_as::<_, WeeklyReviewItem>(
+        "SELECT id, week_start, week_end, wrong_question_id, title_snapshot, status, carried_from_week, completed_at, created_at, updated_at
+         FROM weekly_review_items
+         WHERE week_start = ?
+         ORDER BY status ASC, created_at ASC",
+    )
+    .bind(start)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to fetch weekly review items: {}", e))
+}
+
+async fn db_toggle_weekly_review_item_done(
+    pool: &sqlx::SqlitePool,
+    item_id: &str,
+    done: bool,
+) -> Result<WeeklyReviewItem, String> {
+    let status = if done { "done" } else { "pending" };
+    let completed_at = if done { Some(now_iso()) } else { None };
+    let result = sqlx::query(
+        "UPDATE weekly_review_items SET status = ?, completed_at = ?, updated_at = ? WHERE id = ?",
+    )
+    .bind(status)
+    .bind(&completed_at)
+    .bind(now_iso())
+    .bind(item_id)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to toggle weekly review item: {}", e))?;
+
+    if result.rows_affected() == 0 {
+        return Err("Weekly review item not found".to_string());
+    }
+
+    sqlx::query_as::<_, WeeklyReviewItem>(
+        "SELECT id, week_start, week_end, wrong_question_id, title_snapshot, status, carried_from_week, completed_at, created_at, updated_at
+         FROM weekly_review_items WHERE id = ?",
+    )
+    .bind(item_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| format!("Failed to refetch weekly review item: {}", e))
+}
+
+async fn db_carry_weekly_review_items_to_next_week(
+    pool: &sqlx::SqlitePool,
+    from_week_start: &str,
+    item_ids: &[String],
+) -> Result<(), String> {
+    if item_ids.is_empty() {
+        return Ok(());
+    }
+
+    let (from_start, _) = parse_week_start_monday(from_week_start)?;
+    let from_date = chrono::NaiveDate::parse_from_str(&from_start, "%Y-%m-%d")
+        .map_err(|e| format!("Invalid from_week_start: {}", e))?;
+    let next_start = (from_date + chrono::Duration::days(7)).format("%Y-%m-%d").to_string();
+    let (_, next_end) = parse_week_start_monday(&next_start)?;
+
+    for item_id in item_ids {
+        let row = sqlx::query_as::<_, WeeklyReviewItem>(
+            "SELECT id, week_start, week_end, wrong_question_id, title_snapshot, status, carried_from_week, completed_at, created_at, updated_at
+             FROM weekly_review_items
+             WHERE id = ? AND week_start = ?",
+        )
+        .bind(item_id)
+        .bind(&from_start)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| format!("Failed to read source weekly review item: {}", e))?;
+
+        if let Some(item) = row {
+            db_create_weekly_review_item_if_absent(
+                pool,
+                &next_start,
+                &next_end,
+                &item.wrong_question_id,
+                &item.title_snapshot,
+                Some(&from_start),
+            )
+            .await?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn db_get_wrong_question_stats(pool: &sqlx::SqlitePool) -> Result<WrongQuestionStats, String> {
+    let total_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM wrong_questions WHERE is_archived = 0",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|e| format!("Failed to count wrong questions: {}", e))?;
+
+    let unmastered_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM wrong_questions WHERE is_archived = 0 AND mastery_level = 0",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|e| format!("Failed to count unmastered wrong questions: {}", e))?;
+
+    let current_week_start = current_week_start_str();
+    let weekly_pending_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM weekly_review_items WHERE week_start = ? AND status = 'pending'",
+    )
+    .bind(&current_week_start)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| format!("Failed to count weekly pending items: {}", e))?;
+
+    let weekly_done_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM weekly_review_items WHERE week_start = ? AND status = 'done'",
+    )
+    .bind(&current_week_start)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| format!("Failed to count weekly done items: {}", e))?;
+
+    let this_week_new = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM wrong_questions WHERE is_archived = 0 AND date(created_at) >= date('now','localtime','weekday 0','-6 days')",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|e| format!("Failed to count this week new wrong questions: {}", e))?;
+
+    let by_subject = sqlx::query_as::<_, SubjectStat>(
+        "SELECT
+            subject AS subject,
+            COUNT(*) AS count,
+            SUM(CASE WHEN mastery_level = 0 THEN 1 ELSE 0 END) AS unmastered
+         FROM wrong_questions
+         WHERE is_archived = 0
+         GROUP BY subject
+         ORDER BY count DESC",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to aggregate wrong questions by subject: {}", e))?;
+
+    Ok(WrongQuestionStats {
+        total_count,
+        unmastered_count,
+        weekly_pending_count,
+        weekly_done_count,
+        this_week_new,
+        by_subject,
+    })
+}
+
+async fn save_chat_image_to_workspace(root: &str, image_data: &[u8], ext: &str) -> Result<String, String> {
+    let now = Local::now();
+    let month_dir = now.format("%Y-%m").to_string();
+    let clean_ext = ext.trim().trim_start_matches('.').to_lowercase();
+    let final_ext = if clean_ext.is_empty() { "png".to_string() } else { clean_ext };
+    let image_id = gen_focus_id("img");
+    let relative = format!("ErrorImages/{}/{}.{}", month_dir, image_id, final_ext);
+
+    let abs_path = PathBuf::from(root).join(&relative);
+    if let Some(parent) = abs_path.parent() {
+        fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("Failed to create image dir: {}", e))?;
+    }
+
+    fs::write(&abs_path, image_data)
+        .await
+        .map_err(|e| format!("Failed to save image file: {}", e))?;
+
+    Ok(relative)
+}
+
 async fn db_get_resources_rows(pool: &sqlx::SqlitePool) -> Result<Vec<Resource>, String> {
     let rows = sqlx::query_as::<_, Resource>(
         "SELECT id, name, path, file_type, subject, size_bytes, created_at FROM resources ORDER BY created_at DESC",
@@ -1392,6 +1896,252 @@ async fn api_focus_stats_handler(
     Ok(Json(stats))
 }
 
+async fn api_wrong_questions_handler(
+    AxumState(state): AxumState<LanAppState>,
+    Query(params): Query<WrongQuestionsQuery>,
+) -> Result<Json<Vec<WrongQuestion>>, (StatusCode, String)> {
+    let db = state.db.lock().await;
+    let rows = db_get_wrong_questions(
+        &db.db,
+        &WrongQuestionFilter {
+            subject: params.subject,
+            mastery_level: params.mastery_level,
+            search_keyword: params.search_keyword,
+            is_archived: params.is_archived.or(Some(0)),
+        },
+    )
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(rows))
+}
+
+async fn api_create_wrong_question_handler(
+    AxumState(state): AxumState<LanAppState>,
+    Json(mut req): Json<CreateWrongQuestionRequest>,
+) -> Result<Json<WrongQuestion>, (StatusCode, String)> {
+    if req.question.question_content.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "question_content 不能为空".to_string()));
+    }
+    if req.question.ai_solution.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "ai_solution 不能为空".to_string()));
+    }
+
+    if req.question.id.trim().is_empty() {
+        req.question.id = gen_focus_id("wrong-question");
+    }
+    if req.question.subject.trim().is_empty() {
+        req.question.subject = "其他".to_string();
+    }
+    if req.question.tags_json.trim().is_empty() {
+        req.question.tags_json = "[]".to_string();
+    }
+    if req.question.source.trim().is_empty() {
+        req.question.source = "ai_chat".to_string();
+    }
+    let now = now_iso();
+    if req.question.created_at.trim().is_empty() {
+        req.question.created_at = now.clone();
+    }
+    req.question.updated_at = now;
+
+    let db = state.db.lock().await;
+    let created = db_create_wrong_question(&db.db, &req.question)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    if req.add_to_current_week.unwrap_or(false) {
+        let week_start = current_week_start_str();
+        let (_, week_end) = parse_week_start_monday(&week_start)
+            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        db_create_weekly_review_item_if_absent(
+            &db.db,
+            &week_start,
+            &week_end,
+            &created.id,
+            &make_title_snapshot(&created.question_content),
+            None,
+        )
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    }
+    drop(db);
+
+    emit_sync_action(&state.sync_hub, "SYNC_WRONG_QUESTIONS");
+    emit_sync_action(&state.sync_hub, "SYNC_WEEKLY_REVIEW_ITEMS");
+    Ok(Json(created))
+}
+
+async fn api_update_wrong_question_handler(
+    AxumState(state): AxumState<LanAppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(mut question): Json<WrongQuestion>,
+) -> Result<Json<WrongQuestion>, (StatusCode, String)> {
+    question.id = id;
+    question.updated_at = now_iso();
+    let db = state.db.lock().await;
+    let updated = db_update_wrong_question(&db.db, &question)
+        .await
+        .map_err(|e| {
+            if e.contains("not found") {
+                (StatusCode::NOT_FOUND, e)
+            } else {
+                (StatusCode::INTERNAL_SERVER_ERROR, e)
+            }
+        })?;
+    drop(db);
+    emit_sync_action(&state.sync_hub, "SYNC_WRONG_QUESTIONS");
+    Ok(Json(updated))
+}
+
+async fn api_archive_wrong_question_handler(
+    AxumState(state): AxumState<LanAppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let db = state.db.lock().await;
+    db_archive_wrong_question(&db.db, &id)
+        .await
+        .map_err(|e| {
+            if e.contains("not found") {
+                (StatusCode::NOT_FOUND, e)
+            } else {
+                (StatusCode::INTERNAL_SERVER_ERROR, e)
+            }
+        })?;
+    drop(db);
+    emit_sync_action(&state.sync_hub, "SYNC_WRONG_QUESTIONS");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn api_wrong_question_stats_handler(
+    AxumState(state): AxumState<LanAppState>,
+) -> Result<Json<WrongQuestionStats>, (StatusCode, String)> {
+    let db = state.db.lock().await;
+    let stats = db_get_wrong_question_stats(&db.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(stats))
+}
+
+async fn api_weekly_review_items_handler(
+    AxumState(state): AxumState<LanAppState>,
+    Query(params): Query<WeeklyReviewItemsQuery>,
+) -> Result<Json<Vec<WeeklyReviewItem>>, (StatusCode, String)> {
+    let db = state.db.lock().await;
+    let rows = db_get_weekly_review_items(&db.db, &params.week_start)
+        .await
+        .map_err(|e| {
+            if e.contains("week_start") {
+                (StatusCode::BAD_REQUEST, e)
+            } else {
+                (StatusCode::INTERNAL_SERVER_ERROR, e)
+            }
+        })?;
+    Ok(Json(rows))
+}
+
+async fn api_weekly_review_toggle_handler(
+    AxumState(state): AxumState<LanAppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<WeeklyReviewToggleBody>,
+) -> Result<Json<WeeklyReviewItem>, (StatusCode, String)> {
+    let db = state.db.lock().await;
+    let row = db_toggle_weekly_review_item_done(&db.db, &id, body.done)
+        .await
+        .map_err(|e| {
+            if e.contains("not found") {
+                (StatusCode::NOT_FOUND, e)
+            } else {
+                (StatusCode::INTERNAL_SERVER_ERROR, e)
+            }
+        })?;
+    drop(db);
+    emit_sync_action(&state.sync_hub, "SYNC_WEEKLY_REVIEW_ITEMS");
+    Ok(Json(row))
+}
+
+async fn api_weekly_review_carry_handler(
+    AxumState(state): AxumState<LanAppState>,
+    Json(body): Json<CarryNextWeekBody>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let db = state.db.lock().await;
+    db_carry_weekly_review_items_to_next_week(&db.db, &body.from_week_start, &body.item_ids)
+        .await
+        .map_err(|e| {
+            if e.contains("week_start") {
+                (StatusCode::BAD_REQUEST, e)
+            } else {
+                (StatusCode::INTERNAL_SERVER_ERROR, e)
+            }
+        })?;
+    drop(db);
+    emit_sync_action(&state.sync_hub, "SYNC_WEEKLY_REVIEW_ITEMS");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn api_image_upload_handler(
+    AxumState(state): AxumState<LanAppState>,
+    mut multipart: Multipart,
+) -> Result<Json<ImageUploadResponse>, (StatusCode, String)> {
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid multipart field: {}", e)))?
+    {
+        let name = field.name().unwrap_or("").to_string();
+        if name != "file" {
+            continue;
+        }
+
+        let filename = field.file_name().unwrap_or("upload.png").to_string();
+        let ext = Path::new(&filename)
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("png")
+            .to_string();
+
+        let data = field
+            .bytes()
+            .await
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Failed to read file field: {}", e)))?;
+
+        if data.is_empty() {
+            return Err((StatusCode::BAD_REQUEST, "上传文件为空".to_string()));
+        }
+
+        let relative = save_chat_image_to_workspace(&state.workspace_root, &data, &ext)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+        return Ok(Json(ImageUploadResponse { path: relative }));
+    }
+
+    Err((StatusCode::BAD_REQUEST, "缺少 file 字段".to_string()))
+}
+
+async fn api_image_file_handler(
+    AxumState(state): AxumState<LanAppState>,
+    AxumPath(path): AxumPath<String>,
+) -> Result<Response<Body>, (StatusCode, String)> {
+    if path.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "path 不能为空".to_string()));
+    }
+
+    let sanitized = sanitize_relative_path(&path)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let full = PathBuf::from(&state.workspace_root).join(&sanitized);
+
+    let bytes = fs::read(&full)
+        .await
+        .map_err(|e| (StatusCode::NOT_FOUND, format!("Failed to read image: {}", e)))?;
+
+    let mime = from_path(&full).first_or_octet_stream();
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, mime.as_ref())
+        .body(Body::from(bytes))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to build image response: {}", e)))
+}
+
 async fn api_ws_handler(
     AxumState(state): AxumState<LanAppState>,
     ws: WebSocketUpgrade,
@@ -1502,9 +2252,11 @@ async fn toggle_local_server(
         .try_state::<Arc<Mutex<AppDb>>>()
         .ok_or_else(|| "数据库尚未就绪，请稍后重试。".to_string())?;
     let shared_db = db_state.inner().clone();
+    let workspace_root = ensure_workspace_dirs(&app).await?;
     let lan_state = LanAppState {
         db: shared_db,
         sync_hub: sync_hub.inner().clone(),
+        workspace_root,
     };
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
@@ -1532,6 +2284,26 @@ async fn toggle_local_server(
         .route("/api/focus/runs/start", axum::routing::post(api_start_focus_run_handler))
         .route("/api/focus/runs/{id}/finish", axum::routing::post(api_finish_focus_run_handler))
         .route("/api/focus/stats", get(api_focus_stats_handler))
+        .route(
+            "/api/wrong-questions",
+            get(api_wrong_questions_handler).post(api_create_wrong_question_handler),
+        )
+        .route(
+            "/api/wrong-questions/{id}",
+            put(api_update_wrong_question_handler).delete(api_archive_wrong_question_handler),
+        )
+        .route("/api/wrong-questions/stats", get(api_wrong_question_stats_handler))
+        .route("/api/weekly-review/items", get(api_weekly_review_items_handler))
+        .route(
+            "/api/weekly-review/items/{id}/toggle",
+            axum::routing::post(api_weekly_review_toggle_handler),
+        )
+        .route(
+            "/api/weekly-review/carry-next-week",
+            axum::routing::post(api_weekly_review_carry_handler),
+        )
+        .route("/api/images/upload", axum::routing::post(api_image_upload_handler))
+        .route("/api/images/{*path}", get(api_image_file_handler))
         .route("/api/stats/weekly", get(api_weekly_stats_handler))
         .route("/api/resources", get(api_resources_handler))
         .route(
@@ -1782,6 +2554,59 @@ async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, String> {
     .await
     .map_err(|e| format!("Failed to create ai_messages table: {}", e))?;
 
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS wrong_questions (
+            id TEXT PRIMARY KEY,
+            subject TEXT NOT NULL DEFAULT '其他',
+            tags_json TEXT NOT NULL DEFAULT '[]',
+            question_content TEXT NOT NULL,
+            question_image_path TEXT,
+            ai_solution TEXT NOT NULL,
+            user_note TEXT,
+            source TEXT NOT NULL DEFAULT 'ai_chat',
+            ai_session_id TEXT,
+            ai_message_ids_json TEXT,
+            difficulty INTEGER NOT NULL DEFAULT 3,
+            mastery_level INTEGER NOT NULL DEFAULT 0,
+            review_count INTEGER NOT NULL DEFAULT 0,
+            next_review_date TEXT,
+            last_review_date TEXT,
+            ease_factor REAL NOT NULL DEFAULT 2.5,
+            interval_days INTEGER NOT NULL DEFAULT 1,
+            is_archived INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(ai_session_id) REFERENCES ai_sessions(id) ON DELETE SET NULL
+        )",
+    )
+    .execute(&pool)
+    .await
+    .map_err(|e| format!("Failed to create wrong_questions table: {}", e))?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS weekly_review_items (
+            id TEXT PRIMARY KEY,
+            week_start TEXT NOT NULL,
+            week_end TEXT NOT NULL,
+            wrong_question_id TEXT NOT NULL,
+            title_snapshot TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            carried_from_week TEXT,
+            completed_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(wrong_question_id) REFERENCES wrong_questions(id) ON DELETE CASCADE
+        )",
+    )
+    .execute(&pool)
+    .await
+    .map_err(|e| format!("Failed to create weekly_review_items table: {}", e))?;
+
+    sqlx::query("ALTER TABLE ai_messages ADD COLUMN image_path TEXT")
+        .execute(&pool)
+        .await
+        .ok();
+
     // Create index for date-based queries
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_tasks_date ON tasks(date)")
         .execute(&pool)
@@ -1832,6 +2657,38 @@ async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, String> {
         .await
         .ok();
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_ai_messages_session_id ON ai_messages(session_id)")
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_wrong_questions_subject ON wrong_questions(subject)")
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_wrong_questions_mastery ON wrong_questions(mastery_level)")
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_wrong_questions_next_review ON wrong_questions(next_review_date)")
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_wrong_questions_archived ON wrong_questions(is_archived)")
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_wrong_questions_created ON wrong_questions(created_at DESC)")
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_weekly_review_items_week ON weekly_review_items(week_start, week_end)")
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_weekly_review_items_status ON weekly_review_items(status)")
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_weekly_review_items_question ON weekly_review_items(wrong_question_id)")
         .execute(&pool)
         .await
         .ok();
@@ -2443,6 +3300,163 @@ async fn get_focus_stats(
     .await
 }
 
+#[tauri::command]
+async fn get_wrong_questions(
+    filter: Option<WrongQuestionFilter>,
+    db: State<'_, Arc<Mutex<AppDb>>>,
+) -> Result<Vec<WrongQuestion>, String> {
+    let db = db.lock().await;
+    let effective = filter.unwrap_or(WrongQuestionFilter {
+        subject: None,
+        mastery_level: None,
+        search_keyword: None,
+        is_archived: Some(0),
+    });
+    db_get_wrong_questions(&db.db, &effective).await
+}
+
+#[tauri::command]
+async fn create_wrong_question(
+    mut question: WrongQuestion,
+    add_to_current_week: Option<bool>,
+    db: State<'_, Arc<Mutex<AppDb>>>,
+    sync_hub: State<'_, Arc<SyncHub>>,
+) -> Result<WrongQuestion, String> {
+    if question.question_content.trim().is_empty() {
+        return Err("question_content 不能为空".to_string());
+    }
+    if question.ai_solution.trim().is_empty() {
+        return Err("ai_solution 不能为空".to_string());
+    }
+
+    let now = now_iso();
+    if question.id.trim().is_empty() {
+        question.id = gen_focus_id("wrong-question");
+    }
+    if question.subject.trim().is_empty() {
+        question.subject = "其他".to_string();
+    }
+    if question.tags_json.trim().is_empty() {
+        question.tags_json = "[]".to_string();
+    }
+    if question.source.trim().is_empty() {
+        question.source = "ai_chat".to_string();
+    }
+    if question.created_at.trim().is_empty() {
+        question.created_at = now.clone();
+    }
+    question.updated_at = now;
+
+    let db = db.lock().await;
+    let created = db_create_wrong_question(&db.db, &question).await?;
+
+    if add_to_current_week.unwrap_or(false) {
+        let week_start = current_week_start_str();
+        let (_, week_end) = parse_week_start_monday(&week_start)?;
+        db_create_weekly_review_item_if_absent(
+            &db.db,
+            &week_start,
+            &week_end,
+            &created.id,
+            &make_title_snapshot(&created.question_content),
+            None,
+        )
+        .await?;
+    }
+
+    drop(db);
+    emit_sync_action(sync_hub.inner().as_ref(), "SYNC_WRONG_QUESTIONS");
+    emit_sync_action(sync_hub.inner().as_ref(), "SYNC_WEEKLY_REVIEW_ITEMS");
+    Ok(created)
+}
+
+#[tauri::command]
+async fn update_wrong_question(
+    id: String,
+    mut question: WrongQuestion,
+    db: State<'_, Arc<Mutex<AppDb>>>,
+    sync_hub: State<'_, Arc<SyncHub>>,
+) -> Result<WrongQuestion, String> {
+    question.id = id;
+    question.updated_at = now_iso();
+    let db = db.lock().await;
+    let updated = db_update_wrong_question(&db.db, &question).await?;
+    drop(db);
+    emit_sync_action(sync_hub.inner().as_ref(), "SYNC_WRONG_QUESTIONS");
+    Ok(updated)
+}
+
+#[tauri::command]
+async fn archive_wrong_question(
+    id: String,
+    db: State<'_, Arc<Mutex<AppDb>>>,
+    sync_hub: State<'_, Arc<SyncHub>>,
+) -> Result<(), String> {
+    let db = db.lock().await;
+    db_archive_wrong_question(&db.db, &id).await?;
+    drop(db);
+    emit_sync_action(sync_hub.inner().as_ref(), "SYNC_WRONG_QUESTIONS");
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_weekly_review_items(
+    week_start: String,
+    db: State<'_, Arc<Mutex<AppDb>>>,
+) -> Result<Vec<WeeklyReviewItem>, String> {
+    let db = db.lock().await;
+    db_get_weekly_review_items(&db.db, &week_start).await
+}
+
+#[tauri::command]
+async fn toggle_weekly_review_item_done(
+    item_id: String,
+    done: bool,
+    db: State<'_, Arc<Mutex<AppDb>>>,
+    sync_hub: State<'_, Arc<SyncHub>>,
+) -> Result<WeeklyReviewItem, String> {
+    let db = db.lock().await;
+    let row = db_toggle_weekly_review_item_done(&db.db, &item_id, done).await?;
+    drop(db);
+    emit_sync_action(sync_hub.inner().as_ref(), "SYNC_WEEKLY_REVIEW_ITEMS");
+    Ok(row)
+}
+
+#[tauri::command]
+async fn carry_weekly_review_items_to_next_week(
+    item_ids: Vec<String>,
+    from_week_start: String,
+    db: State<'_, Arc<Mutex<AppDb>>>,
+    sync_hub: State<'_, Arc<SyncHub>>,
+) -> Result<(), String> {
+    let db = db.lock().await;
+    db_carry_weekly_review_items_to_next_week(&db.db, &from_week_start, &item_ids).await?;
+    drop(db);
+    emit_sync_action(sync_hub.inner().as_ref(), "SYNC_WEEKLY_REVIEW_ITEMS");
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_wrong_question_stats(
+    db: State<'_, Arc<Mutex<AppDb>>>,
+) -> Result<WrongQuestionStats, String> {
+    let db = db.lock().await;
+    db_get_wrong_question_stats(&db.db).await
+}
+
+#[tauri::command]
+async fn save_chat_image(
+    app: tauri::AppHandle,
+    image_data: Vec<u8>,
+    ext: String,
+) -> Result<String, String> {
+    if image_data.is_empty() {
+        return Err("image_data 不能为空".to_string());
+    }
+    let root = ensure_workspace_dirs(&app).await?;
+    save_chat_image_to_workspace(&root, &image_data, &ext).await
+}
+
 // ═══════════════════════════════════════════════════════════
 // Video Bookmark Commands (SQLite)
 // ═══════════════════════════════════════════════════════════
@@ -2813,7 +3827,7 @@ async fn get_ai_messages(
 ) -> Result<Vec<AiMessage>, String> {
     let db = db.lock().await;
     let rows = sqlx::query_as::<_, AiMessage>(
-        "SELECT id, session_id, role, content, created_at FROM ai_messages WHERE session_id = ? ORDER BY created_at ASC",
+        "SELECT id, session_id, role, content, image_path, created_at FROM ai_messages WHERE session_id = ? ORDER BY created_at ASC",
     )
     .bind(session_id)
     .fetch_all(&db.db)
@@ -2827,6 +3841,7 @@ async fn add_ai_message(
     session_id: String,
     role: String,
     content: String,
+    image_path: Option<String>,
     db: State<'_, Arc<Mutex<AppDb>>>,
 ) -> Result<String, String> {
     let db = db.lock().await;
@@ -2851,12 +3866,13 @@ async fn add_ai_message(
         .map_err(|e| format!("Failed to begin ai message tx: {}", e))?;
 
     sqlx::query(
-        "INSERT INTO ai_messages (id, session_id, role, content, created_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
+        "INSERT INTO ai_messages (id, session_id, role, content, image_path, created_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
     )
     .bind(&id)
     .bind(&session_id)
     .bind(normalized_role)
     .bind(&content)
+    .bind(&image_path)
     .execute(&mut *tx)
     .await
     .map_err(|e| format!("Failed to add ai message: {}", e))?;
@@ -4432,6 +5448,15 @@ pub fn run() {
             finish_focus_run,
             get_focus_runs,
             get_focus_stats,
+            get_wrong_questions,
+            create_wrong_question,
+            update_wrong_question,
+            archive_wrong_question,
+            get_weekly_review_items,
+            toggle_weekly_review_item_done,
+            carry_weekly_review_items_to_next_week,
+            get_wrong_question_stats,
+            save_chat_image,
             get_video_bookmarks,
             add_video_bookmark,
             delete_video_bookmark,

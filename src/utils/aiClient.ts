@@ -1,8 +1,12 @@
 import { getSettings } from "../lib/settings";
 
+export type TextContent = { type: "text"; text: string };
+export type ImageContent = { type: "image_url"; image_url: { url: string } };
+export type MessageContent = string | Array<TextContent | ImageContent>;
+
 export type OpenAIChatMessage = {
   role: "system" | "user" | "assistant";
-  content: string;
+  content: MessageContent;
 };
 
 export type ChatCompletionOptions = {
@@ -21,6 +25,13 @@ const MODEL_ALIASES: Record<string, string> = {
   "deepseek-chat": "deepseek-ai/DeepSeek-V3.2",
   "deepseek-r1": "deepseek-ai/DeepSeek-R1",
 };
+
+const VISION_MODELS: Record<string, string> = {
+  "qwen-vl-7b": "Pro/Qwen/Qwen2.5-VL-7B-Instruct",
+  "internvl-26b": "Pro/OpenGVLab/InternVL2.5-26B",
+};
+
+const DEFAULT_VISION_MODEL = "Pro/Qwen/Qwen2.5-VL-7B-Instruct";
 
 function resolveApiKey(): string {
   const settings = getSettings();
@@ -55,6 +66,27 @@ function resolveModel(model?: string): string {
   }
 
   return fromStorage || DEFAULT_MODEL;
+}
+
+export function resolveVisionModel(): string {
+  const settings = getSettings();
+  const fromSettings = settings.aiVisionModel?.trim();
+  if (fromSettings) return fromSettings;
+  const fromStorage = localStorage.getItem("eva.ai.visionModel")?.trim();
+  return fromStorage || DEFAULT_VISION_MODEL;
+}
+
+function resolveVisionMode(): "single" | "pipeline" {
+  const settings = getSettings();
+  const raw = settings.aiVisionMode?.trim().toLowerCase();
+  if (raw === "pipeline") return "pipeline";
+  return "single";
+}
+
+function normalizeVisionModel(model?: string): string {
+  const raw = (model || "").trim();
+  if (!raw) return resolveVisionModel();
+  return VISION_MODELS[raw.toLowerCase()] || raw;
 }
 
 export async function* chatCompletion(options: ChatCompletionOptions): AsyncGenerator<string, void, unknown> {
@@ -128,4 +160,107 @@ export async function chatCompletionToText(options: ChatCompletionOptions): Prom
     out += chunk;
   }
   return out;
+}
+
+export async function* visionChatCompletion(options: {
+  imageBase64: string;
+  userPrompt: string;
+  visionModel?: string;
+  reasoningModel?: string;
+  mode?: "single" | "pipeline";
+  signal?: AbortSignal;
+}): AsyncGenerator<string, void, unknown> {
+  const imageBase64 = options.imageBase64?.trim();
+  if (!imageBase64) {
+    throw new Error("imageBase64 不能为空");
+  }
+
+  const mode = options.mode || resolveVisionMode();
+  const visionModel = normalizeVisionModel(options.visionModel);
+
+  if (mode === "single") {
+    const systemPrompt = "你是一位考研辅导名师。请仔细看图中的题目，用 LaTeX 格式写出题目原文，然后给出完整详细的解题步骤。所有数学公式使用 LaTeX（行内 $...$，行间 $$...$$）。";
+    const messages: OpenAIChatMessage[] = [
+      {
+        role: "system",
+        content: systemPrompt,
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: options.userPrompt?.trim() || "请识别图片中的题目并详细解答。",
+          },
+          {
+            type: "image_url",
+            image_url: { url: imageBase64 },
+          },
+        ],
+      },
+    ];
+
+    for await (const chunk of chatCompletion({
+      model: visionModel,
+      messages,
+      temperature: 0.3,
+      maxTokens: 2048,
+      signal: options.signal,
+    })) {
+      yield chunk;
+    }
+    return;
+  }
+
+  const extractionPrompt = "请仔细看图中的题目，精确提取题目全文。所有数学公式用 LaTeX 格式（行内 $...$，行间 $$...$$）。只输出题目内容，不要解题。";
+  const extractionMessages: OpenAIChatMessage[] = [
+    { role: "system", content: extractionPrompt },
+    {
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: options.userPrompt?.trim() || "请识别题目原文",
+        },
+        {
+          type: "image_url",
+          image_url: { url: imageBase64 },
+        },
+      ],
+    },
+  ];
+
+  let extractedQuestion = "";
+  for await (const chunk of chatCompletion({
+    model: visionModel,
+    messages: extractionMessages,
+    temperature: 0.1,
+    maxTokens: 1024,
+    signal: options.signal,
+  })) {
+    extractedQuestion += chunk;
+  }
+
+  const cleaned = extractedQuestion.trim() || "（未成功提取题面，请用户补充文本）";
+  yield `**【题目识别】**\n\n${cleaned}\n\n---\n\n**【详细解答】**\n\n`;
+
+  const reasoningModel = options.reasoningModel?.trim() || resolveModel("deepseek-ai/DeepSeek-R1");
+  const solvingPrompt = "你是一位考研辅导名师。以下是学生的题目，请给出完整详细的解题步骤，必要时分情况讨论，所有数学公式使用 LaTeX（行内 $...$，行间 $$...$$）。";
+  const solvingMessages: OpenAIChatMessage[] = [
+    { role: "system", content: solvingPrompt },
+    {
+      role: "user",
+      content: `题目如下：\n\n${cleaned}`,
+    },
+  ];
+
+  for await (const chunk of chatCompletion({
+    model: reasoningModel,
+    messages: solvingMessages,
+    temperature: 0.5,
+    maxTokens: 2048,
+    signal: options.signal,
+  })) {
+    yield chunk;
+  }
 }

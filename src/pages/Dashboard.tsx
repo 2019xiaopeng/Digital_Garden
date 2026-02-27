@@ -8,10 +8,12 @@ import {
   fetchDashboardStats,
   fetchFocusStats,
   fetchFocusTemplates,
+  fetchWrongQuestionStats,
   finishFocusRun,
   modifyTask,
   startFocusRun,
   type FocusTemplate,
+  type WrongQuestionStats,
 } from "../utils/apiBridge";
 import { getSettings, type AppSettings } from "../lib/settings";
 import { useSync } from "../hooks/useSync";
@@ -308,6 +310,7 @@ export function Dashboard() {
     if (raw === null) return true;
     return raw === "1";
   });
+  const [wrongQuestionStats, setWrongQuestionStats] = useState<WrongQuestionStats | null>(null);
 
   const refreshTasksSilently = useCallback(() => {
     fetchDashboardStats()
@@ -323,6 +326,12 @@ export function Dashboard() {
       .catch(() => {});
   }, []);
 
+  const refreshWrongQuestionStats = useCallback(() => {
+    fetchWrongQuestionStats()
+      .then((rows) => setWrongQuestionStats(rows))
+      .catch(() => setWrongQuestionStats(null));
+  }, []);
+
   useEffect(() => {
     const onSettingsUpdated = () => {
       setExamSettings(getSettings());
@@ -335,6 +344,7 @@ export function Dashboard() {
   useEffect(() => {
     refreshTasksSilently();
     refreshTemplatesSilently();
+    refreshWrongQuestionStats();
     FocusService.getAll().then((sessions) => {
       const mapped: AttendanceMap = {};
       Object.values(sessions).forEach((s) => {
@@ -347,10 +357,12 @@ export function Dashboard() {
       });
       if (Object.keys(mapped).length > 0) setAttendanceMap(mapped);
     }).catch(() => {});
-  }, [refreshTasksSilently, refreshTemplatesSilently]);
+  }, [refreshTasksSilently, refreshTemplatesSilently, refreshWrongQuestionStats]);
 
   useSync("SYNC_TASKS", refreshTasksSilently);
   useSync("SYNC_FOCUS_TEMPLATES", refreshTemplatesSilently);
+  useSync("SYNC_WRONG_QUESTIONS", refreshWrongQuestionStats);
+  useSync("SYNC_WEEKLY_REVIEW_ITEMS", refreshWrongQuestionStats);
 
   const todayTasks = useMemo(() => tasks.filter((task) => task.date === today), [tasks, today]);
   const pendingTasks = useMemo(() => todayTasks.filter((task) => task.status !== "done"), [todayTasks]);
@@ -1034,6 +1046,22 @@ export function Dashboard() {
               </button>
             ))
           )}
+        </div>
+      </div>
+
+      <div className="glass-card rounded-3xl p-6 border border-[#88B5D3]/30">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-lg font-semibold text-gray-900 dark:text-white">📝 错题速览</h3>
+          <Link to="/error-book" className="text-sm text-[#88B5D3] hover:text-[#75a0be] transition-colors">查看错题本</Link>
+        </div>
+        <div className="text-sm text-gray-600 dark:text-gray-300 space-y-1">
+          <p>总计 <span className="font-semibold text-gray-900 dark:text-white">{wrongQuestionStats?.total_count ?? "--"}</span> 道 · 未掌握 <span className="font-semibold text-[#FF9900]">{wrongQuestionStats?.unmastered_count ?? "--"}</span> 道</p>
+          <p>本周待复习：<span className="font-semibold text-[#FF9900]">{wrongQuestionStats?.weekly_pending_count ?? "--"}</span> 道 · 已完成：<span className="font-semibold text-[#88B5D3]">{wrongQuestionStats?.weekly_done_count ?? "--"}</span> 道</p>
+          <p>本周新增：<span className="font-semibold text-gray-900 dark:text-white">{wrongQuestionStats?.this_week_new ?? "--"}</span> 道</p>
+        </div>
+        <div className="mt-4 flex gap-2">
+          <Link to="/error-book?mode=review" className="px-4 py-2 rounded-xl bg-gradient-to-r from-[#2a3b52] to-[#88B5D3] text-white text-sm font-semibold">开始复习</Link>
+          <Link to="/error-book" className="px-4 py-2 rounded-xl border border-[#88B5D3]/30 text-[#88B5D3] text-sm font-semibold hover:bg-[#88B5D3]/10">查看错题本</Link>
         </div>
       </div>
 

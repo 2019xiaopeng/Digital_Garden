@@ -1,21 +1,31 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { 
-  Folder, FileText, ChevronRight, ChevronDown, 
-  Search, Plus, Sparkles, Send, Bot, User, X, File, Upload, Edit2, Trash2, MessageSquarePlus, RefreshCw
+  Folder, FileText, ChevronRight, ChevronDown,
+  Search, Plus, Sparkles, Send, Bot, User, X, File, Upload, Edit2, Trash2, MessageSquarePlus, RefreshCw, ImagePlus, BookmarkPlus
 } from "lucide-react";
 import { cn } from "../lib/utils";
 import { ThemedPromptDialog } from "../components/ThemedPromptDialog";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { isTauriAvailable } from "../lib/dataService";
 import { open } from "@tauri-apps/plugin-dialog";
-import { fetchNoteContent, fetchNotesTree, invokeDesktop, type NotesFsNode } from "../utils/apiBridge";
+import {
+  createWrongQuestion,
+  fetchNoteContent,
+  fetchNotesTree,
+  getImageUrl,
+  invokeDesktop,
+  uploadChatImage,
+  type NotesFsNode,
+  type WrongQuestion,
+} from "../utils/apiBridge";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import rehypeHighlight from "rehype-highlight";
 import { useKnowledgeSelection } from "../context/KnowledgeSelectionContext";
-import { chatCompletion } from "../utils/aiClient";
+import { chatCompletion, visionChatCompletion } from "../utils/aiClient";
+import { DailyLogService } from "../lib/dataService";
 import "katex/dist/katex.min.css";
 import "highlight.js/styles/github-dark.css";
 
@@ -33,7 +43,13 @@ const initialTree: TreeNode[] = [
   
 ];
 
-type ChatMessage = { id: string; role: 'user' | 'assistant'; text: string; createdAt: string };
+type ChatMessage = {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  createdAt: string;
+  imagePath?: string | null;
+};
 type ChatSession = {
   id: string;
   title: string;
@@ -53,7 +69,32 @@ type DbAiMessage = {
   session_id: string;
   role: string;
   content: string;
+  image_path?: string | null;
   created_at: string;
+};
+
+type PendingImage = {
+  file: File;
+  previewUrl: string;
+  dataUrl: string;
+  ext: string;
+  keepOriginal: boolean;
+};
+
+type CaptureFormState = {
+  subject: string;
+  tags: string;
+  difficulty: number;
+  userNote: string;
+  syncToBlog: boolean;
+  questionContent: string;
+  aiSolution: string;
+};
+
+type CaptureTarget = {
+  sessionId: string;
+  userMsg: ChatMessage | null;
+  assistantMsg: ChatMessage;
 };
 
 export function Notes() {
@@ -79,6 +120,12 @@ export function Notes() {
   const chatEndRef = useRef<HTMLDivElement>(null);
   const [chatSessionToRenameId, setChatSessionToRenameId] = useState<string | null>(null);
   const [chatSessionToDeleteId, setChatSessionToDeleteId] = useState<string | null>(null);
+  const [pendingImage, setPendingImage] = useState<PendingImage | null>(null);
+  const [captureTarget, setCaptureTarget] = useState<CaptureTarget | null>(null);
+  const [captureForm, setCaptureForm] = useState<CaptureFormState | null>(null);
+  const [isCapturing, setIsCapturing] = useState(false);
+  const [previewImagePath, setPreviewImagePath] = useState<string | null>(null);
+  const chatFileInputRef = useRef<HTMLInputElement | null>(null);
   const [promptMode, setPromptMode] = useState<null | "create-folder" | "rename" | "move">(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
@@ -825,8 +872,108 @@ export function Notes() {
     id: row.id,
     role: row.role === "user" ? "user" : "assistant",
     text: row.content,
+    imagePath: row.image_path || null,
     createdAt: row.created_at,
   });
+
+  const normalizeCaptureText = (text: string) => text.replace(/\r\n/g, "\n").trim();
+
+  const extractQuestionAndSolution = (assistantTextRaw: string, userTextRaw?: string | null) => {
+    const assistantText = normalizeCaptureText(assistantTextRaw || "");
+    const userText = normalizeCaptureText(userTextRaw || "");
+
+    const pipelineMatch = assistantText.match(
+      /\*\*\s*【?题目识别】?\s*\*\*([\s\S]*?)\*\*\s*【?(?:详细)?解答】?\s*\*\*([\s\S]*)/i,
+    );
+    if (pipelineMatch) {
+      const q = normalizeCaptureText(pipelineMatch[1]);
+      const s = normalizeCaptureText(pipelineMatch[2]);
+      if (q && s) return { questionContent: q, aiSolution: s };
+    }
+
+    const plainMatch = assistantText.match(
+      /(?:题目原文(?:如下)?|题目识别|题目)\s*[：:]?\s*([\s\S]*?)(?:解题步骤(?:如下)?|详细解答|解答|解析)\s*[：:]?\s*([\s\S]*)/i,
+    );
+    if (plainMatch) {
+      const q = normalizeCaptureText(plainMatch[1]);
+      const s = normalizeCaptureText(plainMatch[2]);
+      if (q && s) return { questionContent: q, aiSolution: s };
+    }
+
+    const markdownHeadingMatch = assistantText.match(
+      /(?:^|\n)#{1,6}\s*(?:题目|题目识别|题目原文)\s*\n([\s\S]*?)(?:\n#{1,6}\s*(?:详细解答|解答|解析)\s*\n)([\s\S]*)/i,
+    );
+    if (markdownHeadingMatch) {
+      const q = normalizeCaptureText(markdownHeadingMatch[1]);
+      const s = normalizeCaptureText(markdownHeadingMatch[2]);
+      if (q && s) return { questionContent: q, aiSolution: s };
+    }
+
+    const genericUserPrompt = /识别|图片|这道题|详细解答|题目并/i.test(userText);
+    const paragraphs = assistantText.split(/\n{2,}/).map(normalizeCaptureText).filter(Boolean);
+    if (genericUserPrompt && paragraphs.length >= 2) {
+      return {
+        questionContent: paragraphs[0],
+        aiSolution: paragraphs.slice(1).join("\n\n"),
+      };
+    }
+
+    if (assistantText) {
+      return {
+        questionContent: userText || paragraphs[0] || "",
+        aiSolution: assistantText,
+      };
+    }
+
+    return {
+      questionContent: userText,
+      aiSolution: assistantText,
+    };
+  };
+
+  const readFileAsDataUrl = (file: File) => {
+    return new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ""));
+      reader.onerror = () => reject(new Error("读取图片失败"));
+      reader.readAsDataURL(file);
+    });
+  };
+
+  const clearPendingImage = useCallback(() => {
+    setPendingImage((prev) => {
+      if (prev?.previewUrl) {
+        URL.revokeObjectURL(prev.previewUrl);
+      }
+      return null;
+    });
+  }, []);
+
+  const setPendingImageFromFile = useCallback(async (file: File) => {
+    if (!file.type.startsWith("image/")) {
+      showUploadToast("error", "仅支持图片文件");
+      return;
+    }
+    if (file.size > 10 * 1024 * 1024) {
+      showUploadToast("error", "图片过大，请压缩后重试（<=10MB）");
+      return;
+    }
+
+    const dataUrl = await readFileAsDataUrl(file);
+    const previewUrl = URL.createObjectURL(file);
+    const ext = (file.name.split(".").pop() || "png").toLowerCase();
+
+    setPendingImage((prev) => {
+      if (prev?.previewUrl) URL.revokeObjectURL(prev.previewUrl);
+      return {
+        file,
+        previewUrl,
+        dataUrl,
+        ext,
+        keepOriginal: false,
+      };
+    });
+  }, []);
 
   const refreshAiSessions = useCallback(async (preferredSessionId?: string | null) => {
     if (!isDesktopRuntime) {
@@ -989,9 +1136,9 @@ export function Notes() {
 
   const handleAiSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!chatInput.trim() || isAiLoading) return;
+    if ((!chatInput.trim() && !pendingImage) || isAiLoading) return;
 
-    const userMsg = chatInput;
+    const userMsg = chatInput.trim() || "请识别这道题并详细解答。";
     setChatInput("");
 
     const currentSession = activeSession || await createSession(userMsg);
@@ -1002,10 +1149,21 @@ export function Notes() {
 
     const nowIso = new Date().toISOString();
     const tempUserId = `temp-user-${Date.now()}`;
+    let imagePath: string | null = null;
+    if (pendingImage?.keepOriginal) {
+      try {
+        const bytes = new Uint8Array(await pendingImage.file.arrayBuffer());
+        imagePath = await uploadChatImage(bytes, pendingImage.ext);
+      } catch (err: any) {
+        showUploadToast("error", `保存图片失败：${err?.message || String(err)}`);
+      }
+    }
+
     appendMessageLocal(currentSession.id, {
       id: tempUserId,
       role: "user",
       text: userMsg,
+      imagePath,
       createdAt: nowIso,
     });
 
@@ -1015,6 +1173,7 @@ export function Notes() {
           sessionId: currentSession.id,
           role: "user",
           content: userMsg,
+          imagePath,
         });
       } catch (err: any) {
         console.error("[Notes] Failed to persist user ai message:", err);
@@ -1039,23 +1198,35 @@ export function Notes() {
       });
 
       let streamed = "";
-      for await (const chunk of chatCompletion({
-        model: selectedModel,
-        messages: [
-          {
-            role: "system",
-            content: `你是EVA系统的知识库AI助手，简洁清晰地回答问题。${context}${selectedContext}`,
-          },
-          {
-            role: "user",
-            content: userMsg,
-          },
-        ],
-        temperature: 0.7,
-        maxTokens: 1024,
-      })) {
-        streamed += chunk;
-        replaceLastAssistantMessageText(currentSession.id, (current) => current + chunk);
+      if (pendingImage) {
+        for await (const chunk of visionChatCompletion({
+          imageBase64: pendingImage.dataUrl,
+          userPrompt: `${userMsg}\n\n${selectedContext}`,
+          reasoningModel: selectedModel,
+          signal: undefined,
+        })) {
+          streamed += chunk;
+          replaceLastAssistantMessageText(currentSession.id, (current) => current + chunk);
+        }
+      } else {
+        for await (const chunk of chatCompletion({
+          model: selectedModel,
+          messages: [
+            {
+              role: "system",
+              content: `你是EVA系统的知识库AI助手，简洁清晰地回答问题。${context}${selectedContext}`,
+            },
+            {
+              role: "user",
+              content: userMsg,
+            },
+          ],
+          temperature: 0.7,
+          maxTokens: 1024,
+        })) {
+          streamed += chunk;
+          replaceLastAssistantMessageText(currentSession.id, (current) => current + chunk);
+        }
       }
 
       if (!streamed.trim()) {
@@ -1069,6 +1240,7 @@ export function Notes() {
           sessionId: currentSession.id,
           role: "assistant",
           content: streamed,
+          imagePath: null,
         });
         await Promise.all([loadAiMessages(currentSession.id), refreshAiSessions(currentSession.id)]);
       }
@@ -1083,6 +1255,7 @@ export function Notes() {
             sessionId: currentSession.id,
             role: "assistant",
             content: message,
+            imagePath: null,
           });
           await Promise.all([loadAiMessages(currentSession.id), refreshAiSessions(currentSession.id)]);
         } catch (persistErr: any) {
@@ -1091,6 +1264,105 @@ export function Notes() {
       }
     } finally {
       setIsAiLoading(false);
+      clearPendingImage();
+    }
+  };
+
+  const startCaptureWrongQuestion = (assistantMsg: ChatMessage, assistantIndex: number) => {
+    if (!activeSessionId) return;
+    let previousUser: ChatMessage | null = null;
+    for (let i = assistantIndex - 1; i >= 0; i -= 1) {
+      if (chatHistory[i]?.role === "user") {
+        previousUser = chatHistory[i];
+        break;
+      }
+    }
+
+    setCaptureTarget({
+      sessionId: activeSessionId,
+      userMsg: previousUser,
+      assistantMsg,
+    });
+    const extracted = extractQuestionAndSolution(assistantMsg.text || "", previousUser?.text || "");
+    setCaptureForm({
+      subject: "数学",
+      tags: "",
+      difficulty: 3,
+      userNote: "",
+      syncToBlog: true,
+      questionContent: extracted.questionContent || previousUser?.text || "",
+      aiSolution: extracted.aiSolution || assistantMsg.text || "",
+    });
+  };
+
+  const handleConfirmCapture = async () => {
+    if (!captureTarget || !captureForm) return;
+    if (!captureForm.questionContent.trim() || !captureForm.aiSolution.trim()) {
+      showUploadToast("error", "题目内容和 AI 解答不能为空");
+      return;
+    }
+
+    setIsCapturing(true);
+    try {
+      const tags = captureForm.tags
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean);
+      const now = new Date().toISOString();
+
+      const payload: WrongQuestion = {
+        id: "",
+        subject: captureForm.subject,
+        tags_json: JSON.stringify(tags),
+        question_content: captureForm.questionContent,
+        question_image_path: captureTarget.userMsg?.imagePath || null,
+        ai_solution: captureForm.aiSolution,
+        user_note: captureForm.userNote || null,
+        source: "ai_chat",
+        ai_session_id: captureTarget.sessionId,
+        ai_message_ids_json: JSON.stringify([
+          captureTarget.userMsg?.id,
+          captureTarget.assistantMsg.id,
+        ].filter(Boolean)),
+        difficulty: captureForm.difficulty,
+        mastery_level: 0,
+        review_count: 0,
+        next_review_date: null,
+        last_review_date: null,
+        ease_factor: 2.5,
+        interval_days: 1,
+        is_archived: 0,
+        created_at: now,
+        updated_at: now,
+      };
+
+      await createWrongQuestion(payload, true);
+
+      if (captureForm.syncToBlog) {
+        const today = new Date();
+        const date = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+        const blogTags = ["错题", captureForm.subject, ...tags].filter(Boolean);
+
+        await DailyLogService.create({
+          id: "",
+          title: `错题 · ${captureForm.subject} · ${date}`,
+          excerpt: `## 错题收录 - ${captureForm.subject}\n\n### 题目\n${captureForm.questionContent}\n\n### AI 解答\n${captureForm.aiSolution}\n\n### 我的笔记\n${captureForm.userNote || "（暂无）"}\n\n---\n*由 EVA 错题快录自动生成*`,
+          date,
+          readTime: "1 min read",
+          category: "Manual",
+          tags: blogTags,
+          mood: "focused",
+          syncRate: 100,
+        });
+      }
+
+      showUploadToast("success", "已收录为错题");
+      setCaptureTarget(null);
+      setCaptureForm(null);
+    } catch (err: any) {
+      showUploadToast("error", `收录失败：${err?.message || String(err)}`);
+    } finally {
+      setIsCapturing(false);
     }
   };
 
@@ -1498,19 +1770,44 @@ export function Notes() {
                     {msg.role === 'user' ? <User className="w-4 h-4 text-gray-600 dark:text-gray-400" /> : <Bot className="w-4 h-4" />}
                   </div>
                   <div className={cn(
-                    "px-4 py-3 rounded-2xl max-w-[90%] text-sm leading-relaxed overflow-x-auto",
+                    "px-4 py-3 rounded-2xl max-w-[90%] text-sm leading-relaxed overflow-x-auto group",
                     msg.role === 'user' ? "bg-gray-100/90 dark:bg-[#19283b] text-gray-900 dark:text-white rounded-tr-sm" : "bg-[#88B5D3]/7 dark:bg-[#88B5D3]/12 text-gray-800 dark:text-gray-200 rounded-tl-sm border border-[#88B5D3]/20"
                   )}>
+                    {msg.imagePath && (
+                      <button
+                        type="button"
+                        className="mb-2 block"
+                        onClick={() => setPreviewImagePath(msg.imagePath || null)}
+                      >
+                        <img
+                          src={getImageUrl(msg.imagePath)}
+                          alt="题图"
+                          className="w-28 h-28 object-cover rounded-xl border border-[#88B5D3]/30"
+                        />
+                      </button>
+                    )}
                     {msg.role === "user" ? (
                       <div className="whitespace-pre-wrap break-words">{msg.text}</div>
                     ) : (
-                      <div className="prose prose-sm dark:prose-invert max-w-none prose-pre:rounded-xl prose-pre:border prose-pre:border-[#88B5D3]/20 prose-code:before:content-none prose-code:after:content-none">
-                        <ReactMarkdown
-                          remarkPlugins={[remarkGfm, remarkMath]}
-                          rehypePlugins={[rehypeKatex, rehypeHighlight]}
-                        >
-                          {msg.text}
-                        </ReactMarkdown>
+                      <div>
+                        <div className="prose prose-sm dark:prose-invert max-w-none prose-pre:rounded-xl prose-pre:border prose-pre:border-[#88B5D3]/20 prose-code:before:content-none prose-code:after:content-none">
+                          <ReactMarkdown
+                            remarkPlugins={[remarkGfm, remarkMath]}
+                            rehypePlugins={[rehypeKatex, rehypeHighlight]}
+                          >
+                            {msg.text}
+                          </ReactMarkdown>
+                        </div>
+                        <div className="mt-3 flex justify-end">
+                          <button
+                            type="button"
+                            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium text-[#88B5D3] bg-[#88B5D3]/10 hover:bg-[#88B5D3]/20 transition-opacity opacity-0 group-hover:opacity-100"
+                            onClick={() => startCaptureWrongQuestion(msg, idx)}
+                            title="收录为错题"
+                          >
+                            <BookmarkPlus className="w-3.5 h-3.5" /> 收录为错题
+                          </button>
+                        </div>
                       </div>
                     )}
                   </div>
@@ -1533,16 +1830,79 @@ export function Notes() {
 
             <div className="p-4 border-t border-white/45 dark:border-[#2a3b52] bg-white/35 dark:bg-[#0f1826]/55">
               <form onSubmit={handleAiSubmit} className="relative">
-                <input 
-                  type="text" 
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  placeholder="向 AI 提问关于你的知识库..." 
-                  className="w-full pl-4 pr-12 py-3 bg-white/90 dark:bg-[#0f1826] border border-gray-200 dark:border-[#2c3f58] rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-[#88B5D3]/20 focus:border-[#88B5D3] text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 shadow-sm transition-all"
-                />
+                {pendingImage && (
+                  <div className="mb-3 rounded-xl border border-dashed border-[#88B5D3]/40 bg-[#88B5D3]/5 p-2.5 flex items-center gap-3">
+                    <img src={pendingImage.previewUrl} alt="待发送图片" className="w-14 h-14 object-cover rounded-lg border border-[#88B5D3]/30" />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs font-medium text-gray-700 dark:text-gray-200 truncate">{pendingImage.file.name}</p>
+                      <p className="text-[11px] text-gray-500 dark:text-gray-400">{(pendingImage.file.size / 1024).toFixed(1)} KB</p>
+                      <label className="mt-1 inline-flex items-center gap-1.5 text-[11px] text-gray-600 dark:text-gray-300">
+                        <input
+                          type="checkbox"
+                          checked={pendingImage.keepOriginal}
+                          onChange={(e) => setPendingImage((prev) => prev ? { ...prev, keepOriginal: e.target.checked } : prev)}
+                        />
+                        保留原图（用于图形题溯源）
+                      </label>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={clearPendingImage}
+                      className="p-1.5 rounded-lg text-gray-500 hover:text-red-500 hover:bg-red-500/10"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                )}
+                <div className="flex items-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => chatFileInputRef.current?.click()}
+                    className="h-10 w-10 rounded-xl border border-gray-200 dark:border-[#2c3f58] text-[#88B5D3] hover:bg-[#88B5D3]/10 flex items-center justify-center"
+                    title="上传题图"
+                  >
+                    <ImagePlus className="w-4 h-4" />
+                  </button>
+                  <input
+                    ref={chatFileInputRef}
+                    type="file"
+                    accept="image/png,image/jpeg,image/jpg,image/webp"
+                    className="hidden"
+                    onChange={async (e) => {
+                      const file = e.target.files?.[0];
+                      if (!file) return;
+                      try {
+                        await setPendingImageFromFile(file);
+                      } catch (err: any) {
+                        showUploadToast("error", `读取图片失败：${err?.message || String(err)}`);
+                      }
+                      e.currentTarget.value = "";
+                    }}
+                  />
+                  <textarea
+                    value={chatInput}
+                    onChange={e => setChatInput(e.target.value)}
+                    onPaste={async (e) => {
+                      const items = Array.from(e.clipboardData?.items || []);
+                      const imageItem = items.find((item) => item.type.startsWith("image/"));
+                      if (!imageItem) return;
+                      const file = imageItem.getAsFile();
+                      if (!file) return;
+                      e.preventDefault();
+                      try {
+                        await setPendingImageFromFile(file);
+                      } catch (err: any) {
+                        showUploadToast("error", `粘贴图片失败：${err?.message || String(err)}`);
+                      }
+                    }}
+                    rows={1}
+                    placeholder="向 AI 提问关于你的知识库..."
+                    className="flex-1 min-h-[44px] max-h-28 resize-none pl-4 pr-12 py-3 bg-white/90 dark:bg-[#0f1826] border border-gray-200 dark:border-[#2c3f58] rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-[#88B5D3]/20 focus:border-[#88B5D3] text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 shadow-sm transition-all"
+                  />
+                </div>
                 <button 
                   type="submit"
-                  disabled={!chatInput.trim() || isAiLoading}
+                  disabled={(!chatInput.trim() && !pendingImage) || isAiLoading}
                   className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 bg-[#88B5D3] text-white rounded-lg hover:bg-[#75a0be] disabled:opacity-50 disabled:hover:bg-[#88B5D3] transition-colors"
                 >
                   <Send className="w-4 h-4" />
@@ -1633,6 +1993,123 @@ export function Notes() {
         }}
         onCancel={() => setChatSessionToDeleteId(null)}
       />
+
+      {captureTarget && captureForm && (
+        <div className="fixed inset-0 z-[140] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/55 backdrop-blur-sm" onClick={() => { if (!isCapturing) { setCaptureTarget(null); setCaptureForm(null); } }} />
+          <div className="relative w-full max-w-2xl rounded-3xl border border-[#88B5D3]/30 bg-white/90 dark:bg-[#0f1826]/95 shadow-2xl p-6 space-y-4">
+            <h3 className="text-lg font-semibold text-gray-900 dark:text-white">收录为错题</h3>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div>
+                <label className="text-xs font-semibold text-gray-500">科目</label>
+                <select
+                  value={captureForm.subject}
+                  onChange={(e) => setCaptureForm({ ...captureForm, subject: e.target.value })}
+                  className="mt-1 w-full rounded-xl border border-gray-200/80 dark:border-[#30435c] bg-white/90 dark:bg-[#0f1826]/80 px-3 py-2 text-sm"
+                >
+                  <option value="数学">数学</option>
+                  <option value="408">408</option>
+                  <option value="英语">英语</option>
+                  <option value="政治">政治</option>
+                  <option value="其他">其他</option>
+                </select>
+              </div>
+              <div>
+                <label className="text-xs font-semibold text-gray-500">标签（逗号分隔）</label>
+                <input
+                  value={captureForm.tags}
+                  onChange={(e) => setCaptureForm({ ...captureForm, tags: e.target.value })}
+                  className="mt-1 w-full rounded-xl border border-gray-200/80 dark:border-[#30435c] bg-white/90 dark:bg-[#0f1826]/80 px-3 py-2 text-sm"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="text-xs font-semibold text-gray-500">难度（1-5）</label>
+              <input
+                type="range"
+                min={1}
+                max={5}
+                step={1}
+                value={captureForm.difficulty}
+                onChange={(e) => setCaptureForm({ ...captureForm, difficulty: Number(e.target.value) })}
+                className="mt-2 w-full"
+              />
+              <p className="text-xs text-[#FF9900] font-semibold">当前：{captureForm.difficulty} 星</p>
+            </div>
+
+            <div>
+              <label className="text-xs font-semibold text-gray-500">题目内容</label>
+              <textarea
+                rows={4}
+                value={captureForm.questionContent}
+                onChange={(e) => setCaptureForm({ ...captureForm, questionContent: e.target.value })}
+                className="mt-1 w-full rounded-xl border border-gray-200/80 dark:border-[#30435c] bg-white/90 dark:bg-[#0f1826]/80 px-3 py-2 text-sm"
+              />
+            </div>
+
+            <div>
+              <label className="text-xs font-semibold text-gray-500">AI 解答</label>
+              <textarea
+                rows={5}
+                value={captureForm.aiSolution}
+                onChange={(e) => setCaptureForm({ ...captureForm, aiSolution: e.target.value })}
+                className="mt-1 w-full rounded-xl border border-gray-200/80 dark:border-[#30435c] bg-white/90 dark:bg-[#0f1826]/80 px-3 py-2 text-sm"
+              />
+            </div>
+
+            <div>
+              <label className="text-xs font-semibold text-gray-500">补充笔记</label>
+              <textarea
+                rows={3}
+                value={captureForm.userNote}
+                onChange={(e) => setCaptureForm({ ...captureForm, userNote: e.target.value })}
+                className="mt-1 w-full rounded-xl border border-gray-200/80 dark:border-[#30435c] bg-white/90 dark:bg-[#0f1826]/80 px-3 py-2 text-sm"
+              />
+            </div>
+
+            <label className="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
+              <input
+                type="checkbox"
+                checked={captureForm.syncToBlog}
+                onChange={(e) => setCaptureForm({ ...captureForm, syncToBlog: e.target.checked })}
+              />
+              同步到每日留痕
+            </label>
+
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                disabled={isCapturing}
+                onClick={() => { setCaptureTarget(null); setCaptureForm(null); }}
+                className="px-4 py-2 rounded-xl border border-gray-200/80 dark:border-[#30435c] text-sm"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                disabled={isCapturing}
+                onClick={() => { void handleConfirmCapture(); }}
+                className="px-4 py-2 rounded-xl bg-[#88B5D3] hover:bg-[#6f9fbe] text-white text-sm font-semibold"
+              >
+                {isCapturing ? "收录中..." : "收录"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {previewImagePath && (
+        <div className="fixed inset-0 z-[130] flex items-center justify-center p-6" onClick={() => setPreviewImagePath(null)}>
+          <div className="absolute inset-0 bg-black/70" />
+          <img
+            src={getImageUrl(previewImagePath)}
+            alt="大图预览"
+            className="relative max-h-[86vh] max-w-[90vw] rounded-2xl border border-white/20 shadow-2xl"
+          />
+        </div>
+      )}
 
       {/* Document Viewer Modal */}
       {viewingFile && (

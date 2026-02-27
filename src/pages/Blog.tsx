@@ -5,8 +5,15 @@ import { cn } from "../lib/utils";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { MarkdownEditor } from "../components/MarkdownEditor";
 import { DailyLogService, TaskService, AiService, isTauriAvailable } from "../lib/dataService";
-import { buildVideoUrlWithTimestamp, getVideoUrlFromMarkdown, openExternalUrl, parseFrontmatter, replaceTimestampTagsWithLinks } from "../lib/videoBookmark";
+import { buildVideoUrlWithTimestamp, getVideoUrlFromMarkdown, openExternalUrl, parseFrontmatter, TIMESTAMP_REGEX, timestampToSeconds } from "../lib/videoBookmark";
 import type { LegacyPost } from "../lib/dataService";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
+import rehypeHighlight from "rehype-highlight";
+import "katex/dist/katex.min.css";
+import "highlight.js/styles/github-dark.css";
 
 const POSTS_PER_PAGE = 10;
 
@@ -114,37 +121,28 @@ export function Blog() {
     setCurrentPage(1);
   }, [searchQuery, sortOrder, selectedTag]);
 
-  const markdownToHtml = (md: string) => {
+  const toRenderableMarkdown = (md: string) => {
     const { body, frontmatter } = parseFrontmatter(md);
-    const escaped = body
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;");
-    const html = escaped
-      .replace(/^###\s+(.+)$/gm, "<h3>$1</h3>")
-      .replace(/^##\s+(.+)$/gm, "<h2>$1</h2>")
-      .replace(/^#\s+(.+)$/gm, "<h1>$1</h1>")
-      .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-      .replace(/\*(.+?)\*/g, "<em>$1</em>")
-      .replace(/`(.+?)`/g, "<code>$1</code>")
-      .replace(/^-\s+(.+)$/gm, "<li>$1</li>")
-      .replace(/(<li>.*<\/li>)/gs, "<ul>$1</ul>")
-      .replace(/\n\n/g, "<br/><br/>")
-      .replace(/\n/g, "<br/>");
+    const videoUrl = frontmatter.video || null;
+    if (!videoUrl) return body;
 
-    return replaceTimestampTagsWithLinks(html, frontmatter.video || null);
+    return body.replace(TIMESTAMP_REGEX, (full) => {
+      const secs = timestampToSeconds(full);
+      if (secs === null) return full;
+      return `[${full}](#video-timestamp-${secs})`;
+    });
   };
 
   const handleTimestampClick = async (e: React.MouseEvent<HTMLElement>) => {
     const target = e.target as HTMLElement;
-    const tag = target.closest("[data-video-seconds]") as HTMLElement | null;
+    const tag = target.closest("a[href^='#video-timestamp-']") as HTMLAnchorElement | null;
     if (!tag) return;
     e.preventDefault();
 
     const videoUrl = (tag.closest("[data-video-url]") as HTMLElement | null)?.dataset.videoUrl;
     if (!videoUrl) return;
 
-    const seconds = Number(tag.dataset.videoSeconds || "0");
+    const seconds = Number((tag.getAttribute("href") || "").replace("#video-timestamp-", ""));
     if (!Number.isFinite(seconds) || seconds < 0) return;
 
     await openExternalUrl(buildVideoUrlWithTimestamp(videoUrl, seconds));
@@ -452,8 +450,12 @@ export function Blog() {
                   <span
                     data-video-url={getVideoUrlFromMarkdown(post.excerpt) || undefined}
                     onClick={handleTimestampClick}
-                    dangerouslySetInnerHTML={{ __html: markdownToHtml(post.excerpt) }}
-                  />
+                    className="prose prose-sm dark:prose-invert max-w-none prose-pre:rounded-xl prose-pre:border prose-pre:border-[#88B5D3]/20 prose-code:before:content-none prose-code:after:content-none"
+                  >
+                    <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex, rehypeHighlight]}>
+                      {toRenderableMarkdown(post.excerpt)}
+                    </ReactMarkdown>
+                  </span>
                 ) : (
                   post.excerpt.replace(/[#*`\-\[\]]/g, '').slice(0, 200) + (post.excerpt.length > 200 ? '...' : '')
                 )}
@@ -632,9 +634,12 @@ export function Blog() {
                       <div
                         data-video-url={getVideoUrlFromMarkdown(newPost.content) || undefined}
                         onClick={handleTimestampClick}
-                        className="text-sm leading-7"
-                        dangerouslySetInnerHTML={{ __html: markdownToHtml(newPost.content) }}
-                      />
+                        className="text-sm leading-7 prose prose-sm dark:prose-invert max-w-none prose-pre:rounded-xl prose-pre:border prose-pre:border-[#88B5D3]/20 prose-code:before:content-none prose-code:after:content-none"
+                      >
+                        <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex, rehypeHighlight]}>
+                          {toRenderableMarkdown(newPost.content)}
+                        </ReactMarkdown>
+                      </div>
                     ) : (
                       <p className="text-gray-400 italic">没有内容可预览</p>
                     )}

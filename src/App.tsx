@@ -16,6 +16,7 @@ import { Tasks } from "./pages/Tasks";
 import { WeeklyReview } from "./pages/WeeklyReview";
 import { FocusInsights } from "./pages/FocusInsights";
 import { Settings } from "./pages/Settings";
+import { ErrorBook } from "./pages/ErrorBook";
 import { isTauriAvailable } from "./lib/dataService";
 import { KnowledgeSelectionProvider } from "./context/KnowledgeSelectionContext";
 import { getSettings, saveSettings } from "./lib/settings";
@@ -80,6 +81,7 @@ export default function App() {
             <Route path="tasks" element={<Tasks />} />
             <Route path="weekly" element={<WeeklyReview />} />
             <Route path="focus-insights" element={<FocusInsights />} />
+            <Route path="error-book" element={<ErrorBook />} />
             <Route path="settings" element={<SettingsDesktopOnly />} />
           </Route>
         </Routes>

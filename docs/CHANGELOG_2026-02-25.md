@@ -1,5 +1,104 @@
 # 更新日志（2026-02-25）
 
+## v1.4.1-dev（错题收录与渲染修正，2026-02-27）
+
+### 已落地（本次）
+- 修复 `Blog` 与 `BlogPost` 的 LaTeX 显示为源码问题：
+  - 从手写 `markdownToHtml + dangerouslySetInnerHTML` 切换为 `ReactMarkdown + remark-math + rehype-katex (+rehype-highlight)`。
+  - 留痕列表展开正文、编辑器预览、文章详情页均统一走同一渲染链路。
+- 保留并修正视频时间戳跳转能力：
+  - 将时间戳标记改写为 Markdown 链接锚点并在点击时解析秒数跳转。
+- 优化 `Notes`「收录为错题」题目提取逻辑：
+  - 优先从 AI 回复中解析“题目识别/题目原文”与“解答/解析”分段。
+  - 支持流水线格式（`【题目识别】` / `【详细解答】`）与常见自然语言标题格式。
+  - 当用户提问为泛化提示（如“请识别这道题并详细解答”）时，优先用 AI 回复首段作为题面，避免将提示词误收录为题目。
+
+## v1.4.0-dev（错题快录与周清单复盘，2026-02-27 实装 Round 1）
+
+### 已落地（本次）
+- 后端新增错题与周复盘清单数据基座（SQLite）：
+  - `wrong_questions`（错题主表）
+  - `weekly_review_items`（真实自然周清单）
+  - `ai_messages.image_path`（AI 消息可关联图片路径）
+- Rust 命令与 Axum 路由已补齐（桌面 / Web 双端可复用）：
+  - 错题 CRUD + 统计
+  - 周清单获取 / 勾选 / 手动延续至下周
+  - 图片上传与静态访问（`/api/images/upload`、`/api/images/{*path}`）
+- 前端桥接层 `src/utils/apiBridge.ts` 已接入双模 API：
+  - 桌面端走 `invoke`
+  - 局域网 Web 走 HTTP REST
+- AI 客户端 `src/utils/aiClient.ts` 已扩展视觉通道：
+  - 支持 OpenAI 兼容多模态 content
+  - 支持 `single` / `pipeline` 两种识题模式
+- 设置中心已新增视觉配置并持久化：
+  - `aiVisionModel`
+  - `aiVisionMode`
+  - 同步保存到 `eva.settings.v1` 与 localStorage 兼容键
+
+### 当前边界
+- 本轮仅完成后端与配置层基座，前端页面联动（Notes 图片发送、错题收录弹窗、ErrorBook 页面、WeeklyReview/Dashboard 新卡片）将在 Round 2 完成。
+
+## v1.4.0-dev（错题快录与周清单复盘，2026-02-27 实装 Round 2）
+
+### 已落地（本次）
+- `Notes` AI 对话新增图片题发送能力：
+  - 支持选择图片与粘贴截图；发送后走视觉识题链路。
+  - 用户消息支持按需关联 `image_path`，并可在气泡内预览/放大图片。
+- `Notes` 助手消息新增「收录为错题」：
+  - 弹窗填写科目/标签/难度/笔记。
+  - 一键写入 `wrong_questions`，并可同步生成带“错题”标签的日留痕。
+- 新增独立页面 `ErrorBook`（`/error-book`）：
+  - 支持学科/掌握程度/关键词筛选。
+  - 支持查看详情（Markdown + LaTeX）与错题归档。
+  - 支持本周清单勾选完成与批量延续到下周。
+- `Dashboard` 新增错题速览卡片：
+  - 展示总数/未掌握/本周待复习/本周已完成/本周新增。
+  - 提供“开始复习”“查看错题本”快捷入口。
+- `WeeklyReview` 新增本周错题标题清单：
+  - 使用真实自然周 `week_start` 口径。
+  - 支持勾选完成与延续到下周。
+  - AI 周诊断 Prompt 注入错题维度摘要。
+
+### 导航与路由
+- `App` 新增 `/error-book` 路由。
+- `Sidebar` 新增「错题本」入口。
+
+## v1.4.0-dev（错题快录与智能复习系统，2026-02-27 规划）
+
+### 设计文档
+- 新增 `docs/spec_2.27.md`：错题快录与智能复习系统 Spec（v1.4）。
+- 完整覆盖：AI 多模态图片识题 + 错题本持久化 + SM-2 间隔复习 + 周复盘/留痕联动。
+
+### 规划能力清单
+- **AI 多模态扩展**：
+  - SiliconFlow 视觉模型（`Pro/Qwen/Qwen2.5-VL-7B-Instruct`）接入。
+  - `aiClient.ts` 支持 `OpenAI 多模态消息格式`（image_url content part）。
+  - 双模型流水线（Vision 提取题目 → Reasoning 详细解答）与单步模式可选。
+  - Settings 新增 `aiVisionModel` / `aiVisionMode` 配置项。
+- **Notes AI 对话图片上传**：
+  - 支持点击选择 / Ctrl+V 粘贴 / 拖拽上传图片。
+  - 图片保存至 `Documents/EVA_Knowledge_Base/ErrorImages/` 目录。
+  - 发送含图片消息时自动切换视觉模型。
+  - `ai_messages` 表新增 `image_path` 列。
+- **一键收录为错题**：
+  - AI 回复气泡新增"收录为错题"按钮。
+  - 结构化收录弹窗：科目 / 标签 / 难度 / 补充笔记。
+  - 可选"同步到留痕"，自动创建带"错题"标签的 Blog 条目。
+- **错题本独立页面**（`/error-book`）：
+  - 按学科/标签/掌握程度筛选与搜索。
+  - 翻卡片式 SM-2 间隔复习模式。
+  - 手动录入错题能力。
+- **SQLite 新增表**：
+  - `wrong_questions`：错题记录（含 SM-2 调度字段）。
+- **Axum HTTP 路由**：
+  - CRUD + 复习 + 统计 + 图片上传/服务。
+- **Dashboard 错题速览卡片**。
+- **WeeklyReview 错题维度注入 AI 周诊断**。
+- **Blog LaTeX 渲染增强**（ReactMarkdown + rehype-katex 替换手写 markdownToHtml）。
+- 含 13 条 Agent Prompt 实施指令。
+
+---
+
 ## v0.1.1（当前基线）
 
 ### 已完成（Phase 2）

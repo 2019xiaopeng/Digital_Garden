@@ -1,5 +1,5 @@
 import { Link, useLocation } from "react-router-dom";
-import { Home, Clock, BookOpen, FolderOpen, CalendarDays, Github, Moon, Sun, Settings, Target, BarChart3 } from "lucide-react";
+import { Home, Clock, BookOpen, FolderOpen, CalendarDays, Github, Moon, Sun, Settings, Target, BarChart3, NotebookPen } from "lucide-react";
 import { cn } from "../lib/utils";
 import { useState, useEffect } from "react";
 import { getSettings } from "../lib/settings";
@@ -12,6 +12,7 @@ const navItems = [
   { name: "资源站", path: "/resources", icon: FolderOpen },
   { name: "周复盘", path: "/weekly", icon: Target },
   { name: "专注成就", path: "/focus-insights", icon: BarChart3 },
+  { name: "错题本", path: "/error-book", icon: NotebookPen },
   { name: "设置", path: "/settings", icon: Settings },
 ];
 

@@ -4,6 +4,8 @@ export interface AppSettings {
   aiApiKey: string;
   aiKimiKey: string;
   aiMinimaxKey: string;
+  aiVisionModel: string;
+  aiVisionMode: "single" | "pipeline";
   lanShareEnabled: boolean;
   lanSharePort: number;
   fontScale: number;
@@ -30,6 +32,8 @@ export const defaultSettings: AppSettings = {
   aiApiKey: "",
   aiKimiKey: "",
   aiMinimaxKey: "",
+  aiVisionModel: "Pro/Qwen/Qwen2.5-VL-7B-Instruct",
+  aiVisionMode: "single",
   lanShareEnabled: false,
   lanSharePort: 9527,
   fontScale: 100,

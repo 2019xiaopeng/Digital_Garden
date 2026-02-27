@@ -3,7 +3,15 @@ import { Loader2, Sparkles, Target } from "lucide-react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { fetchWeeklyStats } from "../utils/apiBridge";
+import {
+  carryWeeklyReviewItemsToNextWeek,
+  fetchWeeklyReviewItems,
+  fetchWeeklyStats,
+  fetchWrongQuestions,
+  toggleWeeklyReviewItemDone,
+  type WeeklyReviewItem,
+  type WrongQuestion,
+} from "../utils/apiBridge";
 import type { WeeklyStats } from "../utils/apiBridge";
 import { AiService } from "../lib/dataService";
 
@@ -28,6 +36,17 @@ export function WeeklyReview() {
 
   const [aiLoading, setAiLoading] = useState(false);
   const [aiResult, setAiResult] = useState<string>("");
+  const [weeklyItems, setWeeklyItems] = useState<WeeklyReviewItem[]>([]);
+  const [wrongQuestions, setWrongQuestions] = useState<WrongQuestion[]>([]);
+  const [carryIds, setCarryIds] = useState<string[]>([]);
+
+  const weekStart = useMemo(() => {
+    const date = new Date(`${endDate}T00:00:00`);
+    const day = date.getDay();
+    const offset = day === 0 ? 6 : day - 1;
+    date.setDate(date.getDate() - offset);
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+  }, [endDate]);
 
   const chartData = useMemo(() => {
     if (!stats?.subject_distribution) return [];
@@ -44,10 +63,16 @@ export function WeeklyReview() {
       setLoading(true);
       setError(null);
       try {
-        const data = await fetchWeeklyStats(endDate);
+        const [data, items, wrongs] = await Promise.all([
+          fetchWeeklyStats(endDate),
+          fetchWeeklyReviewItems(weekStart),
+          fetchWrongQuestions({ is_archived: 0 }),
+        ]);
 
         if (!cancelled) {
           setStats(data);
+          setWeeklyItems(items);
+          setWrongQuestions(wrongs);
         }
       } catch (e) {
         if (!cancelled) setError(`加载周统计失败：${e instanceof Error ? e.message : String(e)}`);
@@ -59,7 +84,7 @@ export function WeeklyReview() {
     return () => {
       cancelled = true;
     };
-  }, [endDate]);
+  }, [endDate, weekStart]);
 
   const handleGenerateAiReview = async () => {
     if (!stats) return;
@@ -76,7 +101,14 @@ export function WeeklyReview() {
       .map(([k, v]) => `${k}:${v.toFixed(1)}%`)
       .join("，");
 
-    const systemPrompt = `你现在是一位极其严谨、数据驱动的资深考研学业规划导师。这是该考生过去一周的真实学习数据：[总专注时长: ${stats.total_focus_minutes} 分钟, 完成率: ${stats.completion_rate.toFixed(1)}%, 科目分布: ${distText}]。
+    const pending = weeklyItems.filter((item) => item.status === "pending").length;
+    const done = weeklyItems.filter((item) => item.status === "done").length;
+    const carryable = weeklyItems.filter((item) => item.status === "pending").length;
+    const wrongSection = weeklyItems.length > 0
+      ? `\n本周错题清单：待复习 ${pending} 道，已完成 ${done} 道；可延续到下周 ${carryable} 道。`
+      : "";
+
+    const systemPrompt = `你现在是一位极其严谨、数据驱动的资深考研学业规划导师。这是该考生过去一周的真实学习数据：[总专注时长: ${stats.total_focus_minutes} 分钟, 完成率: ${stats.completion_rate.toFixed(1)}%, 科目分布: ${distText}]。${wrongSection}
 请根据数据进行极度理性的周度学情诊断。拒绝任何客套话与心灵鸡汤，直接指出核心问题并给出战术指导。严格使用 Markdown 输出以下结构：
 ### 📊 数据表现诊断
 (根据专注时长和任务完成率，客观评价本周的执行力，直接点透伪勤奋或真实效率)
@@ -153,6 +185,50 @@ export function WeeklyReview() {
       </section>
 
       <section className="glass-card rounded-3xl p-6 md:p-8 border border-[#88B5D3]/30">
+        <div className="mb-6 rounded-2xl border border-[#88B5D3]/25 bg-[#88B5D3]/6 p-4">
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+            <h3 className="font-semibold text-gray-900 dark:text-white">本周待复习错题（标题清单）</h3>
+            <button
+              onClick={async () => {
+                if (!carryIds.length) return;
+                await carryWeeklyReviewItemsToNextWeek(carryIds, weekStart);
+                const items = await fetchWeeklyReviewItems(weekStart);
+                setWeeklyItems(items);
+                setCarryIds([]);
+              }}
+              className="px-3 py-1.5 rounded-lg border border-[#88B5D3]/30 text-[#88B5D3] text-xs font-semibold hover:bg-[#88B5D3]/10"
+            >
+              延续到下周
+            </button>
+          </div>
+          <div className="space-y-2">
+            {weeklyItems.length === 0 ? (
+              <p className="text-sm text-gray-500 dark:text-gray-400">本周暂无错题清单项</p>
+            ) : weeklyItems.map((item) => {
+              const target = wrongQuestions.find((q) => q.id === item.wrong_question_id);
+              return (
+                <div key={item.id} className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={carryIds.includes(item.id)}
+                    onChange={(e) => setCarryIds((prev) => e.target.checked ? [...prev, item.id] : prev.filter((id) => id !== item.id))}
+                  />
+                  <button
+                    onClick={async () => {
+                      await toggleWeeklyReviewItemDone(item.id, item.status !== "done");
+                      const items = await fetchWeeklyReviewItems(weekStart);
+                      setWeeklyItems(items);
+                    }}
+                    className="flex-1 text-left hover:text-[#88B5D3]"
+                  >
+                    [{item.status === "done" ? "x" : " "}] {target?.question_content.slice(0, 48) || item.title_snapshot}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
         <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">各科目精力分布（周）</h2>
         <div className="h-[340px]">
           {loading ? (

@@ -1,0 +1,313 @@
+import { useEffect, useMemo, useState } from "react";
+import { Archive, BookOpenCheck, Plus, Search } from "lucide-react";
+import {
+  archiveWrongQuestion,
+  carryWeeklyReviewItemsToNextWeek,
+  createWrongQuestion,
+  fetchWeeklyReviewItems,
+  fetchWrongQuestionStats,
+  fetchWrongQuestions,
+  getImageUrl,
+  toggleWeeklyReviewItemDone,
+  type WeeklyReviewItem,
+  type WrongQuestion,
+  type WrongQuestionStats,
+} from "../utils/apiBridge";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
+import rehypeHighlight from "rehype-highlight";
+import { useSearchParams } from "react-router-dom";
+import "katex/dist/katex.min.css";
+
+const subjects = ["全部", "数学", "408", "英语", "政治", "其他"];
+
+function todayStr() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function getWeekStart(date: string) {
+  const parsed = new Date(`${date}T00:00:00`);
+  const day = parsed.getDay();
+  const offset = day === 0 ? 6 : day - 1;
+  parsed.setDate(parsed.getDate() - offset);
+  return `${parsed.getFullYear()}-${String(parsed.getMonth() + 1).padStart(2, "0")}-${String(parsed.getDate()).padStart(2, "0")}`;
+}
+
+function masteryLabel(level: number) {
+  if (level <= 0) return "未掌握";
+  if (level === 1) return "模糊";
+  if (level === 2) return "基本掌握";
+  return "熟练";
+}
+
+export function ErrorBook() {
+  const [searchParams] = useSearchParams();
+  const [list, setList] = useState<WrongQuestion[]>([]);
+  const [stats, setStats] = useState<WrongQuestionStats | null>(null);
+  const [subject, setSubject] = useState("全部");
+  const [mastery, setMastery] = useState<string>("全部");
+  const [keyword, setKeyword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [weeklyItems, setWeeklyItems] = useState<WeeklyReviewItem[]>([]);
+  const [carrySelection, setCarrySelection] = useState<string[]>([]);
+  const [detail, setDetail] = useState<WrongQuestion | null>(null);
+  const [showCreate, setShowCreate] = useState(false);
+  const [createForm, setCreateForm] = useState({
+    subject: "数学",
+    tags: "",
+    question: "",
+    solution: "",
+    note: "",
+    difficulty: 3,
+  });
+
+  const weekStart = useMemo(() => getWeekStart(todayStr()), []);
+
+  const loadData = async () => {
+    setLoading(true);
+    try {
+      const [rows, summary, weekly] = await Promise.all([
+        fetchWrongQuestions({ is_archived: 0 }),
+        fetchWrongQuestionStats(),
+        fetchWeeklyReviewItems(weekStart),
+      ]);
+      setList(rows);
+      setStats(summary);
+      setWeeklyItems(weekly);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadData();
+  }, [weekStart]);
+
+  const weeklyMap = useMemo(() => {
+    const map = new Map<string, WeeklyReviewItem>();
+    weeklyItems.forEach((item) => map.set(item.wrong_question_id, item));
+    return map;
+  }, [weeklyItems]);
+
+  const filtered = useMemo(() => {
+    return list.filter((item) => {
+      if (subject !== "全部" && item.subject !== subject) return false;
+      if (mastery !== "全部") {
+        const target = mastery === "未掌握" ? 0 : mastery === "模糊" ? 1 : mastery === "基本掌握" ? 2 : 3;
+        if (item.mastery_level !== target) return false;
+      }
+      if (keyword.trim()) {
+        const merged = `${item.question_content}\n${item.ai_solution}\n${item.user_note || ""}`.toLowerCase();
+        if (!merged.includes(keyword.trim().toLowerCase())) return false;
+      }
+      return true;
+    });
+  }, [keyword, list, mastery, subject]);
+
+  const pendingWeekly = useMemo(() => weeklyItems.filter((item) => item.status === "pending"), [weeklyItems]);
+
+  useEffect(() => {
+    if (searchParams.get("mode") === "review") {
+      setCarrySelection(pendingWeekly.map((item) => item.id));
+    }
+  }, [pendingWeekly, searchParams]);
+
+  return (
+    <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-700 ease-out">
+      <header className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h1 className="text-3xl font-bold text-gray-900 dark:text-white">错题本</h1>
+          <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">本周待复习 {pendingWeekly.length} 道</p>
+        </div>
+        <button
+          onClick={() => setShowCreate(true)}
+          className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-[#88B5D3] hover:bg-[#6f9fbe] text-white text-sm font-semibold"
+        >
+          <Plus className="w-4 h-4" /> 手动新增
+        </button>
+      </header>
+
+      <section className="glass-card rounded-2xl p-4 grid grid-cols-1 md:grid-cols-4 gap-3">
+        <select value={subject} onChange={(e) => setSubject(e.target.value)} className="rounded-xl border border-gray-200/80 dark:border-[#30435c] bg-white/90 dark:bg-[#0f1826]/80 px-3 py-2 text-sm">
+          {subjects.map((s) => <option key={s} value={s}>{s}</option>)}
+        </select>
+        <select value={mastery} onChange={(e) => setMastery(e.target.value)} className="rounded-xl border border-gray-200/80 dark:border-[#30435c] bg-white/90 dark:bg-[#0f1826]/80 px-3 py-2 text-sm">
+          {["全部", "未掌握", "模糊", "基本掌握", "熟练"].map((s) => <option key={s} value={s}>{s}</option>)}
+        </select>
+        <div className="md:col-span-2 relative">
+          <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+          <input
+            value={keyword}
+            onChange={(e) => setKeyword(e.target.value)}
+            placeholder="搜索题目/解答/笔记"
+            className="w-full pl-9 pr-3 py-2 rounded-xl border border-gray-200/80 dark:border-[#30435c] bg-white/90 dark:bg-[#0f1826]/80 text-sm"
+          />
+        </div>
+      </section>
+
+      <section className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <div className="glass-card rounded-2xl p-4">总计 <span className="font-bold text-[#88B5D3]">{stats?.total_count || 0}</span> 道</div>
+        <div className="glass-card rounded-2xl p-4">未掌握 <span className="font-bold text-[#FF9900]">{stats?.unmastered_count || 0}</span> 道</div>
+        <div className="glass-card rounded-2xl p-4">本周新增 <span className="font-bold text-gray-900 dark:text-white">{stats?.this_week_new || 0}</span> 道</div>
+      </section>
+
+      <section className="glass-card rounded-2xl p-4 space-y-3">
+        <div className="flex items-center justify-between">
+          <h2 className="font-semibold text-gray-900 dark:text-white flex items-center gap-2"><BookOpenCheck className="w-4 h-4 text-[#88B5D3]" /> 本周待复习清单</h2>
+          <button
+            onClick={async () => {
+              const ids = carrySelection.filter(Boolean);
+              if (!ids.length) return;
+              await carryWeeklyReviewItemsToNextWeek(ids, weekStart);
+              await loadData();
+            }}
+            className="text-xs px-3 py-1.5 rounded-lg border border-[#88B5D3]/30 text-[#88B5D3] hover:bg-[#88B5D3]/10"
+          >
+            延续到下周
+          </button>
+        </div>
+        <div className="space-y-2">
+          {pendingWeekly.length === 0 ? (
+            <p className="text-sm text-gray-500 dark:text-gray-400">本周待复习项为空</p>
+          ) : pendingWeekly.map((item) => {
+            const q = list.find((x) => x.id === item.wrong_question_id);
+            return (
+              <label key={item.id} className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={carrySelection.includes(item.id)}
+                  onChange={(e) => {
+                    setCarrySelection((prev) => e.target.checked ? [...prev, item.id] : prev.filter((id) => id !== item.id));
+                  }}
+                />
+                <button
+                  className="text-left flex-1 hover:text-[#88B5D3]"
+                  onClick={async () => {
+                    await toggleWeeklyReviewItemDone(item.id, true);
+                    await loadData();
+                  }}
+                >
+                  {q ? q.question_content.slice(0, 48) : item.title_snapshot}
+                </button>
+              </label>
+            );
+          })}
+        </div>
+      </section>
+
+      <section className="space-y-3">
+        {loading ? (
+          <div className="glass-card rounded-2xl p-6 text-sm text-gray-500">加载中...</div>
+        ) : filtered.length === 0 ? (
+          <div className="glass-card rounded-2xl p-6 text-sm text-gray-500">暂无符合条件的错题</div>
+        ) : filtered.map((item) => {
+          const weekly = weeklyMap.get(item.id);
+          return (
+            <article key={item.id} className="glass-card rounded-2xl p-4 border border-[#88B5D3]/20">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h3 className="font-semibold text-gray-900 dark:text-white">[{item.subject}] {item.question_content.slice(0, 42)}</h3>
+                <span className="text-xs text-gray-500">{masteryLabel(item.mastery_level)}</span>
+              </div>
+              <p className="mt-2 text-xs text-gray-500">状态：{weekly?.status || "未加入本周清单"} · 难度 {item.difficulty} 星</p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button onClick={() => setDetail(item)} className="px-3 py-1.5 text-xs rounded-lg border border-[#88B5D3]/30 text-[#88B5D3] hover:bg-[#88B5D3]/10">查看</button>
+                {weekly && (
+                  <button
+                    onClick={async () => {
+                      await toggleWeeklyReviewItemDone(weekly.id, weekly.status !== "done");
+                      await loadData();
+                    }}
+                    className="px-3 py-1.5 text-xs rounded-lg border border-gray-200/80 dark:border-[#30435c]"
+                  >
+                    {weekly.status === "done" ? "标记未完成" : "标记完成"}
+                  </button>
+                )}
+                <button
+                  onClick={async () => {
+                    await archiveWrongQuestion(item.id);
+                    await loadData();
+                  }}
+                  className="inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-lg border border-red-300/60 text-red-500 hover:bg-red-500/10"
+                >
+                  <Archive className="w-3.5 h-3.5" /> 归档
+                </button>
+              </div>
+            </article>
+          );
+        })}
+      </section>
+
+      {detail && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/60" onClick={() => setDetail(null)} />
+          <div className="relative w-full max-w-4xl max-h-[88vh] overflow-y-auto rounded-3xl bg-white dark:bg-[#0f1826] border border-[#88B5D3]/25 p-6 space-y-4">
+            <h3 className="text-xl font-semibold text-gray-900 dark:text-white">[{detail.subject}] 错题详情</h3>
+            {detail.question_image_path && (
+              <img src={getImageUrl(detail.question_image_path)} alt="题图" className="max-h-72 rounded-xl border border-[#88B5D3]/30" />
+            )}
+            <article className="prose prose-sm dark:prose-invert max-w-none">
+              <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex, rehypeHighlight]}>
+                {`### 题目\n${detail.question_content}\n\n### 解答\n${detail.ai_solution}\n\n### 笔记\n${detail.user_note || "（暂无）"}`}
+              </ReactMarkdown>
+            </article>
+          </div>
+        </div>
+      )}
+
+      {showCreate && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/55" onClick={() => setShowCreate(false)} />
+          <div className="relative w-full max-w-2xl rounded-3xl bg-white dark:bg-[#0f1826] border border-[#88B5D3]/25 p-6 space-y-3">
+            <h3 className="text-lg font-semibold text-gray-900 dark:text-white">手动新增错题</h3>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <select value={createForm.subject} onChange={(e) => setCreateForm({ ...createForm, subject: e.target.value })} className="rounded-xl border border-gray-200/80 dark:border-[#30435c] bg-white/90 dark:bg-[#0f1826]/80 px-3 py-2 text-sm">
+                {subjects.filter((s) => s !== "全部").map((s) => <option key={s} value={s}>{s}</option>)}
+              </select>
+              <input value={createForm.tags} onChange={(e) => setCreateForm({ ...createForm, tags: e.target.value })} placeholder="标签，逗号分隔" className="rounded-xl border border-gray-200/80 dark:border-[#30435c] bg-white/90 dark:bg-[#0f1826]/80 px-3 py-2 text-sm" />
+            </div>
+            <textarea rows={4} value={createForm.question} onChange={(e) => setCreateForm({ ...createForm, question: e.target.value })} placeholder="题目（支持 Markdown + LaTeX）" className="w-full rounded-xl border border-gray-200/80 dark:border-[#30435c] bg-white/90 dark:bg-[#0f1826]/80 px-3 py-2 text-sm" />
+            <textarea rows={5} value={createForm.solution} onChange={(e) => setCreateForm({ ...createForm, solution: e.target.value })} placeholder="解答（支持 Markdown + LaTeX）" className="w-full rounded-xl border border-gray-200/80 dark:border-[#30435c] bg-white/90 dark:bg-[#0f1826]/80 px-3 py-2 text-sm" />
+            <textarea rows={3} value={createForm.note} onChange={(e) => setCreateForm({ ...createForm, note: e.target.value })} placeholder="补充笔记（可选）" className="w-full rounded-xl border border-gray-200/80 dark:border-[#30435c] bg-white/90 dark:bg-[#0f1826]/80 px-3 py-2 text-sm" />
+            <div className="flex justify-end gap-2">
+              <button onClick={() => setShowCreate(false)} className="px-4 py-2 rounded-xl border border-gray-200/80 dark:border-[#30435c] text-sm">取消</button>
+              <button
+                onClick={async () => {
+                  if (!createForm.question.trim() || !createForm.solution.trim()) return;
+                  const now = new Date().toISOString();
+                  await createWrongQuestion({
+                    id: "",
+                    subject: createForm.subject,
+                    tags_json: JSON.stringify(createForm.tags.split(",").map((x) => x.trim()).filter(Boolean)),
+                    question_content: createForm.question,
+                    question_image_path: null,
+                    ai_solution: createForm.solution,
+                    user_note: createForm.note || null,
+                    source: "manual",
+                    ai_session_id: null,
+                    ai_message_ids_json: null,
+                    difficulty: createForm.difficulty,
+                    mastery_level: 0,
+                    review_count: 0,
+                    next_review_date: null,
+                    last_review_date: null,
+                    ease_factor: 2.5,
+                    interval_days: 1,
+                    is_archived: 0,
+                    created_at: now,
+                    updated_at: now,
+                  }, true);
+                  setShowCreate(false);
+                  await loadData();
+                }}
+                className="px-4 py-2 rounded-xl bg-[#88B5D3] hover:bg-[#6f9fbe] text-white text-sm font-semibold"
+              >保存</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

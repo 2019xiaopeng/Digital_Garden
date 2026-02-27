@@ -1,32 +1,28 @@
 import { Calendar, ArrowLeft, Edit3, Trash2, Smile, Frown, Meh, Zap } from "lucide-react";
 import { useParams, Link, useNavigate } from "react-router-dom";
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState } from "react";
 import { DailyLogService } from "../lib/dataService";
 import { ConfirmDialog } from "../components/ConfirmDialog";
-import { buildVideoUrlWithTimestamp, getVideoUrlFromMarkdown, openExternalUrl, parseFrontmatter, replaceTimestampTagsWithLinks } from "../lib/videoBookmark";
+import { buildVideoUrlWithTimestamp, getVideoUrlFromMarkdown, openExternalUrl, parseFrontmatter, TIMESTAMP_REGEX, timestampToSeconds } from "../lib/videoBookmark";
 import type { LegacyPost } from "../lib/dataService";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
+import rehypeHighlight from "rehype-highlight";
+import "katex/dist/katex.min.css";
+import "highlight.js/styles/github-dark.css";
 
-const markdownToHtml = (md: string) => {
+const toRenderableMarkdown = (md: string) => {
   const { body, frontmatter } = parseFrontmatter(md);
-  const escaped = body
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-  const html = escaped
-    .replace(/^###\s+(.+)$/gm, '<h3 class="text-lg font-semibold mt-6 mb-2">$1</h3>')
-    .replace(/^##\s+(.+)$/gm, '<h2 class="text-xl font-bold mt-8 mb-3">$1</h2>')
-    .replace(/^#\s+(.+)$/gm, '<h1 class="text-2xl font-bold mt-8 mb-4">$1</h1>')
-    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-    .replace(/\*(.+?)\*/g, "<em>$1</em>")
-    .replace(/`(.+?)`/g, '<code class="bg-gray-100 dark:bg-gray-800 px-1.5 py-0.5 rounded text-sm">$1</code>')
-    .replace(/^- \[x\]\s+(.+)$/gm, '<div class="flex items-center gap-2 py-0.5"><span class="text-emerald-500">\u2705</span><span class="line-through text-gray-400">$1</span></div>')
-    .replace(/^- \[ \]\s+(.+)$/gm, '<div class="flex items-center gap-2 py-0.5"><span class="text-gray-400">\u2610</span><span>$1</span></div>')
-    .replace(/^- (.+)$/gm, '<li class="ml-4 list-disc">$1</li>')
-    .replace(/^---$/gm, '<hr class="my-6 border-gray-200 dark:border-gray-800" />')
-    .replace(/\n\n/g, "<br/><br/>")
-    .replace(/\n/g, "<br/>");
+  const videoUrl = frontmatter.video || null;
+  if (!videoUrl) return body;
 
-  return replaceTimestampTagsWithLinks(html, frontmatter.video || null);
+  return body.replace(TIMESTAMP_REGEX, (full) => {
+    const secs = timestampToSeconds(full);
+    if (secs === null) return full;
+    return `[${full}](#video-timestamp-${secs})`;
+  });
 };
 
 const getMoodIcon = (mood: string) => {
@@ -59,20 +55,16 @@ export function BlogPost() {
     navigate("/blog");
   };
 
-  const htmlContent = useMemo(() => {
-    return post ? markdownToHtml(post.excerpt) : "";
-  }, [post]);
-
   const handleTimestampClick = async (e: React.MouseEvent<HTMLElement>) => {
     const target = e.target as HTMLElement;
-    const tag = target.closest("[data-video-seconds]") as HTMLElement | null;
+    const tag = target.closest("a[href^='#video-timestamp-']") as HTMLAnchorElement | null;
     if (!tag || !post) return;
     e.preventDefault();
 
     const videoUrl = getVideoUrlFromMarkdown(post.excerpt);
     if (!videoUrl) return;
 
-    const seconds = Number(tag.dataset.videoSeconds || "0");
+    const seconds = Number((tag.getAttribute("href") || "").replace("#video-timestamp-", ""));
     if (!Number.isFinite(seconds) || seconds < 0) return;
     await openExternalUrl(buildVideoUrlWithTimestamp(videoUrl, seconds));
   };
@@ -149,10 +141,14 @@ export function BlogPost() {
           </button>
         </div>
         <div
+          data-video-url={getVideoUrlFromMarkdown(post.excerpt) || undefined}
           className="prose prose-lg dark:prose-invert max-w-none text-gray-700 dark:text-gray-300 leading-relaxed"
           onClick={handleTimestampClick}
-          dangerouslySetInnerHTML={{ __html: htmlContent }}
-        />
+        >
+          <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex, rehypeHighlight]}>
+            {toRenderableMarkdown(post.excerpt)}
+          </ReactMarkdown>
+        </div>
       </article>
 
       <ConfirmDialog
