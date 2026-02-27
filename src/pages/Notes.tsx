@@ -118,7 +118,7 @@ export function Notes() {
   const [chatMessagesBySession, setChatMessagesBySession] = useState<Record<string, ChatMessage[]>>({});
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [isAiLoading, setIsAiLoading] = useState(false);
-  const chatEndRef = useRef<HTMLDivElement>(null);
+  const chatScrollRef = useRef<HTMLDivElement>(null);
   const [chatSessionToRenameId, setChatSessionToRenameId] = useState<string | null>(null);
   const [chatSessionToDeleteId, setChatSessionToDeleteId] = useState<string | null>(null);
   const [pendingImage, setPendingImage] = useState<PendingImage | null>(null);
@@ -223,8 +223,13 @@ export function Notes() {
   }, [treeData]);
 
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [chatHistory]);
+    if (!showAiPanel) return;
+    if (!chatScrollRef.current) return;
+    chatScrollRef.current.scrollTo({
+      top: chatScrollRef.current.scrollHeight,
+      behavior: "smooth",
+    });
+  }, [chatHistory, showAiPanel]);
 
   useEffect(() => {
     const closeMenu = () => setContextMenu(null);
@@ -1755,7 +1760,7 @@ export function Notes() {
               )}
             </div>
             
-            <div className="flex-1 overflow-y-auto p-6 space-y-6">
+            <div ref={chatScrollRef} className="flex-1 overflow-y-auto p-6 space-y-6">
               {chatHistory.length === 0 ? (
                 <div className="h-full min-h-56 flex flex-col items-center justify-center text-center text-gray-500 dark:text-gray-400">
                   <Bot className="w-11 h-11 mb-3 text-[#88B5D3]/70" />
@@ -1829,7 +1834,6 @@ export function Notes() {
                   </div>
                 </div>
               )}
-              <div ref={chatEndRef} />
             </div>
 
             <div className="p-4 border-t border-white/45 dark:border-[#2a3b52] bg-white/35 dark:bg-[#0f1826]/55">

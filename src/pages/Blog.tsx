@@ -124,10 +124,10 @@ export function Blog() {
 
   const toRenderableMarkdown = (md: string) => {
     const { body, frontmatter } = parseFrontmatter(md);
-    const videoUrl = frontmatter.video || null;
-    if (!videoUrl) return body;
-
     const normalized = normalizeMathDelimiters(body);
+    const videoUrl = frontmatter.video || null;
+    if (!videoUrl) return normalized;
+
     return normalized.replace(TIMESTAMP_REGEX, (full) => {
       const secs = timestampToSeconds(full);
       if (secs === null) return full;

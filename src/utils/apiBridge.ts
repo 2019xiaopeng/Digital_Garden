@@ -936,13 +936,19 @@ export async function uploadChatImage(imageData: Uint8Array, ext: string): Promi
 }
 
 export function getImageUrl(relativePath: string): string {
-  const clean = relativePath.trim().replace(/\\/g, "/").replace(/^\/+/, "");
+  const raw = (relativePath || "").trim();
+  const normalizedRaw = raw.replace(/\\/g, "/");
+  const isAbsolutePath = /^[a-zA-Z]:\//.test(normalizedRaw) || normalizedRaw.startsWith("/");
+  const clean = normalizedRaw.replace(/^\/+/, "");
   if (!clean) return "";
   if (isTauriRuntime()) {
+    const absoluteFromInput = isAbsolutePath ? normalizedRaw : "";
     const settings = getSettings();
     const workspaceRoot = (settings.docRoot || localStorage.getItem("eva.workspace.root") || "").trim();
-    if (workspaceRoot) {
-      const absolute = `${workspaceRoot.replace(/[\\/]+$/, "")}/${clean}`.replace(/\\/g, "/");
+    const absolute = absoluteFromInput || (workspaceRoot
+      ? `${workspaceRoot.replace(/[\\/]+$/, "")}/${clean}`.replace(/\\/g, "/")
+      : "");
+    if (absolute) {
       try {
         return convertFileSrc(absolute);
       } catch {
