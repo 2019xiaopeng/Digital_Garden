@@ -124,6 +124,15 @@
   - 资产协议作用域增加 `$DOCUMENT/**`，允许 `convertFileSrc` 访问 `Documents/EVA_Knowledge_Base/ErrorImages/...`。
   - 保留前端 `image-debug` 日志，便于继续追踪极端路径样本。
 
+### 修复补丁（同日十次追加）
+- 错题收录题面识别增强（选择题场景）：
+  - `Notes` 收录时新增“提示词识别”与“AI内容优先提题”策略，降低“把用户提问当题目”误判概率。
+  - 对 `A/B/C/D` 选项结构做专门识别，优先抽取完整题干+选项作为 `question_content`。
+- 留痕排版优化：
+  - 同步到 `Blog` 时，题目内容统一走 `formatQuestionLayout`，选择题选项自动换行，移动端阅读更整洁。
+- 移动端录入体验优化：
+  - 收录弹窗增加 `max-h + overflow-y-auto`，并改为小屏按钮纵向布局，避免遮挡与挤压。
+
 ### 版本准备
 - 版本号统一提升为 `v1.4.0`（`package.json` / `src-tauri/Cargo.toml` / `src-tauri/tauri.conf.json`）。
 

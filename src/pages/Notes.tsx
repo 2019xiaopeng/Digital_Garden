@@ -26,7 +26,7 @@ import rehypeHighlight from "rehype-highlight";
 import { useKnowledgeSelection } from "../context/KnowledgeSelectionContext";
 import { chatCompletion, visionChatCompletion } from "../utils/aiClient";
 import { DailyLogService } from "../lib/dataService";
-import { extractQuestionType, normalizeMathDelimiters } from "../lib/markdown";
+import { extractQuestionType, formatQuestionLayout, normalizeMathDelimiters } from "../lib/markdown";
 import "katex/dist/katex.min.css";
 import "highlight.js/styles/github-dark.css";
 
@@ -885,6 +885,35 @@ export function Notes() {
 
   const normalizeCaptureText = (text: string) => text.replace(/\r\n/g, "\n").trim();
 
+  const looksLikeInstructionPrompt = (text: string) => {
+    const normalized = normalizeCaptureText(text || "").toLowerCase();
+    if (!normalized) return false;
+    if (normalized.length <= 40 && /请|帮我|解答|分析|识别/.test(normalized)) return true;
+    return /(请|帮我|麻烦|能否).*(识别|解答|解析|分析)|^(请|帮我).*(这道题|题目)|详细解答|一步一步|给出思路/.test(normalized);
+  };
+
+  const pickQuestionFromAssistant = (assistantCoreRaw: string) => {
+    const normalized = normalizeCaptureText(assistantCoreRaw);
+    if (!normalized) return "";
+
+    const stripped = normalized
+      .replace(/^好的[,，。\s]*/i, "")
+      .replace(/^下面(?:先)?[\s\S]{0,24}?(?:题目|题干)[：:]?/i, "")
+      .trim();
+
+    const choiceBlock = stripped.match(/([\s\S]*?(?:\n|\s)(?:A|B|C|D|E|F)[\.、．]\s*[\s\S]{4,})/i);
+    if (choiceBlock?.[1]) {
+      return normalizeCaptureText(choiceBlock[1]);
+    }
+
+    const section = stripped.split(/\n\s*(?:解题|解析|思路|答案|详细解答|方法一|主解法)\s*[：:]/i)[0] || "";
+    const sectionText = normalizeCaptureText(section);
+    if (sectionText) return sectionText;
+
+    const paragraphs = stripped.split(/\n{2,}/).map(normalizeCaptureText).filter(Boolean);
+    return paragraphs[0] || "";
+  };
+
   const extractQuestionAndSolution = (assistantTextRaw: string, userTextRaw?: string | null) => {
     const assistantText = normalizeCaptureText(assistantTextRaw || "");
     const userText = normalizeCaptureText(userTextRaw || "");
@@ -921,20 +950,22 @@ export function Notes() {
       if (q && s) return { questionType: detectedQuestionType, questionContent: q, aiSolution: s };
     }
 
-    const genericUserPrompt = /识别|图片|这道题|详细解答|题目并/i.test(userText);
+    const genericUserPrompt = /识别|图片|这道题|详细解答|题目并/i.test(userText) || looksLikeInstructionPrompt(userText);
     const paragraphs = assistantCore.split(/\n{2,}/).map(normalizeCaptureText).filter(Boolean);
     if (genericUserPrompt && paragraphs.length >= 2) {
       return {
         questionType: detectedQuestionType,
-        questionContent: paragraphs[0],
+        questionContent: pickQuestionFromAssistant(assistantCore) || paragraphs[0],
         aiSolution: paragraphs.slice(1).join("\n\n"),
       };
     }
 
     if (assistantCore) {
+      const assistantQuestionCandidate = pickQuestionFromAssistant(assistantCore);
+      const shouldUseUserText = Boolean(userText && !looksLikeInstructionPrompt(userText) && userText.length > 8);
       return {
         questionType: detectedQuestionType,
-        questionContent: userText || paragraphs[0] || "",
+        questionContent: assistantQuestionCandidate || (shouldUseUserText ? userText : "") || paragraphs[0] || "",
         aiSolution: assistantCore,
       };
     }
@@ -1360,11 +1391,12 @@ export function Notes() {
         const today = new Date();
         const date = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
         const blogTags = ["错题", captureForm.subject, ...tags].filter(Boolean);
+        const formattedQuestion = formatQuestionLayout(captureForm.questionContent);
 
         await DailyLogService.create({
           id: "",
           title: `错题 · ${captureForm.subject} · ${date}`,
-          excerpt: `## 错题收录 - ${captureForm.subject}\n\n${captureForm.questionType.trim() ? `**题型总结：** ${captureForm.questionType.trim()}\n\n` : ""}### 题目\n${captureForm.questionContent}\n\n### AI 解答\n${captureForm.aiSolution}\n\n### 我的笔记\n${captureForm.userNote || "（暂无）"}\n\n---\n*由 EVA 错题快录自动生成*`,
+          excerpt: `## 错题收录 - ${captureForm.subject}\n\n${captureForm.questionType.trim() ? `**题型总结：** ${captureForm.questionType.trim()}\n\n` : ""}### 题目\n${formattedQuestion}\n\n### AI 解答\n${captureForm.aiSolution}\n\n### 我的笔记\n${captureForm.userNote || "（暂无）"}\n\n---\n*由 EVA 错题快录自动生成*`,
           date,
           readTime: "1 min read",
           category: "Manual",
@@ -2044,7 +2076,7 @@ export function Notes() {
       {captureTarget && captureForm && (
         <div className="fixed inset-0 z-[140] flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/55 backdrop-blur-sm" onClick={() => { if (!isCapturing) { setCaptureTarget(null); setCaptureForm(null); } }} />
-          <div className="relative w-full max-w-2xl rounded-3xl border border-[#88B5D3]/30 bg-white/90 dark:bg-[#0f1826]/95 shadow-2xl p-6 space-y-4">
+          <div className="relative w-full max-w-2xl max-h-[88vh] overflow-y-auto rounded-3xl border border-[#88B5D3]/30 bg-white/90 dark:bg-[#0f1826]/95 shadow-2xl p-4 sm:p-6 space-y-4">
             <h3 className="text-lg font-semibold text-gray-900 dark:text-white">收录为错题</h3>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -2134,7 +2166,7 @@ export function Notes() {
               同步到每日留痕
             </label>
 
-            <div className="flex justify-end gap-2">
+            <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-2">
               <button
                 type="button"
                 disabled={isCapturing}
