@@ -210,8 +210,11 @@ export const SYNC_WEEKLY_REVIEW_ITEMS = "SYNC_WEEKLY_REVIEW_ITEMS";
 
 function isTauriRuntime(): boolean {
   if (typeof window === "undefined") return false;
-  const win = window as Window & { __TAURI__?: unknown; __TAURI_INTERNALS__?: unknown };
-  return Boolean(win.__TAURI__ || win.__TAURI_INTERNALS__);
+  const win = window as Window & { __TAURI__?: unknown; __TAURI_INTERNALS__?: unknown; __TAURI_IPC__?: unknown };
+  if (win.__TAURI__ || win.__TAURI_INTERNALS__ || win.__TAURI_IPC__) return true;
+  const protocol = window.location.protocol.toLowerCase();
+  const host = window.location.hostname.toLowerCase();
+  return protocol === "tauri:" || host.endsWith(".localhost") || host === "tauri.localhost";
 }
 
 async function getInvoke() {
@@ -941,20 +944,21 @@ export function getImageUrl(relativePath: string): string {
   const isAbsolutePath = /^[a-zA-Z]:\//.test(normalizedRaw) || normalizedRaw.startsWith("/");
   const clean = normalizedRaw.replace(/^\/+/, "");
   if (!clean) return "";
-  if (isTauriRuntime()) {
-    const absoluteFromInput = isAbsolutePath ? normalizedRaw : "";
-    const settings = getSettings();
-    const workspaceRoot = (settings.docRoot || localStorage.getItem("eva.workspace.root") || "").trim();
-    const absolute = absoluteFromInput || (workspaceRoot
-      ? `${workspaceRoot.replace(/[\\/]+$/, "")}/${clean}`.replace(/\\/g, "/")
-      : "");
-    if (absolute) {
-      try {
-        return convertFileSrc(absolute);
-      } catch {
-        return `file:///${absolute.replace(/^\/+/, "")}`;
-      }
+  const absoluteFromInput = isAbsolutePath ? normalizedRaw : "";
+  const settings = getSettings();
+  const workspaceRoot = (settings.docRoot || localStorage.getItem("eva.workspace.root") || "").trim();
+  const absolute = absoluteFromInput || (workspaceRoot
+    ? `${workspaceRoot.replace(/[\\/]+$/, "")}/${clean}`.replace(/\\/g, "/")
+    : "");
+
+  if (absolute) {
+    try {
+      return convertFileSrc(absolute);
+    } catch {
+      return `file:///${absolute.replace(/^\/+/, "")}`;
     }
   }
+
+  if (isTauriRuntime()) return "";
   return `${getLanBaseUrl()}/api/images/${encodeURI(clean)}`;
 }

@@ -50,6 +50,26 @@ html, body, #root {
   color-scheme: dark;
 }
 
+.prose .katex-display {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 0.25rem;
+}
+
+.prose .katex-display > .katex {
+  font-size: clamp(1rem, 2vw, 1.2rem);
+}
+
+.prose .katex {
+  max-width: 100%;
+}
+
+.prose p,
+.prose li {
+  overflow-wrap: anywhere;
+}
+
 .reduce-motion *,
 .reduce-motion *::before,
 .reduce-motion *::after {

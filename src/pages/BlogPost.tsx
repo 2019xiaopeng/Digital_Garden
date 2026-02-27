@@ -72,7 +72,7 @@ export function BlogPost() {
 
   if (loading) {
     return (
-      <div className="max-w-3xl mx-auto py-20 text-center text-gray-500 dark:text-gray-400 animate-pulse">
+      <div className="max-w-5xl mx-auto py-20 text-center text-gray-500 dark:text-gray-400 animate-pulse">
         加载中…
       </div>
     );
@@ -80,7 +80,7 @@ export function BlogPost() {
 
   if (!post) {
     return (
-      <div className="max-w-3xl mx-auto animate-in fade-in slide-in-from-bottom-4 duration-700 ease-out pb-20">
+      <div className="max-w-5xl mx-auto animate-in fade-in slide-in-from-bottom-4 duration-700 ease-out pb-20">
         <header className="mb-10">
           <Link to="/blog" className="inline-flex items-center gap-1 text-sm text-[#88B5D3] hover:text-[#6f9fbe] mb-6 transition-colors">
             <ArrowLeft className="w-4 h-4" /> 返回留痕列表
@@ -97,7 +97,7 @@ export function BlogPost() {
   }
 
   return (
-    <div className="max-w-3xl mx-auto animate-in fade-in slide-in-from-bottom-4 duration-700 ease-out pb-20">
+    <div className="max-w-5xl mx-auto animate-in fade-in slide-in-from-bottom-4 duration-700 ease-out pb-20">
       <header className="mb-10">
         <Link to="/blog" className="inline-flex items-center gap-1 text-sm text-[#88B5D3] hover:text-[#6f9fbe] mb-6 transition-colors">
           <ArrowLeft className="w-4 h-4" /> 返回留痕列表

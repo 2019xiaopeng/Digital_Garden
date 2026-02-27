@@ -35,6 +35,18 @@
 - 修复 `Notes` 进入页面自动上滑导致空白观感：
   - 改为仅滚动 AI 聊天容器，不再触发页面级 `scrollIntoView`。
 
+### 修复补丁（同日三次追加）
+- 修复 `favicon.ico` 404：为页面显式声明图标资源（`/pic/head.png`）。
+- 公式超宽折中处理：
+  - 保留正文可读宽度提升（`BlogPost` 容器由 `max-w-3xl` 调整为 `max-w-5xl`）。
+  - KaTeX 显示公式启用横向滚动，避免长公式撑破卡片。
+- 修复 AI 对话图片仍不显示：
+  - 强化 Tauri 运行态检测（`__TAURI__` / `__TAURI_INTERNALS__` / `__TAURI_IPC__` + `tauri:`/`*.localhost`）。
+  - `getImageUrl` 统一支持绝对路径与相对路径，优先 `convertFileSrc` 生成可访问 URL。
+
+### 版本准备
+- 版本号统一提升为 `v1.4.0`（`package.json` / `src-tauri/Cargo.toml` / `src-tauri/tauri.conf.json`）。
+
 ## v1.4.0-dev（错题快录与周清单复盘，2026-02-27 实装 Round 1）
 
 ### 已落地（本次）
