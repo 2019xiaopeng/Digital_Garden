@@ -4,22 +4,24 @@
  */
 
 import { BrowserRouter, Routes, Route } from "react-router-dom";
-import { useEffect } from "react";
+import { lazy, Suspense, useEffect } from "react";
 import { Link } from "react-router-dom";
 import { Layout } from "./components/Layout";
 import { Dashboard } from "./pages/Dashboard";
-import { Blog } from "./pages/Blog";
-import { BlogPost } from "./pages/BlogPost";
-import { Notes } from "./pages/Notes";
-import { Resources } from "./pages/Resources";
-import { Tasks } from "./pages/Tasks";
-import { WeeklyReview } from "./pages/WeeklyReview";
-import { FocusInsights } from "./pages/FocusInsights";
-import { Settings } from "./pages/Settings";
-import { ErrorBook } from "./pages/ErrorBook";
 import { isTauriAvailable } from "./lib/dataService";
 import { KnowledgeSelectionProvider } from "./context/KnowledgeSelectionContext";
 import { getSettings, saveSettings } from "./lib/settings";
+
+// 首页 Dashboard 保持静态；其余页面懒加载，recharts/katex/highlight.js 不再挤进首屏
+const Blog = lazy(() => import("./pages/Blog").then((m) => ({ default: m.Blog })));
+const BlogPost = lazy(() => import("./pages/BlogPost").then((m) => ({ default: m.BlogPost })));
+const Notes = lazy(() => import("./pages/Notes").then((m) => ({ default: m.Notes })));
+const Resources = lazy(() => import("./pages/Resources").then((m) => ({ default: m.Resources })));
+const Tasks = lazy(() => import("./pages/Tasks").then((m) => ({ default: m.Tasks })));
+const WeeklyReview = lazy(() => import("./pages/WeeklyReview").then((m) => ({ default: m.WeeklyReview })));
+const FocusInsights = lazy(() => import("./pages/FocusInsights").then((m) => ({ default: m.FocusInsights })));
+const Settings = lazy(() => import("./pages/Settings").then((m) => ({ default: m.Settings })));
+const ErrorBook = lazy(() => import("./pages/ErrorBook").then((m) => ({ default: m.ErrorBook })));
 
 function SettingsDesktopOnly() {
   if (isTauriAvailable()) {
@@ -72,6 +74,7 @@ export default function App() {
   return (
     <KnowledgeSelectionProvider>
       <BrowserRouter>
+        <Suspense fallback={<div className="p-8 text-sm text-gray-400 dark:text-gray-500">加载中…</div>}>
         <Routes>
           <Route path="/" element={<Layout />}>
             <Route index element={<Dashboard />} />
@@ -86,6 +89,7 @@ export default function App() {
             <Route path="settings" element={<SettingsDesktopOnly />} />
           </Route>
         </Routes>
+        </Suspense>
       </BrowserRouter>
     </KnowledgeSelectionProvider>
   );

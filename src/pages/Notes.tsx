@@ -23,6 +23,10 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import rehypeHighlight from "rehype-highlight";
+
+// 模块级常量：插件数组若在 JSX 里内联，每次渲染都是新引用，react-markdown 会重建 processor 并全文重新解析
+const chatRemarkPlugins = [remarkGfm, remarkMath];
+const chatRehypePlugins = [rehypeKatex, rehypeHighlight];
 import { useKnowledgeSelection } from "../context/KnowledgeSelectionContext";
 import { chatCompletion, visionChatCompletion } from "../utils/aiClient";
 import { DailyLogService } from "../lib/dataService";
@@ -1840,7 +1844,7 @@ export function Notes() {
                   <p className="text-xs mt-1">已支持 SiliconFlow 流式返回（DeepSeek 系列）</p>
                 </div>
               ) : chatHistory.map((msg, idx) => (
-                <div key={idx} className={cn("flex gap-4", msg.role === 'user' ? "flex-row-reverse" : "")}> 
+                <div key={msg.id} className={cn("flex gap-4", msg.role === 'user' ? "flex-row-reverse" : "")}>
                   <div className={cn(
                     "w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0",
                     msg.role === 'user' ? "bg-gray-100 dark:bg-gray-800" : "bg-[#88B5D3]/10 dark:bg-[#88B5D3]/20 text-[#88B5D3]"
@@ -1880,8 +1884,8 @@ export function Notes() {
                       <div>
                         <div className="prose prose-sm dark:prose-invert max-w-none prose-pre:rounded-xl prose-pre:border prose-pre:border-[#88B5D3]/20 prose-code:before:content-none prose-code:after:content-none">
                           <ReactMarkdown
-                            remarkPlugins={[remarkGfm, remarkMath]}
-                            rehypePlugins={[rehypeKatex, rehypeHighlight]}
+                            remarkPlugins={chatRemarkPlugins}
+                            rehypePlugins={chatRehypePlugins}
                             components={{
                               img: ({ src, alt }) => {
                                 const rawSrc = String(src || "");
@@ -2291,7 +2295,7 @@ export function Notes() {
                     return (
                       <div className="bg-white dark:bg-gray-900 w-full max-w-3xl mx-auto min-h-full shadow-sm border-x border-gray-200 dark:border-gray-800 p-8 md:p-12">
                         <article className="notes-markdown prose prose-gray dark:prose-invert max-w-none prose-headings:text-gray-900 dark:prose-headings:text-white prose-a:text-[#88B5D3]">
-                          <ReactMarkdown remarkPlugins={[remarkGfm]}>{fileContent}</ReactMarkdown>
+                          <ReactMarkdown remarkPlugins={chatRemarkPlugins} rehypePlugins={chatRehypePlugins}>{fileContent}</ReactMarkdown>
                         </article>
                       </div>
                     );

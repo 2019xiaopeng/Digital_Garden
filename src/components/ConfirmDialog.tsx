@@ -37,13 +37,13 @@ export function ConfirmDialog({
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
-  const confirmRef = useRef<HTMLButtonElement>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
   const cfg = variantConfig[variant];
 
   useEffect(() => {
     if (open) {
       // Focus cancel button by default — prevents accidental Enter confirm
-      const timer = setTimeout(() => confirmRef.current?.focus(), 80);
+      const timer = setTimeout(() => cancelRef.current?.focus(), 80);
       return () => clearTimeout(timer);
     }
   }, [open]);
@@ -99,13 +99,13 @@ export function ConfirmDialog({
           {/* Actions */}
           <div className="flex items-center gap-3 mt-6 w-full">
             <button
+              ref={cancelRef}
               onClick={onCancel}
               className="flex-1 px-4 py-2.5 rounded-xl text-sm font-semibold border border-gray-200 dark:border-[#30435c] text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-[#162233] transition-colors"
             >
               {cancelText}
             </button>
             <button
-              ref={confirmRef}
               onClick={onConfirm}
               className={`flex-1 px-4 py-2.5 rounded-xl text-sm font-semibold transition-colors ${cfg.btn}`}
             >

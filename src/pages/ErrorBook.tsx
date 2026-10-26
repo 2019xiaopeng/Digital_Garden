@@ -84,6 +84,8 @@ export function ErrorBook() {
       setList(rows);
       setStats(summary);
       setWeeklyItems(weekly);
+    } catch (error) {
+      console.error("[ErrorBook] Failed to load data:", error);
     } finally {
       setLoading(false);
     }

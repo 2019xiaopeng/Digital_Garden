@@ -23,6 +23,7 @@ import {
   startFocusRun,
   type FocusTemplate,
 } from "../utils/apiBridge";
+import type { StartFocusRunPayload } from "../utils/apiBridge";
 import { useSync } from "../hooks/useSync";
 
 type Task = LegacyTask;
@@ -32,8 +33,19 @@ const getTodayStr = () => {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 };
 
+// 按本地时区解析 "YYYY-MM-DD"；直接 new Date(str) 会按 UTC 解析，UTC 以西时区整体偏移一天
+const parseDateStr = (dateStr: string) => new Date(`${dateStr}T00:00:00`);
+
+const getCalendarCells = (baseDate: string) => {
+  const d = parseDateStr(baseDate);
+  d.setDate(1);
+  const daysInMonth = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+  // 按需渲染 5 或 6 行，固定 35 格会截掉部分月份的月末 1-2 天
+  return Math.ceil((d.getDay() + daysInMonth) / 7) * 7;
+};
+
 const getDateOffsetStr = (baseDate: string, offsetDays: number) => {
-  const d = new Date(baseDate);
+  const d = parseDateStr(baseDate);
   d.setDate(d.getDate() + offsetDays);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 };
@@ -286,7 +298,7 @@ export function Tasks() {
       await finalizeFocusRun("aborted", Math.max(0, currentPlanned - timeLeft));
     }
 
-    const payload = {
+    const payload: StartFocusRunPayload = {
       source: "tasks" as const,
       template_id: null,
       task_id: task.id,
@@ -592,8 +604,15 @@ export function Tasks() {
   };
 
   const changeDate = (days: number) => {
-    const d = new Date(selectedDate);
+    const d = parseDateStr(selectedDate);
     d.setDate(d.getDate() + days);
+    setSelectedDate(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`);
+  };
+
+  const changeMonth = (delta: number) => {
+    const d = parseDateStr(selectedDate);
+    d.setDate(1); // 先归到 1 号再加减月，避免 31 号溢出跳月/原地不动
+    d.setMonth(d.getMonth() + delta);
     setSelectedDate(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`);
   };
 
@@ -667,7 +686,7 @@ export function Tasks() {
   const postponeTaskOneDay = (id: string) => {
     setTasks(prev => prev.map(task => {
       if (task.id !== id) return task;
-      const d = new Date(task.date);
+      const d = parseDateStr(task.date);
       d.setDate(d.getDate() + 1);
       const updated = {
         ...task,
@@ -1326,11 +1345,11 @@ export function Tasks() {
           <div className="space-y-6">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
-                {new Date(selectedDate).getFullYear()}年 {new Date(selectedDate).getMonth() + 1}月
+                {parseDateStr(selectedDate).getFullYear()}年 {parseDateStr(selectedDate).getMonth() + 1}月
               </h3>
               <div className="flex gap-2">
-                <button onClick={() => changeDate(-30)} className="px-3 py-1.5 text-sm font-medium text-gray-600 dark:text-gray-300 bg-gray-100 dark:bg-gray-800 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-700">上个月</button>
-                <button onClick={() => changeDate(30)} className="px-3 py-1.5 text-sm font-medium text-gray-600 dark:text-gray-300 bg-gray-100 dark:bg-gray-800 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-700">下个月</button>
+                <button onClick={() => changeMonth(-1)} className="px-3 py-1.5 text-sm font-medium text-gray-600 dark:text-gray-300 bg-gray-100 dark:bg-gray-800 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-700">上个月</button>
+                <button onClick={() => changeMonth(1)} className="px-3 py-1.5 text-sm font-medium text-gray-600 dark:text-gray-300 bg-gray-100 dark:bg-gray-800 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-700">下个月</button>
               </div>
             </div>
             <div className="grid grid-cols-7 gap-px bg-white/45 dark:bg-[#0f1724]/75 rounded-2xl overflow-hidden border border-white/60 dark:border-[#2b3d54] backdrop-blur-md rei-ring">
@@ -1339,14 +1358,14 @@ export function Tasks() {
                   {day}
                 </div>
               ))}
-              {Array.from({ length: 35 }).map((_, i) => {
-                const d = new Date(selectedDate);
+              {Array.from({ length: getCalendarCells(selectedDate) }).map((_, i) => {
+                const d = parseDateStr(selectedDate);
                 d.setDate(1); // Go to first of month
                 const startDay = d.getDay(); // Day of week of 1st
                 d.setDate(i - startDay + 1); // Calculate actual date for this cell
-                
+
                 const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-                const isCurrentMonth = d.getMonth() === new Date(selectedDate).getMonth();
+                const isCurrentMonth = d.getMonth() === parseDateStr(selectedDate).getMonth();
                 const isToday = dateStr === getTodayStr();
                 const isSelected = dateStr === selectedDate;
                 const dayTasks = tasks.filter(t => t.date === dateStr).sort((a, b) => a.startTime.localeCompare(b.startTime));
@@ -1569,13 +1588,13 @@ export function Tasks() {
                   </div>
                   <div className="space-y-4">
                     {tasks.filter(t => {
-                      const baseDate = new Date(selectedDate).getTime();
-                      const taskDate = new Date(t.date).getTime();
+                      const baseDate = parseDateStr(selectedDate).getTime();
+                      const taskDate = parseDateStr(t.date).getTime();
                       const diff = (taskDate - baseDate) / (1000 * 60 * 60 * 24);
                       return diff >= 0 && diff < 7;
-                    }).sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()).map(task => {
-                      const baseDate = new Date(selectedDate).getTime();
-                      const taskDate = new Date(task.date).getTime();
+                    }).sort((a, b) => parseDateStr(a.date).getTime() - parseDateStr(b.date).getTime()).map(task => {
+                      const baseDate = parseDateStr(selectedDate).getTime();
+                      const taskDate = parseDateStr(task.date).getTime();
                       const offsetDays = (taskDate - baseDate) / (1000 * 60 * 60 * 24);
                       
                       return (

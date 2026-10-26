@@ -527,7 +527,8 @@ export function Dashboard() {
       const d = new Date(); d.setDate(d.getDate() - i);
       const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
       const seconds = dateStr === today ? todayFocusSeconds : (attendanceMap[dateStr]?.totalFocusSeconds || 0);
-      if (seconds > 0) days++; else break;
+      // 今天还没开张不算断签，跳过继续往回看昨天
+      if (seconds > 0) days++; else if (i === 0) continue; else break;
     }
     return days;
   }, [attendanceMap, todayFocusSeconds, today]);

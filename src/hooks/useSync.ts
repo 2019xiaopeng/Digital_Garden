@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 
 type SyncCallback = () => void;
 
@@ -32,6 +32,10 @@ function normalizeAction(payload: unknown): string | null {
 }
 
 export function useSync(action: string, onSync: SyncCallback) {
+  // 回调用 ref 中转：onSync 通常是调用方每次渲染新建的函数，直接进依赖数组会导致每次渲染断开重连
+  const onSyncRef = useRef(onSync);
+  onSyncRef.current = onSync;
+
   useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | null = null;
@@ -41,7 +45,7 @@ export function useSync(action: string, onSync: SyncCallback) {
         .then(({ listen }) => listen<unknown>("sync-update", (event) => {
           const incomingAction = normalizeAction(event.payload);
           if (incomingAction === action) {
-            onSync();
+            onSyncRef.current();
           }
         }))
         .then((dispose) => {
@@ -86,7 +90,7 @@ export function useSync(action: string, onSync: SyncCallback) {
       socket.onmessage = (event) => {
         const incomingAction = normalizeAction(event.data);
         if (incomingAction === action) {
-          onSync();
+          onSyncRef.current();
         }
       };
 
@@ -104,9 +108,8 @@ export function useSync(action: string, onSync: SyncCallback) {
     return () => {
       disposed = true;
       clearReconnect();
-      if (socket && socket.readyState === WebSocket.OPEN) {
-        socket.close();
-      }
+      // 不论 OPEN 还是 CONNECTING 都要关，否则连接中的 socket 会泄漏并继续触发回调
+      socket?.close();
     };
-  }, [action, onSync]);
+  }, [action]);
 }
