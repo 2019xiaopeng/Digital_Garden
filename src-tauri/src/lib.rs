@@ -528,16 +528,6 @@ struct ImageUploadResponse {
     path: String,
 }
 
-fn resolve_week_window(end_date: &str) -> Result<(String, String), String> {
-    let parsed_end = chrono::NaiveDate::parse_from_str(end_date, "%Y-%m-%d")
-        .map_err(|e| format!("Invalid end_date, expected YYYY-MM-DD: {}", e))?;
-    let start = parsed_end - chrono::Duration::days(6);
-    Ok((
-        start.format("%Y-%m-%d").to_string(),
-        parsed_end.format("%Y-%m-%d").to_string(),
-    ))
-}
-
 fn week_bounds(date: chrono::NaiveDate) -> (chrono::NaiveDate, chrono::NaiveDate) {
     let offset = i64::from(date.weekday().num_days_from_monday());
     let start = date - chrono::Duration::days(offset);
@@ -681,10 +671,16 @@ async fn db_batch_create_tasks(pool: &sqlx::SqlitePool, tasks: &[Task]) -> Resul
 }
 
 async fn db_get_weekly_stats(pool: &sqlx::SqlitePool, end_date: &str) -> Result<WeeklyStats, String> {
-    let (start_date, end_date) = resolve_week_window(end_date)?;
+    // 统计窗口与 UI 承诺对齐：所选日期所在周的周一~周日（week_bounds），而非滚动 7 天
+    let parsed = chrono::NaiveDate::parse_from_str(end_date, "%Y-%m-%d")
+        .map_err(|e| format!("Invalid end_date, expected YYYY-MM-DD: {}", e))?;
+    let (week_start, week_end) = week_bounds(parsed);
+    let start_date = week_start.format("%Y-%m-%d").to_string();
+    let end_date = week_end.format("%Y-%m-%d").to_string();
 
+    // 专注时长与 db_get_focus_stats 同口径：番茄钟数据在 focus_runs，focus_sessions 只是自习室打卡
     let total_focus_seconds = sqlx::query_scalar::<_, i64>(
-        "SELECT COALESCE(SUM(total_focus_seconds), 0) FROM focus_sessions WHERE date BETWEEN ? AND ?",
+        "SELECT COALESCE(SUM(CASE WHEN status = 'completed' AND actual_seconds >= 60 THEN actual_seconds ELSE 0 END), 0) FROM focus_runs WHERE date BETWEEN ? AND ?",
     )
     .bind(&start_date)
     .bind(&end_date)
@@ -2366,20 +2362,13 @@ async fn api_notes_file_handler(
         return Err((StatusCode::BAD_REQUEST, "path 参数不能为空".to_string()));
     }
 
-    let full_path = {
-        let as_path = PathBuf::from(path);
-        if as_path.is_absolute() {
-            as_path
-        } else {
-            let root = PathBuf::from(ensure_workspace_dirs(&app).await.map_err(|e| {
-                (StatusCode::INTERNAL_SERVER_ERROR, e)
-            })?);
-            let notes_root = root.join("Notes");
-            let sanitized = sanitize_relative_path(path)
-                .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-            notes_root.join(sanitized)
-        }
-    };
+    // 相对路径一律 sanitize 到 Notes 根内；绝对路径直接拒绝，防止越出 Notes 的任意文件读取
+    let root = PathBuf::from(ensure_workspace_dirs(&app).await.map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, e)
+    })?);
+    let notes_root = root.join("Notes");
+    let sanitized = sanitize_relative_path(path).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let full_path = notes_root.join(sanitized);
 
     let content = fs::read_to_string(&full_path)
         .await
@@ -4336,7 +4325,7 @@ async fn parse_markdown_plan(content: String) -> Result<ImportReport, String> {
                 tasks.push(ImportedTask {
                     title: clean_title,
                     date: if task_date.is_empty() {
-                        chrono_today()
+                        local_today()
                     } else {
                         task_date
                     },
@@ -4459,43 +4448,8 @@ fn extract_iso_date(s: &str) -> Option<String> {
     None
 }
 
-fn chrono_today() -> String {
-    let now = std::time::SystemTime::now();
-    let since_epoch = now
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = since_epoch.as_secs() as i64;
-    let days = secs / 86400;
-    // Simple date calculation
-    let mut y = 1970i32;
-    let mut remaining = days;
-    loop {
-        let days_in_year = if is_leap(y) { 366 } else { 365 };
-        if remaining < days_in_year {
-            break;
-        }
-        remaining -= days_in_year;
-        y += 1;
-    }
-    let month_days = if is_leap(y) {
-        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    } else {
-        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    };
-    let mut m = 0;
-    for (i, &md) in month_days.iter().enumerate() {
-        if remaining < md {
-            m = i + 1;
-            break;
-        }
-        remaining -= md;
-    }
-    let d = remaining + 1;
-    format!("{:04}-{:02}-{:02}", y, m, d)
-}
-
-fn is_leap(y: i32) -> bool {
-    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+fn local_today() -> String {
+    Local::now().format("%Y-%m-%d").to_string()
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -5039,11 +4993,15 @@ async fn reset_all_data(
         let delete_sql = [
             "DELETE FROM ai_messages",
             "DELETE FROM ai_sessions",
+            "DELETE FROM focus_runs",
+            "DELETE FROM focus_templates",
             "DELETE FROM tasks",
             "DELETE FROM focus_sessions",
             "DELETE FROM video_bookmarks",
             "DELETE FROM resources",
             "DELETE FROM questions",
+            "DELETE FROM weekly_review_items",
+            "DELETE FROM wrong_questions",
         ];
 
         for sql in delete_sql {
@@ -5062,14 +5020,16 @@ async fn reset_all_data(
     let notes_path = root.join("Notes");
     let resources_path = root.join("Resources");
     let logs_path = root.join("Logs");
+    let error_images_path = root.join("ErrorImages");
 
     let removed_notes = clear_directory_contents(&notes_path)?;
     let removed_resources = clear_directory_contents(&resources_path)?;
     let removed_logs = clear_directory_contents(&logs_path)?;
+    let removed_error_images = clear_directory_contents(&error_images_path)?;
 
     Ok(format!(
-        "系统重置完成：数据库已清空，Notes 删除 {} 项，Resources 删除 {} 项，Logs 删除 {} 项。",
-        removed_notes, removed_resources, removed_logs
+        "系统重置完成：数据库已清空，Notes 删除 {} 项，Resources 删除 {} 项，Logs 删除 {} 项，ErrorImages 删除 {} 项。",
+        removed_notes, removed_resources, removed_logs, removed_error_images
     ))
 }
 
@@ -5330,6 +5290,16 @@ async fn batch_move_notes_items(
             .to_string();
         let dest = target_dir.join(file_name);
 
+        // fs::rename 会静默覆盖已存在的目标文件，先拒绝；仅大小写改名（同一文件）放行
+        if fs::metadata(&dest).await.is_ok() {
+            let same_file = match (fs::canonicalize(&src).await, fs::canonicalize(&dest).await) {
+                (Ok(a), Ok(b)) => a == b,
+                _ => false,
+            };
+            if !same_file {
+                return Err(format!("目标已存在同名文件：{}", dest.to_string_lossy()));
+            }
+        }
         fs::rename(&src, &dest).await.map_err(|e| {
             format!(
                 "Failed to move item [index={} from={} to={}]: {}",
@@ -5494,6 +5464,16 @@ async fn move_notes_item(
         fs::create_dir_all(parent)
             .await
             .map_err(|e| format!("Failed to create dest dir: {}", e))?;
+    }
+    // fs::rename 会静默覆盖已存在的目标文件，先拒绝；仅大小写改名（同一文件）放行
+    if fs::metadata(&dest).await.is_ok() {
+        let same_file = match (fs::canonicalize(&src).await, fs::canonicalize(&dest).await) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        };
+        if !same_file {
+            return Err(format!("目标已存在同名文件：{}", dest.to_string_lossy()));
+        }
     }
     fs::rename(&src, &dest).await.map_err(|e| {
         format!(
