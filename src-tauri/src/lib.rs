@@ -1,7 +1,8 @@
 use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Multipart, Path as AxumPath, Query, State as AxumState};
+use axum::extract::{Multipart, Path as AxumPath, Query, Request, State as AxumState};
 use axum::http::{header, StatusCode, Uri};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, put};
 use axum::{Json, Router};
@@ -311,6 +312,7 @@ pub struct AppDb {
 }
 
 struct LocalServerRuntime {
+    port: u16,
     handle: tauri::async_runtime::JoinHandle<()>,
     shutdown_tx: Option<oneshot::Sender<()>>,
 }
@@ -318,6 +320,8 @@ struct LocalServerRuntime {
 #[derive(Default)]
 struct LocalServerState {
     runtime: Option<LocalServerRuntime>,
+    /// F1: 当前会话的局域网访问令牌，关闭共享即失效
+    token: Option<String>,
 }
 
 struct SyncHub {
@@ -330,6 +334,51 @@ struct LanAppState {
     db: Arc<Mutex<AppDb>>,
     sync_hub: Arc<SyncHub>,
     workspace_root: String,
+    /// F1: /api/* 访问令牌（浏览器 WebSocket 无法带 header，令牌同时接受查询参数）
+    token: String,
+}
+
+/// shortcut: 非加密强度（RandomState 为 OS 随机种子），局域网个人场景足够；升级时换 getrandom
+fn generate_lan_token() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let a = std::collections::hash_map::RandomState::new().build_hasher().finish();
+    let b = std::collections::hash_map::RandomState::new().build_hasher().finish();
+    format!("{:016x}{:016x}", a, b)
+}
+
+/// F1: /api/* 统一鉴权中间件。静态页面（SPA 壳）不设防；/api/ping 供探活；OPTIONS 预检放行（不携带凭据，真正的跨域请求仍需令牌）。
+async fn lan_auth_middleware(
+    AxumState(state): AxumState<LanAppState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let path = req.uri().path();
+    let is_preflight = req.method() == axum::http::Method::OPTIONS;
+    if !is_preflight && path.starts_with("/api/") && path != "/api/ping" {
+        let provided = req
+            .headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .map(|s| s.trim().to_string())
+            .or_else(|| {
+                req.uri().query().and_then(|q| {
+                    q.split('&').find_map(|pair| {
+                        let (k, v) = pair.split_once('=')?;
+                        if k == "token" {
+                            Some(v.to_string())
+                        } else {
+                            None
+                        }
+                    })
+                })
+            });
+        let ok = provided.map(|t| t == state.token).unwrap_or(false);
+        if !ok {
+            return (StatusCode::UNAUTHORIZED, "缺少或错误的局域网访问令牌").into_response();
+        }
+    }
+    next.run(req).await
 }
 
 fn emit_sync_action(sync_hub: &SyncHub, action: &str) {
@@ -2353,6 +2402,8 @@ async fn toggle_local_server(
 
     let previous_runtime = {
         let mut state = server_state.lock().await;
+        // 复审修复：停服即失效令牌，不等 graceful shutdown（否则长连 ws 会让关闭永久挂起）
+        state.token = None;
         state.runtime.take()
     };
 
@@ -2360,7 +2411,8 @@ async fn toggle_local_server(
         if let Some(shutdown_tx) = runtime.shutdown_tx.take() {
             let _ = shutdown_tx.send(());
         }
-        let _ = runtime.handle.await;
+        // 复审修复：不无限等待 in-flight 连接排空（/api/ws 长连接永不结束）；2 秒兜底后旧任务自行收尾
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), runtime.handle).await;
     }
 
     if !enable {
@@ -2372,10 +2424,12 @@ async fn toggle_local_server(
         .ok_or_else(|| "数据库尚未就绪，请稍后重试。".to_string())?;
     let shared_db = db_state.inner().clone();
     let workspace_root = ensure_workspace_dirs(&app).await?;
+    let lan_token = generate_lan_token();
     let lan_state = LanAppState {
         db: shared_db,
         sync_hub: sync_hub.inner().clone(),
         workspace_root,
+        token: lan_token.clone(),
     };
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
@@ -2444,6 +2498,10 @@ async fn toggle_local_server(
             }),
         )
         .fallback(embedded_static_handler)
+        .layer(middleware::from_fn_with_state(
+            lan_state.clone(),
+            lan_auth_middleware,
+        ))
         .layer(CorsLayer::permissive())
         .with_state(lan_state);
 
@@ -2460,12 +2518,40 @@ async fn toggle_local_server(
     {
         let mut state = server_state.lock().await;
         state.runtime = Some(LocalServerRuntime {
+            port,
             handle,
             shutdown_tx: Some(shutdown_tx),
         });
+        state.token = Some(lan_token);
     }
 
     Ok(format!("局域网共享服务已启动，端口 {}", port))
+}
+
+#[derive(Debug, Serialize)]
+struct LanShareInfo {
+    enabled: bool,
+    port: u16,
+    token: String,
+}
+
+#[tauri::command]
+async fn get_lan_share_info(
+    server_state: State<'_, Arc<Mutex<LocalServerState>>>,
+) -> Result<LanShareInfo, String> {
+    let state = server_state.lock().await;
+    match (&state.runtime, &state.token) {
+        (Some(runtime), Some(token)) => Ok(LanShareInfo {
+            enabled: true,
+            port: runtime.port,
+            token: token.clone(),
+        }),
+        _ => Ok(LanShareInfo {
+            enabled: false,
+            port: 0,
+            token: String::new(),
+        }),
+    }
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -5368,6 +5454,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_local_ip,
             toggle_local_server,
+            get_lan_share_info,
             get_tasks,
             get_tasks_by_date,
             create_task,
