@@ -3,13 +3,11 @@ import {
   AlarmClock,
   Bell,
   Bot,
-  CheckCircle2,
   Trash2,
   Eye,
   EyeOff,
   ExternalLink,
   FolderOpen,
-  FolderSearch,
   Gauge,
   HardDrive,
   Image,
@@ -268,16 +266,6 @@ export function Settings() {
     localStorage.setItem("eva.ai.visionModel", settings.aiVisionModel);
     localStorage.setItem("eva.ai.visionMode", settings.aiVisionMode);
 
-    if (settings.docRoot.trim() && settings.docRoot !== initialDocRoot) {
-      try {
-        const { invoke } = await import("@tauri-apps/api/core");
-        await invoke("initialize_workspace_at", { rootPath: settings.docRoot.trim() });
-        setInitialDocRoot(settings.docRoot);
-      } catch (error) {
-        console.error("[Settings] Failed to initialize workspace at new docRoot:", error);
-      }
-    }
-
     setSaved(true);
     setTimeout(() => setSaved(false), 1200);
   };
@@ -381,22 +369,25 @@ export function Settings() {
     await executeResetAllData();
   };
 
-  const handleChangeRoot = async () => {
+  // ADD-P0-1: 一键备份工作区（数据库 VACUUM 快照 + 数据目录），替代原 Tailscale 占位面板
+  const [backupLoading, setBackupLoading] = useState(false);
+  const [backupResult, setBackupResult] = useState<string | null>(null);
+  const handleBackup = async () => {
+    setBackupLoading(true);
+    setBackupResult(null);
+    setActionError(null);
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
-      const picked = await open({ directory: true, multiple: false, title: "选择文档根目录" });
-      if (picked && typeof picked === "string") {
-        const next = { ...settings, docRoot: picked };
-        setSettings(next);
-        updateSettings(next);
-        const { invoke } = await import("@tauri-apps/api/core");
-        await invoke("initialize_workspace_at", { rootPath: picked.trim() });
-        setInitialDocRoot(picked);
-        setSaved(true);
-        setTimeout(() => setSaved(false), 1200);
-      }
-    } catch (e) {
-      console.warn("Directory picker failed:", e);
+      const picked = await open({ directory: true, multiple: false, title: "选择备份保存位置" });
+      if (!picked || typeof picked !== "string") return;
+      const { invoke } = await import("@tauri-apps/api/core");
+      const dest = await invoke<string>("backup_workspace", { destDir: picked });
+      setBackupResult(dest);
+    } catch (error) {
+      console.error("[Settings] backup failed:", error);
+      setActionError(`备份失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setBackupLoading(false);
     }
   };
 
@@ -591,15 +582,10 @@ export function Settings() {
               <FolderOpen className="w-4 h-4 text-gray-400 flex-shrink-0" />
               <span className="flex-1 text-sm text-gray-900 dark:text-white truncate">{settings.docRoot || "未设置"}</span>
             </button>
-            <button onClick={handleChangeRoot} className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-[#88B5D3] hover:bg-[#6f9fbe] text-white text-sm font-semibold shadow-sm transition-colors">
-              <FolderSearch className="w-4 h-4" /> 更改目录
-            </button>
-          </div>
-        </div>
-        <div className="flex flex-wrap gap-3">
-          <button onClick={handleOpenRoot} className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl border border-emerald-300/60 text-emerald-600 dark:text-emerald-300 hover:bg-emerald-500/10 text-sm font-semibold transition-colors">
-            <ExternalLink className="w-4 h-4" /> 在资源管理器中打开
+            <button onClick={handleOpenRoot} className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl border border-emerald-300/60 text-emerald-600 dark:text-emerald-300 hover:bg-emerald-500/10 text-sm font-semibold transition-colors">
+              <ExternalLink className="w-4 h-4" /> 在资源管理器中打开
           </button>
+          </div>
         </div>
       </div>
       <div className="glass-card rounded-2xl p-5">
@@ -693,12 +679,16 @@ export function Settings() {
       </div>
 
       <div className="glass-card rounded-2xl p-5">
-        <p className="text-sm font-semibold text-gray-900 dark:text-white">Tailscale 状态</p>
-        <div className="mt-2 flex items-center gap-2 text-sm text-gray-600 dark:text-gray-300">
-          <CheckCircle2 className="w-4 h-4 text-emerald-500" />
-          状态：未检测（占位）
-        </div>
-        <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">MagicDNS: eva-desktop.tailnet-xxxx.ts.net:9527（占位）</p>
+        <p className="text-sm font-semibold text-gray-900 dark:text-white">一键备份</p>
+        <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">将整个 EVA_Knowledge_Base（数据库一致性快照 + 笔记/资源/日志/错题图）导出到你选择的文件夹。</p>
+        <button
+          onClick={handleBackup}
+          disabled={backupLoading}
+          className="mt-3 inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-[#88B5D3] hover:bg-[#6f9fbe] disabled:opacity-60 text-white text-sm font-semibold transition-colors"
+        >
+          <HardDrive className="w-4 h-4" /> {backupLoading ? "备份中…" : "选择目录并备份"}
+        </button>
+        {backupResult && <p className="mt-2 text-xs text-emerald-500 break-all">已备份到：{backupResult}</p>}
       </div>
     </section>
   );

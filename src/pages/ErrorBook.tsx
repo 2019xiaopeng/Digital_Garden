@@ -15,12 +15,9 @@ import {
   type WrongQuestionStats,
 } from "../utils/apiBridge";
 import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import remarkMath from "remark-math";
-import rehypeKatex from "rehype-katex";
-import rehypeHighlight from "rehype-highlight";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { extractQuestionType, extractReviewSummary, formatQuestionLayout, normalizeMathDelimiters } from "../lib/markdown";
+import { extractQuestionType, extractReviewSummary, formatQuestionLayout, normalizeMathDelimiters, questionRemarkPlugins, questionRehypePlugins } from "../lib/markdown";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 import { useSync } from "../hooks/useSync";
 import "katex/dist/katex.min.css";
 
@@ -61,6 +58,29 @@ export function ErrorBook() {
   const [detail, setDetail] = useState<WrongQuestion | null>(null);
   const [showSolution, setShowSolution] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
+  // A3-P0-1: 破坏性操作走确认框；A3-P0-2: 自动归档与失败需要可见反馈
+  const [archiveTarget, setArchiveTarget] = useState<WrongQuestion | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<WrongQuestion | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!notice) return;
+    const timer = setTimeout(() => setNotice(null), 4500);
+    return () => clearTimeout(timer);
+  }, [notice]);
+
+  const runToggle = async (itemId: string, done: boolean, q: WrongQuestion | null) => {
+    try {
+      await toggleWeeklyReviewItemDone(itemId, done);
+      if (done && q && q.review_count + 1 >= 4) {
+        setNotice(`「${extractReviewSummary(q.question_content, q.ai_solution, 24)}」已复习满 4 次，自动归档（可在「查看已归档」中找到）`);
+      }
+      await loadData();
+    } catch (error) {
+      console.error("[ErrorBook] toggle weekly item failed:", error);
+      setNotice("操作失败，请重试");
+    }
+  };
   const [createForm, setCreateForm] = useState({
     subject: "数学",
     questionType: "",
@@ -136,13 +156,34 @@ export function ErrorBook() {
 
   useEffect(() => {
     const questionId = (searchParams.get("questionId") || "").trim();
-    if (!questionId || list.length === 0) return;
+    if (!questionId || detail?.id === questionId) return;
     const target = list.find((item) => item.id === questionId);
     if (target) {
       setDetail(target);
       setShowSolution(false);
+      return;
     }
-  }, [searchParams, list]);
+    // A3-P0-3: 目标题可能被筛选/归档而不在当前列表——到另一归档态回退查找，点了不再没反应
+    let cancelled = false;
+    fetchWrongQuestions({ is_archived: showArchived ? 0 : 1 })
+      .then((rows) => {
+        if (cancelled) return;
+        const fallback = rows.find((row) => row.id === questionId);
+        if (fallback) {
+          setDetail(fallback);
+          setShowSolution(false);
+        } else {
+          // 已被删除的错题（周清单曾残留）：给出反馈并清掉脏参数，终止重复回退请求
+          setNotice("未找到该错题（可能已被删除）");
+          const next = new URLSearchParams(searchParams);
+          next.delete("questionId");
+          setSearchParams(next, { replace: true });
+        }
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams, list, showArchived]);
 
   const closeDetail = () => {
     setDetail(null);
@@ -177,6 +218,10 @@ export function ErrorBook() {
         </div>
       </header>
 
+      {notice && (
+        <p className="glass-card rounded-2xl px-4 py-2.5 text-sm text-[#88B5D3]">{notice}</p>
+      )}
+
       <section className="glass-card rounded-2xl p-4 grid grid-cols-1 md:grid-cols-3 gap-3">
         <label className="space-y-1">
           <span className="text-xs font-semibold text-gray-500">学科筛选</span>
@@ -206,6 +251,10 @@ export function ErrorBook() {
           />
         </div>
       </section>
+
+      {showArchived && (
+        <p className="text-xs text-gray-400 dark:text-gray-500">当前列表为已归档错题；下方三张统计卡为进行中错题口径。</p>
+      )}
 
       <section className="grid grid-cols-1 md:grid-cols-3 gap-3">
         <div className="glass-card rounded-2xl p-4">总计 <span className="font-bold text-[#88B5D3]">{stats?.total_count || 0}</span> 道</div>
@@ -239,10 +288,7 @@ export function ErrorBook() {
                   <input
                     type="checkbox"
                     checked={item.status === "done"}
-                    onChange={async (e) => {
-                      await toggleWeeklyReviewItemDone(item.id, e.target.checked);
-                      await loadData();
-                    }}
+                    onChange={(e) => { void runToggle(item.id, e.target.checked, q); }}
                   />
                   <button
                     className="text-left flex-1 hover:text-[#88B5D3] leading-relaxed break-words"
@@ -254,6 +300,9 @@ export function ErrorBook() {
                     }}
                   >
                     {q ? extractReviewSummary(q.question_content, q.ai_solution, 48) : item.title_snapshot}
+                    {q && item.status !== "done" && (
+                      <span className="ml-2 text-xs text-gray-400">第 {Math.min(q.review_count + 1, 4)}/4 次</span>
+                    )}
                   </button>
                 </label>
               );
@@ -275,15 +324,12 @@ export function ErrorBook() {
                 <h3 className="font-semibold text-gray-900 dark:text-white leading-relaxed break-words">[{item.subject}] {extractReviewSummary(item.question_content, item.ai_solution, 42)}</h3>
                 <span className="text-xs text-gray-500">{masteryLabel(item.mastery_level)}</span>
               </div>
-              <p className="mt-2 text-xs text-gray-500">状态：{weekly?.status || "未加入本周清单"} · 难度 {item.difficulty} 星</p>
+              <p className="mt-2 text-xs text-gray-500">状态：{weekly?.status || "未加入本周清单"} · 已复习 {item.review_count}/4 次 · 难度 {item.difficulty} 星</p>
               <div className="mt-3 flex flex-wrap gap-2">
-                <button onClick={() => { setDetail(item); setShowSolution(false); navigate(`/error-book?questionId=${encodeURIComponent(item.id)}${showArchived ? "" : "&mode=review"}`); }} className="px-3 py-1.5 text-xs rounded-lg border border-[#88B5D3]/30 text-[#88B5D3] hover:bg-[#88B5D3]/10">查看</button>
+                <button onClick={() => { setDetail(item); setShowSolution(false); navigate(`/error-book?questionId=${encodeURIComponent(item.id)}`); }} className="px-3 py-1.5 text-xs rounded-lg border border-[#88B5D3]/30 text-[#88B5D3] hover:bg-[#88B5D3]/10">查看</button>
                 {!showArchived && weekly && (
                   <button
-                    onClick={async () => {
-                      await toggleWeeklyReviewItemDone(weekly.id, weekly.status !== "done");
-                      await loadData();
-                    }}
+                    onClick={() => { void runToggle(weekly.id, weekly.status !== "done", item); }}
                     className="px-3 py-1.5 text-xs rounded-lg border border-gray-200/80 dark:border-[#30435c]"
                   >
                     {weekly.status === "done" ? "标记未完成" : "标记完成"}
@@ -291,20 +337,14 @@ export function ErrorBook() {
                 )}
                 {!showArchived ? (
                   <button
-                    onClick={async () => {
-                      await archiveWrongQuestion(item.id);
-                      await loadData();
-                    }}
+                    onClick={() => setArchiveTarget(item)}
                     className="inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-lg border border-red-300/60 text-red-500 hover:bg-red-500/10"
                   >
                     <Archive className="w-3.5 h-3.5" /> 归档
                   </button>
                 ) : (
                   <button
-                    onClick={async () => {
-                      await deleteWrongQuestion(item.id);
-                      await loadData();
-                    }}
+                    onClick={() => setDeleteTarget(item)}
                     className="inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-lg border border-red-400/70 text-red-600 hover:bg-red-500/10"
                   >
                     <Trash2 className="w-3.5 h-3.5" /> 删除
@@ -337,8 +377,8 @@ export function ErrorBook() {
             )}
             <article className="prose prose-sm dark:prose-invert max-w-none">
               <ReactMarkdown
-                remarkPlugins={[remarkGfm, remarkMath]}
-                rehypePlugins={[rehypeKatex, rehypeHighlight]}
+                remarkPlugins={questionRemarkPlugins}
+                rehypePlugins={questionRehypePlugins}
                 components={{
                   img: ({ src, alt }) => {
                     const rawSrc = String(src || "");
@@ -375,8 +415,8 @@ export function ErrorBook() {
             {showSolution && (
               <article className="prose prose-sm dark:prose-invert max-w-none">
                 <ReactMarkdown
-                  remarkPlugins={[remarkGfm, remarkMath]}
-                  rehypePlugins={[rehypeKatex, rehypeHighlight]}
+                  remarkPlugins={questionRemarkPlugins}
+                  rehypePlugins={questionRehypePlugins}
                   components={{
                     img: ({ src, alt }) => {
                       const rawSrc = String(src || "");
@@ -408,7 +448,8 @@ export function ErrorBook() {
 
       {showCreate && (
         <div className="fixed inset-0 z-[120] flex items-center justify-center p-4">
-          <div className="absolute inset-0 bg-black/55" onClick={() => setShowCreate(false)} />
+          {/* A3-P0-1: 点遮罩不再静默丢弃已填表单，只能通过下方按钮关闭 */}
+          <div className="absolute inset-0 bg-black/55" />
           <div className="relative w-full max-w-2xl rounded-3xl bg-white dark:bg-[#0f1826] border border-[#88B5D3]/25 p-6 space-y-3">
             <h3 className="text-lg font-semibold text-gray-900 dark:text-white">手动新增错题</h3>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -427,32 +468,37 @@ export function ErrorBook() {
                 onClick={async () => {
                   if (!createForm.question.trim() || !createForm.solution.trim()) return;
                   const now = new Date().toISOString();
-                  await createWrongQuestion({
-                    id: "",
-                    subject: createForm.subject,
-                    tags_json: JSON.stringify(createForm.tags.split(",").map((x) => x.trim()).filter(Boolean)),
-                    question_content: createForm.question,
-                    question_image_path: null,
-                    ai_solution: createForm.questionType.trim()
-                      ? `题型总结：${createForm.questionType.trim()}\n\n${createForm.solution}`
-                      : createForm.solution,
-                    user_note: createForm.note || null,
-                    source: "manual",
-                    ai_session_id: null,
-                    ai_message_ids_json: null,
-                    difficulty: createForm.difficulty,
-                    mastery_level: 0,
-                    review_count: 0,
-                    next_review_date: null,
-                    last_review_date: null,
-                    ease_factor: 2.5,
-                    interval_days: 1,
-                    is_archived: 0,
-                    created_at: now,
-                    updated_at: now,
-                  }, true);
-                  setShowCreate(false);
-                  await loadData();
+                  try {
+                    await createWrongQuestion({
+                      id: "",
+                      subject: createForm.subject,
+                      tags_json: JSON.stringify(createForm.tags.split(",").map((x) => x.trim()).filter(Boolean)),
+                      question_content: createForm.question,
+                      question_image_path: null,
+                      ai_solution: createForm.questionType.trim()
+                        ? `题型总结：${createForm.questionType.trim()}\n\n${createForm.solution}`
+                        : createForm.solution,
+                      user_note: createForm.note || null,
+                      source: "manual",
+                      ai_session_id: null,
+                      ai_message_ids_json: null,
+                      difficulty: createForm.difficulty,
+                      mastery_level: 0,
+                      review_count: 0,
+                      next_review_date: null,
+                      last_review_date: null,
+                      ease_factor: 2.5,
+                      interval_days: 1,
+                      is_archived: 0,
+                      created_at: now,
+                      updated_at: now,
+                    }, true);
+                    setShowCreate(false);
+                    await loadData();
+                  } catch (error) {
+                    console.error("[ErrorBook] create wrong question failed:", error);
+                    setNotice("保存失败，请重试");
+                  }
                 }}
                 className="px-4 py-2 rounded-xl bg-[#88B5D3] hover:bg-[#6f9fbe] text-white text-sm font-semibold"
               >保存</button>
@@ -460,6 +506,47 @@ export function ErrorBook() {
           </div>
         </div>
       )}
+
+      <ConfirmDialog
+        open={Boolean(archiveTarget)}
+        title="归档这道错题？"
+        description="归档后不再出现在复习清单，可随时在「查看已归档」中找到。"
+        confirmText="归档"
+        onCancel={() => setArchiveTarget(null)}
+        onConfirm={async () => {
+          const target = archiveTarget;
+          setArchiveTarget(null);
+          if (!target) return;
+          try {
+            await archiveWrongQuestion(target.id);
+            await loadData();
+          } catch (error) {
+            console.error("[ErrorBook] archive failed:", error);
+            setNotice("归档失败，请重试");
+          }
+        }}
+      />
+
+      <ConfirmDialog
+        open={Boolean(deleteTarget)}
+        variant="danger"
+        title="永久删除这道错题？"
+        description="删除后无法恢复，题目、解析与图片关联将一并清除。"
+        confirmText="永久删除"
+        onCancel={() => setDeleteTarget(null)}
+        onConfirm={async () => {
+          const target = deleteTarget;
+          setDeleteTarget(null);
+          if (!target) return;
+          try {
+            await deleteWrongQuestion(target.id);
+            await loadData();
+          } catch (error) {
+            console.error("[ErrorBook] delete failed:", error);
+            setNotice("删除失败，请重试");
+          }
+        }}
+      />
     </div>
   );
 }

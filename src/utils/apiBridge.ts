@@ -2,24 +2,6 @@ import type { LegacyTask } from "../lib/dataService";
 import { getSettings } from "../lib/settings";
 import { convertFileSrc } from "@tauri-apps/api/core";
 
-export type QuizQuestion = {
-  id: string;
-  subject: string;
-  type: string;
-  stem: string;
-  options: string | null;
-  answer: string;
-  explanation: string;
-  source_files: string;
-  difficulty: number;
-  created_at: string;
-  next_review: string | null;
-  review_count: number;
-  correct_count: number;
-  ease_factor: number;
-  interval: number;
-};
-
 type DbTaskRow = {
   id: string;
   title: string;
@@ -37,11 +19,6 @@ type DbTaskRow = {
   updated_at: string;
 };
 
-type FetchQuizQuestionsOptions = {
-  mode: "all" | "due";
-  subject?: string;
-};
-
 export type NotesFsNode = {
   name: string;
   path: string;
@@ -57,11 +34,6 @@ export type ResourceItem = {
   subject: string;
   size_bytes: number;
   created_at: string;
-};
-
-export type DashboardStats = {
-  tasks: LegacyTask[];
-  dueCount: number;
 };
 
 export type WeeklyStats = {
@@ -136,7 +108,7 @@ export type FocusStatsSlice = {
 export type FocusStatsResult = {
   start_date: string;
   end_date: string;
-  dimension: "tag" | "template" | "timer_type";
+  dimension: "tag" | "template" | "timer_type" | "date";
   summary: FocusStatsSummary;
   slices: FocusStatsSlice[];
 };
@@ -144,7 +116,7 @@ export type FocusStatsResult = {
 export type FetchFocusStatsOptions = {
   startDate?: string;
   endDate?: string;
-  dimension?: "tag" | "template" | "timer_type";
+  dimension?: "tag" | "template" | "timer_type" | "date";
 };
 
 export type WrongQuestion = {
@@ -420,67 +392,6 @@ export async function removeTask(id: string): Promise<void> {
     const text = await response.text().catch(() => "");
     throw new Error(`HTTP 请求失败 (${response.status}): ${text || response.statusText}`);
   }
-}
-
-export async function fetchQuizQuestions(options: FetchQuizQuestionsOptions): Promise<QuizQuestion[]> {
-  if (isTauriRuntime()) {
-    const invoke = await getInvoke();
-    if (options.mode === "due") {
-      return await invoke<QuizQuestion[]>("get_due_questions", {
-        subject: options.subject,
-      });
-    }
-    return await invoke<QuizQuestion[]>("get_questions");
-  }
-
-  const endpoint = options.mode === "due"
-    ? `/api/quiz/due${options.subject ? `?subject=${encodeURIComponent(options.subject)}` : ""}`
-    : "/api/quiz/all";
-
-  const response = await fetch(`${getLanBaseUrl()}${endpoint}`);
-  if (!response.ok) {
-    const text = await response.text().catch(() => "");
-    throw new Error(`HTTP 请求失败 (${response.status}): ${text || response.statusText}`);
-  }
-
-  const data = (await response.json()) as QuizQuestion[];
-  return Array.isArray(data) ? data : [];
-}
-
-export async function createQuizQuestion(question: QuizQuestion): Promise<void> {
-  if (!isTauriRuntime()) {
-    throw new Error("当前 Web 模式暂不支持录题，请在桌面端执行。");
-  }
-  const invoke = await getInvoke();
-  await invoke("create_question", { question });
-}
-
-export async function answerQuizQuestion(id: string, isCorrect: boolean): Promise<void> {
-  if (!isTauriRuntime()) {
-    throw new Error("当前 Web 模式暂不支持判题写回，请在桌面端执行。");
-  }
-  const invoke = await getInvoke();
-  await invoke("answer_question", { id, isCorrect });
-}
-
-export async function readLocalResourceText(path: string): Promise<string> {
-  if (!isTauriRuntime()) {
-    throw new Error("当前 Web 模式暂不支持读取本地资源文件。");
-  }
-  const invoke = await getInvoke();
-  return await invoke<string>("read_local_file_text", { path });
-}
-
-export async function fetchDashboardStats(): Promise<DashboardStats> {
-  const [tasks, dueRows] = await Promise.all([
-    fetchTasks(),
-    fetchQuizQuestions({ mode: "due" }).catch(() => []),
-  ]);
-
-  return {
-    tasks,
-    dueCount: dueRows.length,
-  };
 }
 
 export async function fetchNotesTree(): Promise<NotesFsNode[]> {

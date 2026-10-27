@@ -27,7 +27,12 @@ import rehypeHighlight from "rehype-highlight";
 // 模块级常量：插件数组若在 JSX 里内联，每次渲染都是新引用，react-markdown 会重建 processor 并全文重新解析
 const chatRemarkPlugins = [remarkGfm, remarkMath];
 const chatRehypePlugins = [rehypeKatex, rehypeHighlight];
-import { useKnowledgeSelection } from "../context/KnowledgeSelectionContext";
+// F58: 原全局 KnowledgeSelectionContext 只有 Notes 一个消费者，内联为本地状态
+type SelectedKnowledgeFile = {
+  id: string;
+  name: string;
+  path?: string;
+};
 import { chatCompletion, visionChatCompletion } from "../utils/aiClient";
 import { DailyLogService } from "../lib/dataService";
 import { extractQuestionType, formatQuestionLayout, normalizeMathDelimiters } from "../lib/markdown";
@@ -144,7 +149,7 @@ export function Notes() {
   const [fileContent, setFileContent] = useState<string | null>(null);
   const [isLoadingContent, setIsLoadingContent] = useState(false);
   const [uploadToast, setUploadToast] = useState<{ type: "success" | "error"; message: string } | null>(null);
-  const { selected_knowledge_files, setSelectedKnowledgeFiles } = useKnowledgeSelection();
+  const [selected_knowledge_files, setSelectedKnowledgeFiles] = useState<SelectedKnowledgeFile[]>([]);
 
   const activeSession = chatSessions.find(session => session.id === activeSessionId) || null;
   const renameTargetSession = chatSessions.find(session => session.id === chatSessionToRenameId) || null;

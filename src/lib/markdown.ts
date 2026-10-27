@@ -1,3 +1,12 @@
+import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
+import rehypeHighlight from "rehype-highlight";
+
+// A3-P0-4: 全应用统一的 Markdown 渲染插件常量（内联数组会让 react-markdown 每次渲染重建 processor）
+export const questionRemarkPlugins = [remarkGfm, remarkMath];
+export const questionRehypePlugins = [rehypeKatex, rehypeHighlight];
+
 export function normalizeMathDelimiters(input: string): string {
   if (!input) return "";
   let text = input.replace(/\r\n/g, "\n");

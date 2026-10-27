@@ -3,9 +3,7 @@ import { Loader2, Sparkles, Target } from "lucide-react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
 import { useNavigate } from "react-router-dom";
 import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import remarkMath from "remark-math";
-import rehypeKatex from "rehype-katex";
+import { questionRemarkPlugins, questionRehypePlugins } from "../lib/markdown";
 import {
   fetchWeeklyReviewItems,
   fetchWeeklyStats,
@@ -178,7 +176,7 @@ export function WeeklyReview() {
             <p className="mt-2 text-4xl font-bold text-gray-900 dark:text-white tracking-tight">
               {loading ? "..." : `${completion.toFixed(1)}%`}
             </p>
-            <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">done / total（过去 7 天）</p>
+            <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">done / total（本周一~周日）</p>
           </div>
           <div className="w-24 h-24 rounded-full" style={{
             background: `conic-gradient(#FF9900 ${completion}%, rgba(136,181,211,0.25) ${completion}% 100%)`
@@ -204,7 +202,7 @@ export function WeeklyReview() {
               return (
                 <div key={item.id} className="flex items-center gap-2 text-sm">
                   <button
-                    onClick={() => navigate(`/error-book?questionId=${encodeURIComponent(item.wrong_question_id)}&mode=review`)}
+                    onClick={() => navigate(`/error-book?questionId=${encodeURIComponent(item.wrong_question_id)}`)}
                     className={`flex-1 text-left hover:text-[#88B5D3] leading-relaxed break-words ${item.status === "done" ? "line-through text-gray-400 dark:text-gray-500" : ""}`}
                   >
                     {target ? extractReviewSummary(target.question_content, target.ai_solution, 48) : item.title_snapshot}
@@ -212,9 +210,14 @@ export function WeeklyReview() {
                   <button
                     type="button"
                     onClick={async () => {
-                      await toggleWeeklyReviewItemDone(item.id, item.status !== "done");
-                      const items = await fetchWeeklyReviewItems(weekStart);
-                      setWeeklyItems(items);
+                      try {
+                        await toggleWeeklyReviewItemDone(item.id, item.status !== "done");
+                        const items = await fetchWeeklyReviewItems(weekStart);
+                        setWeeklyItems(items);
+                      } catch (e) {
+                        console.error("[WeeklyReview] toggle failed:", e);
+                        setError(`操作失败：${e instanceof Error ? e.message : String(e)}`);
+                      }
                     }}
                     className="px-2 py-1 rounded-md border border-gray-200/80 dark:border-[#30435c] text-xs text-gray-600 dark:text-gray-300"
                   >
@@ -275,7 +278,7 @@ export function WeeklyReview() {
             </div>
           ) : aiResult ? (
             <article className="prose prose-sm max-w-none dark:prose-invert prose-headings:text-gray-900 dark:prose-headings:text-white prose-p:text-gray-700 dark:prose-p:text-gray-300 prose-strong:text-[#FF9900]">
-              <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{normalizeMathDelimiters(aiResult)}</ReactMarkdown>
+              <ReactMarkdown remarkPlugins={questionRemarkPlugins} rehypePlugins={questionRehypePlugins}>{normalizeMathDelimiters(aiResult)}</ReactMarkdown>
             </article>
           ) : (
             <div className="h-full flex items-center text-sm text-gray-500 dark:text-gray-400">

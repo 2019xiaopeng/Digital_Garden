@@ -9,7 +9,6 @@ import { Link } from "react-router-dom";
 import { Layout } from "./components/Layout";
 import { Dashboard } from "./pages/Dashboard";
 import { isTauriAvailable } from "./lib/dataService";
-import { KnowledgeSelectionProvider } from "./context/KnowledgeSelectionContext";
 import { getSettings, saveSettings } from "./lib/settings";
 
 // 首页 Dashboard 保持静态；其余页面懒加载，recharts/katex/highlight.js 不再挤进首屏
@@ -72,25 +71,23 @@ export default function App() {
   }, []);
 
   return (
-    <KnowledgeSelectionProvider>
-      <BrowserRouter>
-        <Suspense fallback={<div className="p-8 text-sm text-gray-400 dark:text-gray-500">加载中…</div>}>
-        <Routes>
-          <Route path="/" element={<Layout />}>
-            <Route index element={<Dashboard />} />
-            <Route path="blog" element={<Blog />} />
-            <Route path="blog/:id" element={<BlogPost />} />
-            <Route path="notes" element={<Notes />} />
-            <Route path="resources" element={<Resources />} />
-            <Route path="tasks" element={<Tasks />} />
-            <Route path="weekly" element={<WeeklyReview />} />
-            <Route path="focus-insights" element={<FocusInsights />} />
-            <Route path="error-book" element={<ErrorBook />} />
-            <Route path="settings" element={<SettingsDesktopOnly />} />
-          </Route>
-        </Routes>
-        </Suspense>
-      </BrowserRouter>
-    </KnowledgeSelectionProvider>
+    <BrowserRouter>
+      <Suspense fallback={<div className="p-8 text-sm text-gray-400 dark:text-gray-500">加载中…</div>}>
+      <Routes>
+        <Route path="/" element={<Layout />}>
+          <Route index element={<Dashboard />} />
+          <Route path="blog" element={<Blog />} />
+          <Route path="blog/:id" element={<BlogPost />} />
+          <Route path="notes" element={<Notes />} />
+          <Route path="resources" element={<Resources />} />
+          <Route path="tasks" element={<Tasks />} />
+          <Route path="weekly" element={<WeeklyReview />} />
+          <Route path="focus-insights" element={<FocusInsights />} />
+          <Route path="error-book" element={<ErrorBook />} />
+          <Route path="settings" element={<SettingsDesktopOnly />} />
+        </Route>
+      </Routes>
+      </Suspense>
+    </BrowserRouter>
   );
 }

@@ -5,7 +5,7 @@ import { cn } from "../lib/utils";
 import { FocusService } from "../lib/dataService";
 import type { LegacyTask } from "../lib/dataService";
 import {
-  fetchDashboardStats,
+  fetchTasks,
   fetchFocusStats,
   fetchFocusTemplates,
   fetchWrongQuestionStats,
@@ -149,7 +149,7 @@ const PieChart = ({ data }: { data: { label: string; value: number; color: strin
 };
 
 /* ─── 30-Day Heatmap Grid (GitHub-style) ─── */
-const HeatmapGrid = ({ attendanceMap, todayFocusSeconds }: { attendanceMap: AttendanceMap; todayFocusSeconds: number }) => {
+const HeatmapGrid = ({ focusRunsDaily }: { focusRunsDaily: Record<string, number> }) => {
   const today = getTodayStr();
   const cells = useMemo(() => {
     const list: { date: string; hours: number; isToday: boolean }[] = [];
@@ -157,11 +157,11 @@ const HeatmapGrid = ({ attendanceMap, todayFocusSeconds }: { attendanceMap: Atte
       const d = new Date();
       d.setDate(d.getDate() - i);
       const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-      const seconds = dateStr === today ? todayFocusSeconds : (attendanceMap[dateStr]?.totalFocusSeconds || 0);
+      const seconds = focusRunsDaily[dateStr] || 0;
       list.push({ date: dateStr, hours: Number((seconds / 3600).toFixed(1)), isToday: dateStr === today });
     }
     return list;
-  }, [attendanceMap, todayFocusSeconds, today]);
+  }, [focusRunsDaily, today]);
 
   const getHeatColor = (hours: number) => {
     if (hours <= 0) return "bg-gray-100 dark:bg-gray-800/60";
@@ -313,12 +313,13 @@ export function Dashboard() {
   const [wrongQuestionStats, setWrongQuestionStats] = useState<WrongQuestionStats | null>(null);
 
   const refreshTasksSilently = useCallback(() => {
-    fetchDashboardStats()
-      .then((stats) => {
-        setTasks(stats.tasks || []);
+    // FOCUS-P0-3(F56): 只按日期拉今日任务，替代整表拉取
+    fetchTasks(today)
+      .then((rows) => {
+        setTasks(rows);
       })
       .catch(() => {});
-  }, []);
+  }, [today]);
 
   const refreshTemplatesSilently = useCallback(() => {
     fetchFocusTemplates(false)
@@ -330,6 +331,30 @@ export function Dashboard() {
     fetchWrongQuestionStats()
       .then((rows) => setWrongQuestionStats(rows))
       .catch(() => setWrongQuestionStats(null));
+  }, []);
+
+  const [focusRunsDaily, setFocusRunsDaily] = useState<Record<string, number>>({});
+  // FOCUS-P0-2: 全站统一「学习时长」口径——focus_runs 的有效专注（completed 且 ≥60s）
+  const refreshFocusRunsDaily = useCallback(() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 29);
+    const start = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    fetchFocusStats({ startDate: start, endDate: today, dimension: "date" })
+      .then((result) => {
+        const map: Record<string, number> = {};
+        result.slices.forEach((slice) => { map[slice.key] = slice.minutes * 60; });
+        setFocusRunsDaily(map);
+      })
+      .catch(() => {});
+  }, [today]);
+
+  // 复审修复：科目进度面板消费全量任务（与考试目标对比），与今日任务分开取数，
+  // 仅挂载时拉一次，不随窗口聚焦刷新
+  const [allTasks, setAllTasks] = useState<LegacyTask[]>([]);
+  useEffect(() => {
+    fetchTasks()
+      .then((rows) => setAllTasks(rows))
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -345,6 +370,7 @@ export function Dashboard() {
     refreshTasksSilently();
     refreshTemplatesSilently();
     refreshWrongQuestionStats();
+    refreshFocusRunsDaily();
     FocusService.getAll().then((sessions) => {
       const mapped: AttendanceMap = {};
       Object.values(sessions).forEach((s) => {
@@ -363,6 +389,7 @@ export function Dashboard() {
   useSync("SYNC_FOCUS_TEMPLATES", refreshTemplatesSilently);
   useSync("SYNC_WRONG_QUESTIONS", refreshWrongQuestionStats);
   useSync("SYNC_WEEKLY_REVIEW_ITEMS", refreshWrongQuestionStats);
+  useSync("SYNC_FOCUS_RUNS", refreshFocusRunsDaily);
 
   const todayTasks = useMemo(() => tasks.filter((task) => task.date === today), [tasks, today]);
   const pendingTasks = useMemo(() => todayTasks.filter((task) => task.status !== "done"), [todayTasks]);
@@ -526,12 +553,12 @@ export function Dashboard() {
     for (let i = 0; i < 30; i++) {
       const d = new Date(); d.setDate(d.getDate() - i);
       const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-      const seconds = dateStr === today ? todayFocusSeconds : (attendanceMap[dateStr]?.totalFocusSeconds || 0);
+      const seconds = focusRunsDaily[dateStr] || 0;
       // 今天还没开张不算断签，跳过继续往回看昨天
       if (seconds > 0) days++; else if (i === 0) continue; else break;
     }
     return days;
-  }, [attendanceMap, todayFocusSeconds, today]);
+  }, [focusRunsDaily]);
 
   /* ── Weekly total ── */
   const weeklyFocusHours = useMemo(() => {
@@ -539,11 +566,11 @@ export function Dashboard() {
     for (let i = 0; i < 7; i++) {
       const d = new Date(); d.setDate(d.getDate() - i);
       const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-      const seconds = dateStr === today ? todayFocusSeconds : (attendanceMap[dateStr]?.totalFocusSeconds || 0);
+      const seconds = focusRunsDaily[dateStr] || 0;
       total += seconds;
     }
     return Number((total / 3600).toFixed(1));
-  }, [attendanceMap, todayFocusSeconds, today]);
+  }, [focusRunsDaily]);
 
   const focusStats = useMemo(() => {
     let total7 = 0;
@@ -551,16 +578,16 @@ export function Dashboard() {
     for (let i = 0; i < 7; i++) {
       const d = new Date(); d.setDate(d.getDate() - i);
       const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-      const seconds = dateStr === today ? todayFocusSeconds : (attendanceMap[dateStr]?.totalFocusSeconds || 0);
+      const seconds = focusRunsDaily[dateStr] || 0;
       total7 += seconds;
       best = Math.max(best, seconds);
     }
     return {
       avg7h: Number((total7 / 7 / 3600).toFixed(1)),
       bestDayH: Number((best / 3600).toFixed(1)),
-      trend: Number(((todayFocusSeconds / 3600) - (total7 / 7 / 3600)).toFixed(1)),
+      trend: Number((((focusRunsDaily[today] || 0) / 3600) - (total7 / 7 / 3600)).toFixed(1)),
     };
-  }, [attendanceMap, today, todayFocusSeconds]);
+  }, [focusRunsDaily, today]);
 
   /* ── Active task name ── */
   const activeTaskTitle = useMemo(() => {
@@ -603,7 +630,7 @@ export function Dashboard() {
 
     const normalize = (raw: string) => raw.trim().toLowerCase();
 
-    for (const task of tasks) {
+    for (const task of allTasks) {
       const title = normalize(task.title || "");
       const tags = (task.tags || []).map(normalize);
       const mergedText = `${title} ${tags.join(" ")}`;
@@ -645,7 +672,7 @@ export function Dashboard() {
         glowClass: rule.glowClass,
       };
     });
-  }, [examSettings.targetScores, tasks]);
+  }, [examSettings.targetScores, allTasks]);
 
   /* ── Set pomodoro preset ── */
   const setPomodoroPreset = (minutes: number) => {
@@ -810,7 +837,7 @@ export function Dashboard() {
           </div>
           <div className="text-center py-1">
             <div className={cn("text-4xl font-mono font-bold tracking-tighter", isCheckedIn ? "text-emerald-500" : "text-gray-900 dark:text-white")}>{formatClock(todayFocusSeconds)}</div>
-            <p className="text-xs text-gray-400 mt-1">今日累计专注（含本次班次）</p>
+            <p className="text-xs text-gray-400 mt-1">今日自习室在场时长（番茄钟专注另计）</p>
           </div>
           <button onClick={handleCheckInOut} className={cn("w-full py-3 rounded-xl font-bold text-white shadow-lg transition-all active:scale-95 flex items-center justify-center gap-2", isCheckedIn ? "bg-red-500 hover:bg-red-600 shadow-red-500/20" : "bg-emerald-500 hover:bg-emerald-600 shadow-emerald-500/20")}>
             {isCheckedIn ? (<><Square className="w-4 h-4 fill-current" />签退（结束班次）</>) : (<><Play className="w-4 h-4 fill-current" />签到（开始班次）</>)}
@@ -983,7 +1010,7 @@ export function Dashboard() {
             </div>
             <div className="rounded-xl bg-black/[0.03] dark:bg-white/[0.03] border border-white/30 dark:border-[#88B5D3]/10 px-3 py-2 text-center">
               <p className="text-[10px] text-gray-500 uppercase tracking-widest">今日</p>
-              <p className="text-lg font-mono font-bold text-emerald-500">{(todayFocusSeconds / 3600).toFixed(1)}<span className="text-xs text-gray-400 ml-1">h</span></p>
+              <p className="text-lg font-mono font-bold text-emerald-500">{(((focusRunsDaily[today] || 0) / 3600)).toFixed(1)}<span className="text-xs text-gray-400 ml-1">h</span></p>
             </div>
             <div className="rounded-xl bg-black/[0.03] dark:bg-white/[0.03] border border-white/30 dark:border-[#88B5D3]/10 px-3 py-2 text-center">
               <p className="text-[10px] text-gray-500 uppercase tracking-widest">本周</p>
@@ -1010,12 +1037,12 @@ export function Dashboard() {
                   <span>多</span>
                 </div>
               </div>
-              <HeatmapGrid attendanceMap={attendanceMap} todayFocusSeconds={todayFocusSeconds} />
+              <HeatmapGrid focusRunsDaily={focusRunsDaily} />
             </div>
             {/* NERV Stats Grid */}
             <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-2 gap-3 min-w-[180px]">
               <NervDataBlock label="连胜" value={streak} unit="天" accentColor="#FF9900" glowColor="#FF9900" />
-              <NervDataBlock label="今日" value={(todayFocusSeconds / 3600).toFixed(1)} unit="h" accentColor="#34d399" />
+              <NervDataBlock label="今日" value={(((focusRunsDaily[today] || 0) / 3600)).toFixed(1)} unit="h" accentColor="#34d399" />
               <NervDataBlock label="本周" value={weeklyFocusHours} unit="h" accentColor="#88B5D3" />
               <NervDataBlock label="7日均值" value={focusStats.avg7h} unit="h" accentColor="#22c55e" />
             </div>
@@ -1061,7 +1088,7 @@ export function Dashboard() {
           <p>本周新增：<span className="font-semibold text-gray-900 dark:text-white">{wrongQuestionStats?.this_week_new ?? "--"}</span> 道</p>
         </div>
         <div className="mt-4 flex gap-2">
-          <Link to="/error-book?mode=review" className="px-4 py-2 rounded-xl bg-gradient-to-r from-[#2a3b52] to-[#88B5D3] text-white text-sm font-semibold">开始复习</Link>
+          <Link to="/error-book" className="px-4 py-2 rounded-xl bg-gradient-to-r from-[#2a3b52] to-[#88B5D3] text-white text-sm font-semibold">开始复习</Link>
           <Link to="/error-book" className="px-4 py-2 rounded-xl border border-[#88B5D3]/30 text-[#88B5D3] text-sm font-semibold hover:bg-[#88B5D3]/10">查看错题本</Link>
         </div>
       </div>
