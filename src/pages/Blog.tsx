@@ -229,11 +229,8 @@ export function Blog() {
 
   // AI 一键复盘
   const handleAiReview = async () => {
-    const settings = (await import("../lib/settings")).getSettings();
-    // Prefer Kimi key for blog review; fall back to DeepSeek
-    const apiKey = settings.aiKimiKey || settings.aiApiKey || localStorage.getItem("eva.ai.apiKey") || "";
-    if (!apiKey) {
-      alert("请先在设置页配置 AI API Key（支持 DeepSeek / Kimi / MiniMax）");
+    if (!AiService.currentVendorRequest().api_key) {
+      alert("请先在设置页选择 AI 厂商并保存 API Key");
       return;
     }
     setAiReviewLoading(true);
@@ -258,7 +255,7 @@ export function Blog() {
         setPosts((prev) => [review, ...prev]);
       } else {
         // Use AI for richer review
-        const aiContent = await AiService.generateReview(completedToday, focusHours, apiKey);
+        const aiContent = await AiService.generateReview(completedToday, focusHours);
         const post: LegacyPost = {
           id: `ai-review-${Date.now()}`,
           title: `留痕 ${today}`,

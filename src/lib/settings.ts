@@ -1,9 +1,13 @@
+import { DEFAULT_VENDOR_ID, DEFAULT_VISION_VENDOR_ID } from "./vendors";
+
 export type BellType = "beep" | "chime" | "digital";
 
 export interface AppSettings {
-  aiApiKey: string;
-  aiKimiKey: string;
-  aiMinimaxKey: string;
+  aiVendorId: string;
+  /** vendorId -> API Key，各厂商独立 */
+  aiVendorKeys: Record<string, string>;
+  aiModel: string;
+  aiVisionVendorId: string;
   aiVisionModel: string;
   aiVisionMode: "single" | "pipeline";
   lanShareEnabled: boolean;
@@ -27,11 +31,13 @@ export interface AppSettings {
 }
 
 const SETTINGS_KEY = "eva.settings.v1";
+const MIGRATED_FLAG = "eva.settings.v2.migrated";
 
 export const defaultSettings: AppSettings = {
-  aiApiKey: "",
-  aiKimiKey: "",
-  aiMinimaxKey: "",
+  aiVendorId: DEFAULT_VENDOR_ID,
+  aiVendorKeys: {},
+  aiModel: "",
+  aiVisionVendorId: DEFAULT_VISION_VENDOR_ID,
   aiVisionModel: "Pro/Qwen/Qwen2.5-VL-7B-Instruct",
   aiVisionMode: "single",
   lanShareEnabled: false,
@@ -54,12 +60,58 @@ export const defaultSettings: AppSettings = {
   },
 };
 
+/**
+ * A2-P0-1 一次性迁移旧密钥：
+ * - aiKimiKey -> moonshot；aiMinimaxKey -> minimax
+ * - 旧 aiApiKey 历史上在硅基流动/DeepSeek 两头使用过，无法判断归属 -> 双侧复制，
+ *   由设置页「测试连接」分辨（默认只提示、不自动删除，防误删唯一可用 key）
+ * - 清掉 5 个 eva.ai.* 镜像键
+ */
+function migrateLegacySettings(parsed: Partial<AppSettings> & Record<string, unknown>): AppSettings {
+  const legacy = parsed as Record<string, unknown>;
+  const keys: Record<string, string> = { ...(parsed.aiVendorKeys || {}) };
+  const put = (vendorId: string, value: unknown) => {
+    const v = typeof value === "string" ? value.trim() : "";
+    if (v && !keys[vendorId]) keys[vendorId] = v;
+  };
+  put("moonshot", legacy.aiKimiKey);
+  put("minimax", legacy.aiMinimaxKey);
+  const oldMain = typeof legacy.aiApiKey === "string" ? legacy.aiApiKey.trim() : "";
+  const mirror = localStorage.getItem("eva.ai.apiKey")?.trim() || localStorage.getItem("eva.ai.api.key")?.trim() || "";
+  const dualKey = oldMain || mirror;
+  if (dualKey) {
+    put("siliconflow", dualKey);
+    put("deepseek", dualKey);
+  }
+  const model = parsed.aiModel || localStorage.getItem("eva.ai.model")?.trim() || "";
+  const visionModel = parsed.aiVisionModel || localStorage.getItem("eva.ai.visionModel")?.trim() || defaultSettings.aiVisionModel;
+
+  ["eva.ai.apiKey", "eva.ai.api.key", "eva.ai.model", "eva.ai.visionModel", "eva.ai.visionMode"].forEach((k) => localStorage.removeItem(k));
+  localStorage.setItem(MIGRATED_FLAG, "1");
+
+  return {
+    ...defaultSettings,
+    ...parsed,
+    aiVendorKeys: keys,
+    aiModel: model,
+    aiVisionModel: visionModel,
+  };
+}
+
 export function getSettings(): AppSettings {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
-    if (!raw) return defaultSettings;
-    const parsed = JSON.parse(raw) as Partial<AppSettings>;
-    return { ...defaultSettings, ...parsed };
+    if (!raw && localStorage.getItem(MIGRATED_FLAG)) return defaultSettings;
+    const parsed = (raw ? JSON.parse(raw) : {}) as Partial<AppSettings> & Record<string, unknown>;
+    if (!localStorage.getItem(MIGRATED_FLAG)) {
+      // 复审修复：无 eva.settings.v1 的老用户（只在旧 Tasks 页填过 key）也要走迁移，否则密钥"凭空消失"
+      const migrated = migrateLegacySettings(parsed);
+      if (raw || Object.keys(migrated.aiVendorKeys).length > 0 || migrated.aiModel) {
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify(migrated));
+      }
+      return migrated;
+    }
+    return { ...defaultSettings, ...parsed, aiVendorKeys: parsed.aiVendorKeys || {} };
   } catch {
     return defaultSettings;
   }

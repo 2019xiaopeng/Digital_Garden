@@ -145,7 +145,9 @@ export function Tasks() {
   const [aiInput, setAiInput] = useState("");
   const [aiLoading, setAiLoading] = useState(false);
   const [aiParsedTasks, setAiParsedTasks] = useState<ImportedTask[]>([]);
-  const [aiApiKey, setAiApiKey] = useState(() => getSettings().aiApiKey || localStorage.getItem("eva.ai.apiKey") || "");
+  // A2-P0-1: 密钥统一走设置页的厂商注册表，本页不再私藏第二份 key
+  const aiSettings = getSettings();
+  const hasAiKey = Boolean(aiSettings.aiVendorKeys?.[aiSettings.aiVendorId]);
 
   const refreshTasksSilently = useCallback(() => {
     fetchTasks()
@@ -788,11 +790,10 @@ export function Tasks() {
 
   // ── AI Inbox Handlers ──
   const handleAiParse = async () => {
-    if (!aiInput.trim() || !aiApiKey.trim()) return;
-    localStorage.setItem("eva.ai.apiKey", aiApiKey);
+    if (!aiInput.trim() || !hasAiKey) return;
     setAiLoading(true);
     try {
-      const parsed = await AiService.parseNaturalLanguageTasks(aiInput, aiApiKey);
+      const parsed = await AiService.parseNaturalLanguageTasks(aiInput);
       setAiParsedTasks(parsed);
     } catch (e) {
       console.error("AI parse failed:", e);
@@ -1790,17 +1791,8 @@ export function Tasks() {
               <p className="text-sm text-gray-500 dark:text-gray-400">
                 输入自然语言描述你的计划，AI 会自动解析为结构化任务。
               </p>
-              {!aiApiKey && (
-                <div className="space-y-1">
-                  <label className="text-xs font-semibold text-gray-500">DeepSeek API Key</label>
-                  <input
-                    type="password"
-                    value={aiApiKey}
-                    onChange={(e) => setAiApiKey(e.target.value)}
-                    placeholder="sk-..."
-                    className="w-full bg-gray-50 dark:bg-[#111b29] border border-gray-200 dark:border-[#30435c] rounded-xl px-4 py-2.5 text-sm text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-purple-500/25"
-                  />
-                </div>
+              {!hasAiKey && (
+                <p className="text-xs text-amber-500">尚未配置 AI 密钥，请先前往「设置 → AI 助手配置」选择厂商并保存 Key。</p>
               )}
               <div>
                 <textarea
@@ -1809,7 +1801,7 @@ export function Tasks() {
                   placeholder="例如：明天上午复习高数极限部分，下周一开始每天背50个单词，后天交操作系统实验报告很急..."
                   className="w-full h-32 bg-gray-50 dark:bg-[#111b29] border border-gray-200 dark:border-[#30435c] rounded-xl p-4 text-sm text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-600 resize-none focus:outline-none focus:ring-2 focus:ring-purple-500/25"
                 />
-                <button onClick={handleAiParse} disabled={aiLoading || !aiInput.trim() || !aiApiKey.trim()} className="mt-2 px-4 py-2 bg-purple-500 hover:bg-purple-600 text-white text-sm font-semibold rounded-xl disabled:opacity-50 transition-colors flex items-center gap-2">
+                <button onClick={handleAiParse} disabled={aiLoading || !aiInput.trim() || !hasAiKey} className="mt-2 px-4 py-2 bg-purple-500 hover:bg-purple-600 text-white text-sm font-semibold rounded-xl disabled:opacity-50 transition-colors flex items-center gap-2">
                   {aiLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
                   {aiLoading ? "AI 解析中..." : "AI 解析"}
                 </button>

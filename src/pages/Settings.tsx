@@ -22,6 +22,8 @@ import {
   UserCircle2,
 } from "lucide-react";
 import { bellUrl, getSettings, updateSettings, type AppSettings } from "../lib/settings";
+import { AI_VENDORS, getVendor } from "../lib/vendors";
+import { AiService } from "../lib/dataService";
 import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { documentDir, join } from "@tauri-apps/api/path";
@@ -101,7 +103,6 @@ export function Settings() {
   const [saved, setSaved] = useState(false);
   const [initialDocRoot, setInitialDocRoot] = useState(getSettings().docRoot);
   const [showKeys, setShowKeys] = useState<Record<string, boolean>>({});
-  const [aiModel, setAiModel] = useState(() => localStorage.getItem("eva.ai.model") || "deepseek-ai/DeepSeek-V3.2");
   const [autoStartEnabled, setAutoStartEnabled] = useState(false);
   const [autoStartLoading, setAutoStartLoading] = useState(true);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -221,10 +222,15 @@ export function Settings() {
 
         const persisted = getSettings();
         if (persisted.lanShareEnabled) {
-          await invoke("toggle_local_server", {
-            enable: true,
-            port: persisted.lanSharePort || 9527,
-          });
+          // F1: 服务已在跑就不要重启（重启会轮换令牌，令已分发的链接与在线手机全部 401）
+          const info = await invoke<{ enabled: boolean }>("get_lan_share_info");
+          if (!info.enabled) {
+            await invoke("toggle_local_server", {
+              enable: true,
+              port: persisted.lanSharePort || 9527,
+            });
+          }
+          await refreshLanInfo();
         }
       } catch (error) {
         if (isLanPortAlreadyInUse(error)) {
@@ -253,6 +259,7 @@ export function Settings() {
       }
     };
     loadAutostart();
+    void refreshLanInfo();
     return () => {
       mounted = false;
     };
@@ -260,12 +267,6 @@ export function Settings() {
 
   const save = async () => {
     updateSettings(settings);
-    localStorage.setItem("eva.ai.apiKey", settings.aiApiKey);
-    localStorage.setItem("eva.ai.api.key", settings.aiApiKey);
-    localStorage.setItem("eva.ai.model", aiModel);
-    localStorage.setItem("eva.ai.visionModel", settings.aiVisionModel);
-    localStorage.setItem("eva.ai.visionMode", settings.aiVisionMode);
-
     setSaved(true);
     setTimeout(() => setSaved(false), 1200);
   };
@@ -306,6 +307,7 @@ export function Settings() {
         enable: nextEnabled,
         port: nextSettings.lanSharePort || 9527,
       });
+      await refreshLanInfo();
     } catch (error) {
       console.error("[Settings] Failed to toggle local LAN server:", error);
       setSettings({ ...nextSettings, lanShareEnabled: prevEnabled });
@@ -370,6 +372,49 @@ export function Settings() {
   };
 
   // ADD-P0-1: 一键备份工作区（数据库 VACUUM 快照 + 数据目录），替代原 Tailscale 占位面板
+  // A2-P1-1: 厂商连通性测试（复用 ai_proxy 通道发一条最小请求，零新命令）
+  const [testStatus, setTestStatus] = useState<"idle" | "testing" | "ok" | "fail">("idle");
+  const [testMessage, setTestMessage] = useState("");
+  const handleTestConnection = async () => {
+    const vendor = getVendor(settings.aiVendorId);
+    const key = settings.aiVendorKeys?.[vendor.id]?.trim() || "";
+    if (!key) {
+      setTestStatus("fail");
+      setTestMessage("请先填写该厂商的 API Key");
+      return;
+    }
+    setTestStatus("testing");
+    setTestMessage("");
+    try {
+      await AiService.callApi({
+        api_url: `${vendor.baseUrl}/chat/completions`,
+        api_key: key,
+        model: settings.aiModel?.trim() || vendor.defaultModel,
+        system_prompt: "ping",
+        user_message: "hi",
+        temperature: 0,
+        max_tokens: 8,
+      });
+      setTestStatus("ok");
+      setTestMessage(`连接成功（${vendor.name}）`);
+    } catch (error) {
+      setTestStatus("fail");
+      setTestMessage(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  // F1: 局域网访问令牌由后端在开启共享时生成，展示带令牌的完整链接
+  const [lanInfo, setLanInfo] = useState<{ port: number; token: string } | null>(null);
+  const refreshLanInfo = useCallback(async () => {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const info = await invoke<{ enabled: boolean; port: number; token: string }>("get_lan_share_info");
+      setLanInfo(info.enabled && info.token ? { port: info.port, token: info.token } : null);
+    } catch {
+      setLanInfo(null);
+    }
+  }, []);
+
   const [backupLoading, setBackupLoading] = useState(false);
   const [backupResult, setBackupResult] = useState<string | null>(null);
   const handleBackup = async () => {
@@ -480,72 +525,123 @@ export function Settings() {
 
   /* ─── Tab: AI 助手配置 ─── */
   const renderAiConfig = () => {
-    const apiKeys: { label: string; field: keyof AppSettings; placeholder: string }[] = [
-      { label: "DeepSeek API Key", field: "aiApiKey", placeholder: "sk-..." },
-      { label: "Kimi (Moonshot) API Key", field: "aiKimiKey", placeholder: "sk-..." },
-      { label: "MiniMax API Key", field: "aiMinimaxKey", placeholder: "eyJ..." },
-    ];
+    const chatVendor = getVendor(settings.aiVendorId);
+    const visionVendor = getVendor(settings.aiVisionVendorId);
+    const chatKeyField = chatVendor.id;
+    const visionKeyField = `vision:${visionVendor.id}`;
     return (
       <section className="space-y-5">
         <h2 className="text-xl font-bold text-gray-900 dark:text-white flex items-center gap-2"><Key className="w-4 h-4 text-purple-500" /> AI 助手配置</h2>
-        <p className="text-xs text-gray-500 dark:text-gray-400">已支持硅基流动 OpenAI 兼容接口。默认模型为 DeepSeek-V3.2。</p>
-        <div className="glass-card rounded-2xl p-5 space-y-5">
-          {apiKeys.map(({ label, field, placeholder }) => (
-            <div key={field}>
-              <label className="text-sm font-semibold text-gray-700 dark:text-gray-200">{label}</label>
+        <p className="text-xs text-gray-500 dark:text-gray-400">全部为 OpenAI 兼容接口：选厂商 → 填对应 Key → 测试连接即可用。</p>
+        <div className="glass-card rounded-2xl p-5 space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="text-xs font-semibold text-gray-500">对话厂商</label>
+              <select
+                value={chatVendor.id}
+                onChange={(e) => setSettings({ ...settings, aiVendorId: e.target.value, aiModel: "" })}
+                className={selectClass + " w-full"}
+              >
+                {AI_VENDORS.map((vendor) => (
+                  <option key={vendor.id} value={vendor.id}>{vendor.name}{vendor.capabilities.webSearch ? "（支持联网）" : ""}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-gray-500">模型</label>
+              <select
+                value={settings.aiModel || chatVendor.defaultModel}
+                onChange={(e) => setSettings({ ...settings, aiModel: e.target.value })}
+                className={selectClass + " w-full"}
+              >
+                {Array.from(new Set([chatVendor.defaultModel, ...chatVendor.models, ...(settings.aiModel ? [settings.aiModel] : [])])).map((model) => (
+                  <option key={model} value={model}>{model}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+          <div>
+            <label className="text-sm font-semibold text-gray-700 dark:text-gray-200">{chatVendor.name} API Key</label>
+            <div className="mt-1.5 flex gap-2">
+              <input
+                type={showKeys[chatKeyField] ? "text" : "password"}
+                value={settings.aiVendorKeys?.[chatVendor.id] || ""}
+                onChange={(e) => setSettings({ ...settings, aiVendorKeys: { ...(settings.aiVendorKeys || {}), [chatVendor.id]: e.target.value } })}
+                placeholder="sk-..."
+                className={inputClass + " flex-1"}
+              />
+              <button
+                type="button"
+                onClick={() => toggleKeyVisibility(chatKeyField)}
+                className="px-3 py-2 rounded-xl border border-gray-200/80 dark:border-[#30435c] text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-[#1b2a41] text-sm transition-colors"
+              >
+                {showKeys[chatKeyField] ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              </button>
+            </div>
+            <div className="mt-2 flex items-center gap-3">
+              <button
+                type="button"
+                onClick={handleTestConnection}
+                disabled={testStatus === "testing"}
+                className="px-3 py-1.5 rounded-xl border border-[#88B5D3]/40 text-[#88B5D3] hover:bg-[#88B5D3]/10 text-xs font-semibold disabled:opacity-60 transition-colors"
+              >
+                {testStatus === "testing" ? "测试中…" : "测试连接"}
+              </button>
+              {testStatus === "ok" && <span className="text-xs text-emerald-500">{testMessage}</span>}
+              {testStatus === "fail" && <span className="text-xs text-red-500 break-all">{testMessage}</span>}
+              <a href={chatVendor.keyUrl} target="_blank" rel="noreferrer" className="text-xs text-gray-400 hover:text-[#88B5D3] ml-auto">获取 Key →</a>
+            </div>
+          </div>
+          <p className="text-xs text-gray-400 dark:text-gray-500">密钥仅保存在本机（localStorage），随请求直达所选厂商，不经任何第三方。</p>
+        </div>
+        <div className="glass-card rounded-2xl p-5 space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="text-xs font-semibold text-gray-500">视觉厂商（图片识题）</label>
+              <select
+                value={visionVendor.id}
+                onChange={(e) => setSettings({ ...settings, aiVisionVendorId: e.target.value, aiVisionModel: "" })}
+                className={selectClass + " w-full"}
+              >
+                {AI_VENDORS.filter((vendor) => vendor.capabilities.vision).map((vendor) => (
+                  <option key={vendor.id} value={vendor.id}>{vendor.name}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-gray-500">视觉模型</label>
+              <select
+                value={settings.aiVisionModel || visionVendor.visionModels[0] || ""}
+                onChange={(e) => setSettings({ ...settings, aiVisionModel: e.target.value })}
+                className={selectClass + " w-full"}
+              >
+                {visionVendor.visionModels.map((model) => (
+                  <option key={model} value={model}>{model}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+          {visionVendor.id !== chatVendor.id && (
+            <div>
+              <label className="text-sm font-semibold text-gray-700 dark:text-gray-200">{visionVendor.name} API Key</label>
               <div className="mt-1.5 flex gap-2">
                 <input
-                  type={showKeys[field] ? "text" : "password"}
-                  value={(settings as unknown as Record<string, string>)[field]}
-                  onChange={(e) => setSettings({ ...settings, [field]: e.target.value })}
-                  placeholder={placeholder}
+                  type={showKeys[visionKeyField] ? "text" : "password"}
+                  value={settings.aiVendorKeys?.[visionVendor.id] || ""}
+                  onChange={(e) => setSettings({ ...settings, aiVendorKeys: { ...(settings.aiVendorKeys || {}), [visionVendor.id]: e.target.value } })}
+                  placeholder="sk-..."
                   className={inputClass + " flex-1"}
                 />
                 <button
                   type="button"
-                  onClick={() => toggleKeyVisibility(field)}
+                  onClick={() => toggleKeyVisibility(visionKeyField)}
                   className="px-3 py-2 rounded-xl border border-gray-200/80 dark:border-[#30435c] text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-[#1b2a41] text-sm transition-colors"
                 >
-                  {showKeys[field] ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  {showKeys[visionKeyField] ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                 </button>
               </div>
             </div>
-          ))}
-          <p className="text-xs text-gray-400 dark:text-gray-500">密钥将安全存储在本地，不会上传至任何服务器。</p>
-        </div>
-        <div className="glass-card rounded-2xl p-5">
-          <label className="text-xs font-semibold text-gray-500">默认模型选择</label>
-          <select value={aiModel} onChange={(e) => setAiModel(e.target.value)} className={selectClass}>
-            <option value="deepseek-ai/DeepSeek-V3.2">deepseek-ai/DeepSeek-V3.2（推荐）</option>
-            <option value="deepseek-ai/DeepSeek-R1">deepseek-ai/DeepSeek-R1</option>
-          </select>
-        </div>
-        <div className="glass-card rounded-2xl p-5 space-y-4">
-          <div>
-            <label className="text-xs font-semibold text-gray-500">视觉模型（图片识题）</label>
-            <div className="mt-2 flex flex-wrap gap-2">
-              <button
-                type="button"
-                onClick={() => setSettings({ ...settings, aiVisionModel: "Pro/Qwen/Qwen2.5-VL-7B-Instruct" })}
-                className="px-3 py-1.5 rounded-lg border border-gray-200/80 dark:border-[#30435c] text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#1b2a41]"
-              >
-                Qwen2.5-VL-7B
-              </button>
-              <button
-                type="button"
-                onClick={() => setSettings({ ...settings, aiVisionModel: "Pro/OpenGVLab/InternVL2.5-26B" })}
-                className="px-3 py-1.5 rounded-lg border border-gray-200/80 dark:border-[#30435c] text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#1b2a41]"
-              >
-                InternVL2.5-26B
-              </button>
-            </div>
-            <input
-              value={settings.aiVisionModel}
-              onChange={(e) => setSettings({ ...settings, aiVisionModel: e.target.value })}
-              placeholder="输入视觉模型名（可自定义）"
-              className={inputClass + " mt-2"}
-            />
-          </div>
+          )}
           <div>
             <label className="text-xs font-semibold text-gray-500">图片识题模式</label>
             <select
@@ -671,11 +767,27 @@ export function Settings() {
       </div>
 
       <div className="glass-card rounded-2xl p-5">
-        <p className="text-sm font-semibold text-gray-900 dark:text-white">局域网地址</p>
-        <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">内网 IP:端口</p>
-        <div className="mt-2 rounded-xl border border-gray-200/80 dark:border-[#30435c] bg-white/80 dark:bg-[#0f1826]/70 px-4 py-2.5 text-sm font-mono text-gray-700 dark:text-gray-200">
-          {`http://${localIp}:${settings.lanSharePort || 9527}`}
-        </div>
+        <p className="text-sm font-semibold text-gray-900 dark:text-white">局域网访问链接</p>
+        {lanInfo ? (
+          <>
+            <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">已启用令牌鉴权：手机浏览器直接打开下方链接即可访问，无需输入口令。</p>
+            <div className="mt-2 flex items-center gap-2">
+              <code className="flex-1 rounded-xl border border-gray-200/80 dark:border-[#30435c] bg-white/80 dark:bg-[#0f1826]/70 px-4 py-2.5 text-xs font-mono text-gray-700 dark:text-gray-200 break-all">
+                {`http://${localIp}:${lanInfo.port}/?token=${lanInfo.token}`}
+              </code>
+              <button
+                type="button"
+                onClick={() => { void navigator.clipboard?.writeText(`http://${localIp}:${lanInfo.port}/?token=${lanInfo.token}`); }}
+                className="px-3 py-2 rounded-xl border border-[#88B5D3]/40 text-[#88B5D3] hover:bg-[#88B5D3]/10 text-xs font-semibold transition-colors"
+              >
+                复制
+              </button>
+            </div>
+            <p className="mt-2 text-xs text-gray-400 dark:text-gray-500">关闭再开启共享会更换令牌；请勿把链接发给不信任的设备。</p>
+          </>
+        ) : (
+          <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">开启共享后，这里会显示带访问令牌的链接（所有 /api/ 请求需令牌，静态页面除外）。</p>
+        )}
       </div>
 
       <div className="glass-card rounded-2xl p-5">

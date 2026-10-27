@@ -67,7 +67,8 @@ export function useSync(action: string, onSync: SyncCallback) {
 
     let socket: WebSocket | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-    const reconnectDelayMs = 1200;
+    // 复审修复：指数退避 + 上限，令牌缺失/失效时不再 1.2s 永久重连风暴
+    let reconnectAttempts = 0;
 
     const clearReconnect = () => {
       if (reconnectTimer) {
@@ -79,13 +80,25 @@ export function useSync(action: string, onSync: SyncCallback) {
     const scheduleReconnect = () => {
       if (disposed) return;
       clearReconnect();
-      reconnectTimer = setTimeout(connect, reconnectDelayMs);
+      reconnectAttempts += 1;
+      if (reconnectAttempts > 12) {
+        console.warn("[useSync] LAN 连接多次失败，已停止重连（令牌无效或服务未开启）");
+        return;
+      }
+      const delay = Math.min(1200 * 2 ** Math.min(reconnectAttempts - 1, 5), 30000);
+      reconnectTimer = setTimeout(connect, delay);
     };
 
     const connect = () => {
       if (disposed) return;
       const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-      socket = new WebSocket(`${protocol}://${window.location.host}/api/ws`);
+      // F1: WebSocket 无法带 Authorization 头，令牌走查询参数
+      const token = window.localStorage.getItem("eva.lan.token") || "";
+      const tokenQuery = token ? `?token=${encodeURIComponent(token)}` : "";
+      socket = new WebSocket(`${protocol}://${window.location.host}/api/ws${tokenQuery}`);
+      socket.onopen = () => {
+        reconnectAttempts = 0;
+      };
 
       socket.onmessage = (event) => {
         const incomingAction = normalizeAction(event.data);

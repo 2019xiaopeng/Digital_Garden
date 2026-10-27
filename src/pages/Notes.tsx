@@ -34,6 +34,8 @@ type SelectedKnowledgeFile = {
   path?: string;
 };
 import { chatCompletion, visionChatCompletion } from "../utils/aiClient";
+import { getSettings } from "../lib/settings";
+import { getVendor } from "../lib/vendors";
 import { DailyLogService } from "../lib/dataService";
 import { extractQuestionType, formatQuestionLayout, normalizeMathDelimiters } from "../lib/markdown";
 import "katex/dist/katex.min.css";
@@ -123,7 +125,12 @@ export function Notes() {
 
   // AI Chat State
   const [chatInput, setChatInput] = useState("");
-  const [selectedModel, setSelectedModel] = useState<string>(() => localStorage.getItem("eva.ai.model") || "deepseek-ai/DeepSeek-V3.2");
+  // A2: 模型跟随设置页的厂商注册表（不再读写已废弃的 eva.ai.model 镜像键）
+  const [selectedModel, setSelectedModel] = useState<string>(() => {
+    const s = getSettings();
+    return s.aiModel || getVendor(s.aiVendorId).defaultModel;
+  });
+  const chatVendorModels = Array.from(new Set([getVendor(getSettings().aiVendorId).defaultModel, ...getVendor(getSettings().aiVendorId).models]));
   const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
   const [chatMessagesBySession, setChatMessagesBySession] = useState<Record<string, ChatMessage[]>>({});
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -1270,8 +1277,6 @@ export function Notes() {
       const selectedContext = await buildSelectedFilesContext();
       const context = viewingFile ? `当前文件：${viewingFile.name}。` : "当前未选中文件。";
 
-      localStorage.setItem("eva.ai.model", selectedModel);
-
       const tempAssistantId = `temp-assistant-${Date.now()}`;
       appendMessageLocal(currentSession.id, {
         id: tempAssistantId,
@@ -1831,8 +1836,9 @@ export function Notes() {
                 onChange={(e) => setSelectedModel(e.target.value)}
                 className="ml-2 text-xs font-medium bg-white/90 dark:bg-[#0f1826] border border-[#88B5D3]/30 rounded-lg px-2 py-1 text-gray-700 dark:text-gray-200 focus:outline-none"
               >
-                <option value="deepseek-ai/DeepSeek-V3.2">deepseek-ai/DeepSeek-V3.2</option>
-                <option value="deepseek-ai/DeepSeek-R1">deepseek-ai/DeepSeek-R1</option>
+                {chatVendorModels.map((model) => (
+                  <option key={model} value={model}>{model}</option>
+                ))}
               </select>
               {viewingFile && (
                 <span className="ml-auto text-xs bg-white/85 dark:bg-[#0f1826] border border-[#88B5D3]/20 text-[#88B5D3] px-2 py-1 rounded-md flex items-center gap-1">

@@ -216,7 +216,39 @@ export async function invokeDesktop<T = unknown>(
 
 function getLanBaseUrl(): string {
   const host = window.location.hostname || "127.0.0.1";
-  return `http://${host}:9527`;
+  // F9: 端口跟随当前页面来源（网页端本就由共享服务同源提供），不再硬编码 9527
+  const port = window.location.port || "9527";
+  return `http://${host}:${port}`;
+}
+
+// F1: 局域网 API 需要访问令牌（桌面端开启共享时生成；网页端从 ?token= 链接读取存入 localStorage）。
+// 令牌捕获必须在模块顶层执行（早于任何组件挂载），否则首屏子组件的请求会先于 useEffect 全部 401。
+if (typeof window !== "undefined") {
+  const lanTokenFromUrl = new URLSearchParams(window.location.search).get("token");
+  if (lanTokenFromUrl) {
+    window.localStorage.setItem("eva.lan.token", lanTokenFromUrl);
+    const next = new URL(window.location.href);
+    next.searchParams.delete("token");
+    window.history.replaceState({}, "", next.toString());
+  }
+}
+
+// 统一在此给发往本机共享服务的 /api/ 请求附加令牌，免去逐个调用点修改。
+if (typeof window !== "undefined" && !(window as { __lanTokenFetchPatched?: boolean }).__lanTokenFetchPatched) {
+  (window as { __lanTokenFetchPatched?: boolean }).__lanTokenFetchPatched = true;
+  const originalFetch = window.fetch.bind(window);
+  window.fetch = (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const base = getLanBaseUrl();
+    if (url.startsWith(`${base}/api/`)) {
+      const token = window.localStorage.getItem("eva.lan.token") || "";
+      if (token) {
+        const next = `${url}${url.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
+        return originalFetch(next, init);
+      }
+    }
+    return originalFetch(input, init);
+  };
 }
 
 function shouldDebugImages(): boolean {
@@ -954,12 +986,16 @@ export function getImageUrl(relativePath: string): string {
     }
   }
 
+  // F1: <img src> 不走 fetch 拦截器，图片 URL 需自带令牌
+  const lanToken = typeof window !== "undefined" ? window.localStorage.getItem("eva.lan.token") || "" : "";
+  const imageTokenQuery = lanToken ? `?token=${encodeURIComponent(lanToken)}` : "";
+
   if (resolvedRelative) {
-    const finalUrl = `${getLanBaseUrl()}/api/images/${encodeURI(resolvedRelative)}`;
+    const finalUrl = `${getLanBaseUrl()}/api/images/${encodeURI(resolvedRelative)}${imageTokenQuery}`;
     logImageResolution("web-relative", { ...baseDebug, finalUrl });
     return finalUrl;
   }
-  const fallbackUrl = `${getLanBaseUrl()}/api/images/${encodeURI(clean)}`;
+  const fallbackUrl = `${getLanBaseUrl()}/api/images/${encodeURI(clean)}${imageTokenQuery}`;
   logImageResolution("web-fallback", { ...baseDebug, finalUrl: fallbackUrl });
   return fallbackUrl;
 }

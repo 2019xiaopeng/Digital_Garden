@@ -93,10 +93,9 @@ export function WeeklyReview() {
     if (!stats) return;
 
     const { getSettings } = await import("../lib/settings");
-    const settings = getSettings();
-    const apiKey = settings.aiKimiKey || settings.aiApiKey || localStorage.getItem("eva.ai.apiKey") || "";
-    if (!apiKey) {
-      setAiResult("请先在设置中配置 AI Key（DeepSeek / Kimi / MiniMax）。");
+    const { api_url, api_key, model } = await import("../lib/dataService").then((m) => m.AiService.currentVendorRequest());
+    if (!api_key) {
+      setAiResult("请先在设置页选择 AI 厂商并保存 API Key。");
       return;
     }
 
@@ -124,9 +123,9 @@ export function WeeklyReview() {
     setAiResult("");
     try {
       const response = await AiService.callApi({
-        api_url: "https://api.deepseek.com/v1/chat/completions",
-        api_key: apiKey,
-        model: "deepseek-chat",
+        api_url,
+        api_key,
+        model,
         system_prompt: systemPrompt,
         user_message: `endDate=${endDate}`,
         temperature: 0.35,

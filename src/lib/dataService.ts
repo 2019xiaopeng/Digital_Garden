@@ -4,6 +4,9 @@
  * Falls back to localStorage when Tauri is not available (web-only mode).
  */
 
+import { getSettings } from "./settings";
+import { getVendor } from "./vendors";
+
 // ═══════════════════════════════════════════════════════════
 // Type Definitions (mirror Rust structs)
 // ═══════════════════════════════════════════════════════════
@@ -648,6 +651,18 @@ export const MarkdownImportService = {
 // ═══════════════════════════════════════════════════════════
 
 export const AiService = {
+  /** A2-P0-1: 当前厂商的调用三件套（baseUrl/key/model），消灭 F8 的密钥×端点错配 */
+  currentVendorRequest(): { api_url: string; api_key: string; model: string } {
+    const settings = getSettings();
+    const vendor = getVendor(settings.aiVendorId);
+    const apiKey = (settings.aiVendorKeys || {})[vendor.id]?.trim() || "";
+    return {
+      api_url: `${vendor.baseUrl}/chat/completions`,
+      api_key: apiKey,
+      model: settings.aiModel?.trim() || vendor.defaultModel,
+    };
+  },
+
   async callApi(request: AiProxyRequest): Promise<AiProxyResponse> {
     const invoke = await getInvoke();
     if (invoke) {
@@ -661,7 +676,11 @@ export const AiService = {
   },
 
   /** NLP Task Parsing - parse natural language into structured tasks */
-  async parseNaturalLanguageTasks(input: string, apiKey: string): Promise<ImportedTask[]> {
+  async parseNaturalLanguageTasks(input: string): Promise<ImportedTask[]> {
+    const { api_url, api_key, model } = this.currentVendorRequest();
+    if (!api_key) {
+      throw new Error("未配置当前 AI 厂商的 API Key，请先在设置页保存。");
+    }
     const systemPrompt = `你是一个任务解析助手。用户会输入一段混乱的自然语言日程描述。
 请严格返回一个JSON数组，每个元素包含:
 - title: 任务标题(简洁)
@@ -674,9 +693,9 @@ export const AiService = {
 只返回JSON数组，不要返回任何其他内容。如果无法解析则返回空数组[]。`;
 
     const response = await this.callApi({
-      api_url: "https://api.deepseek.com/v1/chat/completions",
-      api_key: apiKey,
-      model: "deepseek-chat",
+      api_url,
+      api_key,
+      model,
       system_prompt: systemPrompt,
       user_message: input,
       temperature: 0.3,
@@ -708,7 +727,11 @@ export const AiService = {
   },
 
   /** Generate daily review summary */
-  async generateReview(completedTasks: LegacyTask[], focusHours: number, apiKey: string): Promise<string> {
+  async generateReview(completedTasks: LegacyTask[], focusHours: number): Promise<string> {
+    const { api_url, api_key, model } = this.currentVendorRequest();
+    if (!api_key) {
+      throw new Error("未配置当前 AI 厂商的 API Key，请先在设置页保存。");
+    }
     const taskList = completedTasks.length > 0
       ? completedTasks.map((t, idx) => `- ${idx + 1}. ${t.title}${t.tags.length ? `（${t.tags.join(", ")}）` : ""}`).join("\n")
       : "- 今日暂无已完成任务";
@@ -732,9 +755,9 @@ export const AiService = {
 ${taskList || "无完成任务"}`;
 
     const response = await this.callApi({
-      api_url: "https://api.deepseek.com/v1/chat/completions",
-      api_key: apiKey,
-      model: "deepseek-chat",
+      api_url,
+      api_key,
+      model,
       system_prompt: systemPrompt,
       user_message: userMessage,
       temperature: 0.45,
