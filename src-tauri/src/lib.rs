@@ -185,25 +185,6 @@ pub struct VideoBookmark {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
-pub struct Question {
-    pub id: String,
-    pub subject: String,
-    pub r#type: String,
-    pub stem: String,
-    pub options: Option<String>,
-    pub answer: String,
-    pub explanation: String,
-    pub source_files: String,
-    pub difficulty: i32,
-    pub created_at: String,
-    pub next_review: Option<String>,
-    pub review_count: i32,
-    pub correct_count: i32,
-    pub ease_factor: f64,
-    pub r#interval: i32,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
 pub struct AiSession {
     pub id: String,
     pub title: String,
@@ -460,11 +441,6 @@ async fn local_ping_handler() -> &'static str {
 }
 
 #[derive(Debug, Deserialize)]
-struct QuizDueQuery {
-    subject: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
 struct TasksQuery {
     date: Option<String>,
 }
@@ -551,16 +527,6 @@ fn parse_week_start_monday(week_start: &str) -> Result<(String, String), String>
         start.format("%Y-%m-%d").to_string(),
         end.format("%Y-%m-%d").to_string(),
     ))
-}
-
-async fn db_fetch_all_questions(pool: &sqlx::SqlitePool) -> Result<Vec<Question>, String> {
-    let rows = sqlx::query_as::<_, Question>(
-        "SELECT id, subject, type, stem, options, answer, explanation, source_files, difficulty, created_at, next_review, review_count, correct_count, ease_factor, interval FROM questions ORDER BY created_at DESC",
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(|e| format!("Failed to fetch questions: {}", e))?;
-    Ok(rows)
 }
 
 async fn db_get_tasks(pool: &sqlx::SqlitePool) -> Result<Vec<Task>, String> {
@@ -746,6 +712,7 @@ fn normalize_focus_dimension(raw: Option<&str>) -> String {
     match raw.unwrap_or("tag").trim().to_lowercase().as_str() {
         "template" => "template".to_string(),
         "timer_type" => "timer_type".to_string(),
+        "date" => "date".to_string(),
         _ => "tag".to_string(),
     }
 }
@@ -1018,36 +985,6 @@ async fn db_finish_focus_run(
     Ok(run)
 }
 
-async fn db_get_focus_runs(
-    pool: &sqlx::SqlitePool,
-    start_date: Option<&str>,
-    end_date: Option<&str>,
-    status: Option<&str>,
-) -> Result<Vec<FocusRun>, String> {
-    let (start, end) = resolve_focus_range(start_date, end_date)?;
-    let rows = if let Some(status_value) = status {
-        sqlx::query_as::<_, FocusRun>(
-            "SELECT id, source, template_id, task_id, timer_type, planned_minutes, actual_seconds, status, started_at, ended_at, date, tags_json, note, created_at, updated_at FROM focus_runs WHERE date BETWEEN ? AND ? AND status = ? ORDER BY started_at DESC",
-        )
-        .bind(&start)
-        .bind(&end)
-        .bind(status_value)
-        .fetch_all(pool)
-        .await
-        .map_err(|e| format!("Failed to fetch focus runs by status: {}", e))?
-    } else {
-        sqlx::query_as::<_, FocusRun>(
-            "SELECT id, source, template_id, task_id, timer_type, planned_minutes, actual_seconds, status, started_at, ended_at, date, tags_json, note, created_at, updated_at FROM focus_runs WHERE date BETWEEN ? AND ? ORDER BY started_at DESC",
-        )
-        .bind(&start)
-        .bind(&end)
-        .fetch_all(pool)
-        .await
-        .map_err(|e| format!("Failed to fetch focus runs: {}", e))?
-    };
-    Ok(rows)
-}
-
 async fn db_get_focus_stats(
     pool: &sqlx::SqlitePool,
     start_date: Option<&str>,
@@ -1084,7 +1021,41 @@ async fn db_get_focus_stats(
         completion_rate,
     };
 
-    let slices = if dim == "template" {
+    let slices = if dim == "date" {
+        // FOCUS-P0-2: 按日期分组的有效专注（与 summary 同口径），供首页/热力图/连胜统一取数
+        let rows = sqlx::query_as::<_, FocusGroupedRow>(
+            "SELECT
+                date AS key_name,
+                COALESCE(SUM(CASE WHEN status = 'completed' AND actual_seconds >= 60 THEN actual_seconds ELSE 0 END), 0) AS total_seconds,
+                COUNT(CASE WHEN status = 'completed' AND actual_seconds >= 60 THEN 1 END) AS run_count
+             FROM focus_runs
+             WHERE date BETWEEN ? AND ?
+             GROUP BY date
+             ORDER BY date ASC",
+        )
+        .bind(&start)
+        .bind(&end)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("Failed to aggregate focus runs by date: {}", e))?;
+
+        rows.into_iter()
+            .map(|row| {
+                let minutes = row.total_seconds / 60;
+                let percent = if total_focus_minutes > 0 {
+                    (minutes as f64 / total_focus_minutes as f64) * 100.0
+                } else {
+                    0.0
+                };
+                FocusStatsSlice {
+                    key: row.key_name,
+                    minutes,
+                    percent,
+                    runs: row.run_count,
+                }
+            })
+            .collect::<Vec<FocusStatsSlice>>()
+    } else if dim == "template" {
         let rows = sqlx::query_as::<_, FocusGroupedRow>(
             "SELECT
                 COALESCE(NULLIF(ft.name, ''), '未命名模板') AS key_name,
@@ -1440,6 +1411,13 @@ async fn db_delete_wrong_question(pool: &sqlx::SqlitePool, id: &str) -> Result<(
         return Err("Wrong question not found".to_string());
     }
 
+    // 复审修复：与归档路径对齐，删除错题时清理其周复习项，避免周清单残留死链接
+    sqlx::query("DELETE FROM weekly_review_items WHERE wrong_question_id = ?")
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("Failed to cleanup weekly review items: {}", e))?;
+
     Ok(())
 }
 
@@ -1605,6 +1583,32 @@ async fn db_toggle_weekly_review_item_done(
                 .await
                 .map_err(|e| format!("Failed to cleanup weekly items after auto archive: {}", e))?;
         }
+    } else if !done && previous.status == "done" {
+        // A3-P0-2: 取消完成时回退复习计数，堵住 done→pending→done 反复刷次数的漏洞
+        let review_count = sqlx::query_scalar::<_, i64>(
+            "SELECT review_count FROM wrong_questions WHERE id = ?",
+        )
+        .bind(&previous.wrong_question_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| format!("Failed to read wrong question review_count: {}", e))?
+        .unwrap_or(1)
+        .saturating_sub(1);
+
+        let next_mastery = if review_count >= 3 { 3 } else { review_count as i32 };
+
+        sqlx::query(
+            "UPDATE wrong_questions
+             SET review_count = ?, mastery_level = ?, last_review_date = NULL, updated_at = ?
+             WHERE id = ? AND is_archived = 0",
+        )
+        .bind(review_count)
+        .bind(next_mastery)
+        .bind(now_iso())
+        .bind(&previous.wrong_question_id)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("Failed to revert wrong question review progress: {}", e))?;
     }
 
     sqlx::query_as::<_, WeeklyReviewItem>(
@@ -1757,60 +1761,6 @@ async fn db_get_resources_rows(pool: &sqlx::SqlitePool) -> Result<Vec<Resource>,
     .await
     .map_err(|e| format!("Failed to fetch resources: {}", e))?;
     Ok(rows)
-}
-
-async fn db_fetch_due_questions(
-    pool: &sqlx::SqlitePool,
-    subject: Option<&str>,
-) -> Result<Vec<Question>, String> {
-    let rows = if let Some(subject_value) = subject {
-        sqlx::query_as::<_, Question>(
-            "SELECT id, subject, type, stem, options, answer, explanation, source_files, difficulty, created_at, next_review, review_count, correct_count, ease_factor, interval
-             FROM questions
-             WHERE review_count > 0
-               AND datetime(COALESCE(next_review, CURRENT_TIMESTAMP)) <= datetime('now')
-               AND subject = ?
-             ORDER BY datetime(COALESCE(next_review, CURRENT_TIMESTAMP)) ASC",
-        )
-        .bind(subject_value)
-        .fetch_all(pool)
-        .await
-        .map_err(|e| format!("Failed to fetch due questions by subject: {}", e))?
-    } else {
-        sqlx::query_as::<_, Question>(
-            "SELECT id, subject, type, stem, options, answer, explanation, source_files, difficulty, created_at, next_review, review_count, correct_count, ease_factor, interval
-             FROM questions
-             WHERE review_count > 0
-               AND datetime(COALESCE(next_review, CURRENT_TIMESTAMP)) <= datetime('now')
-             ORDER BY datetime(COALESCE(next_review, CURRENT_TIMESTAMP)) ASC",
-        )
-        .fetch_all(pool)
-        .await
-        .map_err(|e| format!("Failed to fetch due questions: {}", e))?
-    };
-
-    Ok(rows)
-}
-
-async fn api_quiz_all_handler(
-    AxumState(state): AxumState<LanAppState>,
-) -> Result<Json<Vec<Question>>, (StatusCode, String)> {
-    let db = state.db.lock().await;
-    let rows = db_fetch_all_questions(&db.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(rows))
-}
-
-async fn api_quiz_due_handler(
-    AxumState(state): AxumState<LanAppState>,
-    Query(params): Query<QuizDueQuery>,
-) -> Result<Json<Vec<Question>>, (StatusCode, String)> {
-    let db = state.db.lock().await;
-    let rows = db_fetch_due_questions(&db.db, params.subject.as_deref())
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(rows))
 }
 
 async fn api_tasks_handler(
@@ -2493,8 +2443,6 @@ async fn toggle_local_server(
                 async move { api_notes_file_handler(app, query).await }
             }),
         )
-        .route("/api/quiz/all", get(api_quiz_all_handler))
-        .route("/api/quiz/due", get(api_quiz_due_handler))
         .fallback(embedded_static_handler)
         .layer(CorsLayer::permissive())
         .with_state(lan_state);
@@ -2865,6 +2813,18 @@ async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, String> {
         .execute(&pool)
         .await
         .ok();
+
+    // FOCUS-P0-1: 清扫僵尸 running 记录（超过 8 小时视为崩溃/关窗残留）。
+    // 必须放在全部建表之后：全新安装时空库先建表再清扫，否则 UPDATE 报 no such table 导致初始化失败
+    sqlx::query(
+        "UPDATE focus_runs
+         SET status = 'aborted', ended_at = datetime('now'), updated_at = datetime('now')
+         WHERE status = 'running'
+           AND julianday('now') - julianday(COALESCE(started_at, datetime('now'))) > 0.333333",
+    )
+    .execute(&pool)
+    .await
+    .map_err(|e| format!("Failed to sweep stale focus runs: {}", e))?;
 
     Ok(pool)
 }
@@ -3440,23 +3400,6 @@ async fn finish_focus_run(
 }
 
 #[tauri::command]
-async fn get_focus_runs(
-    start_date: Option<String>,
-    end_date: Option<String>,
-    status: Option<String>,
-    db: State<'_, Arc<Mutex<AppDb>>>,
-) -> Result<Vec<FocusRun>, String> {
-    let db = db.lock().await;
-    db_get_focus_runs(
-        &db.db,
-        start_date.as_deref(),
-        end_date.as_deref(),
-        status.as_deref(),
-    )
-    .await
-}
-
-#[tauri::command]
 async fn get_focus_stats(
     start_date: Option<String>,
     end_date: Option<String>,
@@ -3786,151 +3729,6 @@ async fn delete_resource(
         .execute(&db.db)
         .await
         .map_err(|e| format!("Failed to delete resource: {}", e))?;
-    Ok(())
-}
-
-    // ═══════════════════════════════════════════════════════════
-    // Quiz Question Commands (SQLite)
-    // ═══════════════════════════════════════════════════════════
-
-    #[tauri::command]
-    async fn get_questions(db: State<'_, Arc<Mutex<AppDb>>>) -> Result<Vec<Question>, String> {
-        let db = db.lock().await;
-        db_fetch_all_questions(&db.db).await
-    }
-
-    #[tauri::command]
-    async fn get_due_questions(
-        subject: Option<String>,
-        db: State<'_, Arc<Mutex<AppDb>>>,
-    ) -> Result<Vec<Question>, String> {
-        let db = db.lock().await;
-
-        db_fetch_due_questions(&db.db, subject.as_deref()).await
-    }
-
-    #[tauri::command]
-    async fn create_question(
-        question: Question,
-        db: State<'_, Arc<Mutex<AppDb>>>,
-    ) -> Result<Question, String> {
-        let db = db.lock().await;
-        sqlx::query(
-            "INSERT OR REPLACE INTO questions (id, subject, type, stem, options, answer, explanation, source_files, difficulty, created_at, next_review, review_count, correct_count, ease_factor, interval) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&question.id)
-        .bind(&question.subject)
-        .bind(&question.r#type)
-        .bind(&question.stem)
-        .bind(&question.options)
-        .bind(&question.answer)
-        .bind(&question.explanation)
-        .bind(&question.source_files)
-        .bind(question.difficulty)
-        .bind(&question.created_at)
-        .bind(&question.next_review)
-        .bind(question.review_count)
-        .bind(question.correct_count)
-        .bind(question.ease_factor)
-        .bind(question.r#interval)
-        .execute(&db.db)
-        .await
-        .map_err(|e| format!("Failed to create question: {}", e))?;
-        Ok(question)
-    }
-
-#[tauri::command]
-async fn read_local_file_text(app: tauri::AppHandle, path: String) -> Result<String, String> {
-    let input_path = PathBuf::from(&path);
-
-    let resolved_path = if input_path.is_absolute() {
-        input_path
-    } else {
-        let root = PathBuf::from(ensure_workspace_dirs(&app).await?);
-        let resources_base = root.join("Resources");
-        let sanitized = sanitize_relative_path(&path)?;
-        resources_base.join(sanitized)
-    };
-
-    let extension = resolved_path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-
-    if extension == "pdf" {
-        return Err("暂不支持读取 PDF 文本，请先转换为 .md 或 .txt".to_string());
-    }
-
-    if extension != "md" && extension != "txt" {
-        return Err("当前仅支持 .md / .txt 文本文件".to_string());
-    }
-
-    fs::read_to_string(&resolved_path)
-        .await
-        .map_err(|e| format!("Failed to read file {}: {}", resolved_path.to_string_lossy(), e))
-}
-
-#[tauri::command]
-async fn answer_question(
-    id: String,
-    is_correct: bool,
-    db: State<'_, Arc<Mutex<AppDb>>>,
-) -> Result<(), String> {
-    let db = db.lock().await;
-
-    let row = sqlx::query_as::<_, (i32, i32, f64, i32)>(
-        "SELECT review_count, correct_count, ease_factor, interval FROM questions WHERE id = ?",
-    )
-    .bind(&id)
-    .fetch_optional(&db.db)
-    .await
-    .map_err(|e| format!("Failed to fetch question stats: {}", e))?
-    .ok_or_else(|| "Question not found".to_string())?;
-
-    let (review_count, correct_count, ease_factor, interval_days) = row;
-    let new_review_count = review_count + 1;
-    let new_correct_count = if is_correct {
-        correct_count + 1
-    } else {
-        correct_count
-    };
-
-    let (new_interval_days, new_ease_factor) = if is_correct {
-        let interval = if new_review_count == 1 {
-            1
-        } else if new_review_count == 2 {
-            6
-        } else {
-            ((interval_days as f64) * ease_factor).round().max(1.0) as i32
-        };
-
-        let ef = (ease_factor + 0.05).max(1.3);
-        (interval, ef)
-    } else {
-        let ef = (ease_factor - 0.2).max(1.3);
-        (1, ef)
-    };
-
-    sqlx::query(
-        "UPDATE questions
-         SET review_count = ?,
-             correct_count = ?,
-             ease_factor = ?,
-             interval = ?,
-             next_review = datetime('now', '+' || ? || ' day')
-         WHERE id = ?",
-    )
-    .bind(new_review_count)
-    .bind(new_correct_count)
-    .bind(new_ease_factor)
-    .bind(new_interval_days)
-    .bind(new_interval_days)
-    .bind(&id)
-    .execute(&db.db)
-    .await
-    .map_err(|e| format!("Failed to update question answer stats: {}", e))?;
-
     Ok(())
 }
 
@@ -4691,66 +4489,9 @@ async fn ensure_workspace_dirs(app: &tauri::AppHandle) -> Result<String, String>
     Ok(root.to_string_lossy().to_string())
 }
 
-async fn ensure_workspace_dirs_at(root: &str) -> Result<String, String> {
-    let root_path = PathBuf::from(root);
-    let required = [
-        root_path.clone(),
-        root_path.join("Database"),
-        root_path.join("ErrorImages"),
-        root_path.join("Logs"),
-        root_path.join("Notes"),
-        root_path.join("Resources"),
-    ];
-
-    for dir in required {
-        fs::create_dir_all(&dir).await.map_err(|e| {
-            format!(
-                "Failed to create workspace dir {}: {}",
-                dir.to_string_lossy(),
-                e
-            )
-        })?;
-    }
-
-    Ok(root_path.to_string_lossy().to_string())
-}
-
-#[tauri::command]
-async fn initialize_workspace(app: tauri::AppHandle) -> Result<String, String> {
-    ensure_workspace_dirs(&app).await
-}
-
 #[tauri::command]
 async fn get_workspace_root(app: tauri::AppHandle) -> Result<String, String> {
     ensure_workspace_dirs(&app).await
-}
-
-#[tauri::command]
-async fn initialize_workspace_at(root_path: String) -> Result<String, String> {
-    let normalized = root_path.replace('\\', "/").trim().to_string();
-    if normalized.is_empty() {
-        return Err("Workspace root path cannot be empty".to_string());
-    }
-    ensure_workspace_dirs_at(&normalized).await
-}
-
-/// Get the Notes directory path, creating it if needed
-#[tauri::command]
-async fn get_notes_dir(app: tauri::AppHandle) -> Result<String, String> {
-    let root = ensure_workspace_dirs(&app).await?;
-    Ok(PathBuf::from(root)
-        .join("Notes")
-        .to_string_lossy()
-        .to_string())
-}
-
-#[tauri::command]
-async fn get_logs_dir(app: tauri::AppHandle) -> Result<String, String> {
-    let root = ensure_workspace_dirs(&app).await?;
-    Ok(PathBuf::from(root)
-        .join("Logs")
-        .to_string_lossy()
-        .to_string())
 }
 
 #[tauri::command]
@@ -5033,6 +4774,80 @@ async fn reset_all_data(
     ))
 }
 
+/// ADD-P0-1: 一键备份工作区（VACUUM INTO 生成数据库一致性快照 + 递归复制数据目录）
+async fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<(), String> {
+    fs::create_dir_all(dest)
+        .await
+        .map_err(|e| format!("Failed to create dir {}: {}", dest.to_string_lossy(), e))?;
+    let mut entries = fs::read_dir(src)
+        .await
+        .map_err(|e| format!("Failed to read dir {}: {}", src.to_string_lossy(), e))?;
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|e| format!("Failed to iterate dir {}: {}", src.to_string_lossy(), e))?
+    {
+        let file_type = entry
+            .file_type()
+            .await
+            .map_err(|e| format!("Failed to stat {}: {}", entry.path().to_string_lossy(), e))?;
+        if file_type.is_dir() {
+            // 递归 async fn 需要 Box::pin 引入间接层
+            Box::pin(copy_dir_recursive(&entry.path(), &dest.join(entry.file_name()))).await?;
+        } else {
+            fs::copy(entry.path(), dest.join(entry.file_name()))
+                .await
+                .map_err(|e| format!("Failed to copy {}: {}", entry.path().to_string_lossy(), e))?;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn backup_workspace(
+    app: tauri::AppHandle,
+    dest_dir: String,
+    db: State<'_, Arc<Mutex<AppDb>>>,
+) -> Result<String, String> {
+    let normalized = dest_dir.trim().to_string();
+    if normalized.is_empty() {
+        return Err("备份目标目录不能为空".to_string());
+    }
+    let root = PathBuf::from(ensure_workspace_dirs(&app).await?);
+    let stamp = Local::now().format("%Y%m%d-%H%M%S");
+    let backup_root = PathBuf::from(&normalized).join(format!("EVA_Knowledge_Base_{}", stamp));
+
+    // 复审修复：备份目标若位于工作区内部，copy_dir_recursive 会把备份目录再复制进自己，无限嵌套
+    if let (Ok(root_canon), Ok(dest_canon)) = (fs::canonicalize(&root).await, fs::canonicalize(&normalized).await) {
+        if dest_canon == root_canon || dest_canon.starts_with(&root_canon) {
+            return Err("备份位置不能位于工作区内部，请选择外部文件夹".to_string());
+        }
+    }
+
+    fs::create_dir_all(backup_root.join("Database"))
+        .await
+        .map_err(|e| format!("Failed to create backup dir: {}", e))?;
+
+    // VACUUM INTO 生成一致性快照，避免直接复制正被连接的 eva.db
+    {
+        let db = db.lock().await;
+        sqlx::query("VACUUM INTO ?")
+            .bind(backup_root.join("Database").join("eva.db").to_string_lossy().to_string())
+            .execute(&db.db)
+            .await
+            .map_err(|e| format!("Failed to snapshot database: {}", e))?;
+    }
+
+    for dir in ["Notes", "Resources", "Logs", "ErrorImages"] {
+        let src = root.join(dir);
+        if fs::metadata(&src).await.is_ok() {
+            copy_dir_recursive(&src, &backup_root.join(dir)).await?;
+        }
+    }
+
+    Ok(backup_root.to_string_lossy().to_string())
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct NotesFsNode {
     name: String,
@@ -5103,40 +4918,6 @@ struct CopiedFileResult {
 }
 
 /// Copy a file into the Notes directory (preserving name), return the dest path
-#[tauri::command]
-async fn copy_file_to_notes(
-    app: tauri::AppHandle,
-    source_path: String,
-    relative_dir: String,
-) -> Result<String, String> {
-    let root = PathBuf::from(ensure_workspace_dirs(&app).await?);
-    let base = root.join("Notes");
-    let relative = sanitize_relative_path(&relative_dir)?;
-    let target_dir = base.join(relative);
-    fs::create_dir_all(&target_dir).await.map_err(|e| {
-        format!(
-            "Failed to create directory {}: {}",
-            target_dir.to_string_lossy(),
-            e
-        )
-    })?;
-
-    let file_name = std::path::Path::new(&source_path)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown");
-    let dest = target_dir.join(file_name);
-    fs::copy(&source_path, &dest).await.map_err(|e| {
-        format!(
-            "Failed to copy {} -> {}: {}",
-            source_path,
-            dest.to_string_lossy(),
-            e
-        )
-    })?;
-    Ok(dest.to_string_lossy().to_string())
-}
-
 #[tauri::command]
 async fn copy_files_to_notes(
     app: tauri::AppHandle,
@@ -5381,27 +5162,6 @@ async fn copy_files_to_resources(
     Ok(copied)
 }
 
-/// Write text content to a file in the Notes directory
-#[tauri::command]
-async fn write_notes_file(
-    app: tauri::AppHandle,
-    relative_path: String,
-    content: String,
-) -> Result<String, String> {
-    let root = PathBuf::from(ensure_workspace_dirs(&app).await?);
-    let rel = sanitize_relative_path(&relative_path)?;
-    let full_path = root.join("Notes").join(rel);
-    if let Some(parent) = full_path.parent() {
-        fs::create_dir_all(parent)
-            .await
-            .map_err(|e| format!("Failed to create dir: {}", e))?;
-    }
-    fs::write(&full_path, content)
-        .await
-        .map_err(|e| format!("Failed to write {}: {}", full_path.to_string_lossy(), e))?;
-    Ok(full_path.to_string_lossy().to_string())
-}
-
 /// Create a folder in the Notes directory
 #[tauri::command]
 async fn create_notes_folder(
@@ -5508,7 +5268,6 @@ pub fn run() {
         )
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
-        .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
         .on_window_event(|window, event| {
@@ -5628,7 +5387,6 @@ pub fn run() {
             archive_focus_template,
             start_focus_run,
             finish_focus_run,
-            get_focus_runs,
             get_focus_stats,
             get_wrong_questions,
             create_wrong_question,
@@ -5646,18 +5404,14 @@ pub fn run() {
             parse_markdown_plan,
             ai_proxy,
             fetch_bilibili_metadata,
-            initialize_workspace,
-            initialize_workspace_at,
             get_workspace_root,
             read_file_content,
-            get_notes_dir,
             scan_notes_directory,
-            get_logs_dir,
             get_resources_dir,
             get_storage_usage,
             clear_cache,
             reset_all_data,
-            copy_file_to_notes,
+            backup_workspace,
             copy_files_to_notes,
             batch_delete_notes_files,
             batch_move_notes_items,
@@ -5666,18 +5420,12 @@ pub fn run() {
             get_resources,
             add_resource,
             delete_resource,
-            get_questions,
-            get_due_questions,
-            create_question,
-            read_local_file_text,
-            answer_question,
             get_ai_sessions,
             create_ai_session,
             update_ai_session_title,
             delete_ai_session,
             get_ai_messages,
             add_ai_message,
-            write_notes_file,
             create_notes_folder,
             delete_notes_item,
             move_notes_item,
