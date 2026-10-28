@@ -525,12 +525,6 @@ struct WeeklyReviewToggleBody {
 }
 
 #[derive(Debug, Deserialize)]
-struct CarryNextWeekBody {
-    from_week_start: String,
-    item_ids: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
 struct CreateWrongQuestionRequest {
     question: WrongQuestion,
     add_to_current_week: Option<bool>,
@@ -1440,12 +1434,7 @@ async fn db_archive_wrong_question(pool: &sqlx::SqlitePool, id: &str) -> Result<
         return Err("Wrong question not found".to_string());
     }
 
-    sqlx::query("DELETE FROM weekly_review_items WHERE wrong_question_id = ?")
-        .bind(id)
-        .execute(pool)
-        .await
-        .map_err(|e| format!("Failed to cleanup weekly review items on archive: {}", e))?;
-
+    // A3-P1-1: 归档不再删除周复习项（读取路径按 is_archived=0 过滤），归档天然可逆
     Ok(())
 }
 
@@ -1623,15 +1612,7 @@ async fn db_toggle_weekly_review_item_done(
         .execute(pool)
         .await
         .map_err(|e| format!("Failed to update wrong question review progress: {}", e))?;
-
-        if auto_archive {
-            sqlx::query("DELETE FROM weekly_review_items WHERE wrong_question_id = ? AND id <> ?")
-                .bind(&previous.wrong_question_id)
-                .bind(item_id)
-                .execute(pool)
-                .await
-                .map_err(|e| format!("Failed to cleanup weekly items after auto archive: {}", e))?;
-        }
+        // A3-P1-1: 自动归档不再清理周复习项，读取路径已按 is_archived=0 过滤
     } else if !done && previous.status == "done" {
         // A3-P0-2: 取消完成时回退复习计数，堵住 done→pending→done 反复刷次数的漏洞
         let review_count = sqlx::query_scalar::<_, i64>(
@@ -1668,49 +1649,6 @@ async fn db_toggle_weekly_review_item_done(
     .fetch_one(pool)
     .await
     .map_err(|e| format!("Failed to refetch weekly review item: {}", e))
-}
-
-async fn db_carry_weekly_review_items_to_next_week(
-    pool: &sqlx::SqlitePool,
-    from_week_start: &str,
-    item_ids: &[String],
-) -> Result<(), String> {
-    if item_ids.is_empty() {
-        return Ok(());
-    }
-
-    let (from_start, _) = parse_week_start_monday(from_week_start)?;
-    let from_date = chrono::NaiveDate::parse_from_str(&from_start, "%Y-%m-%d")
-        .map_err(|e| format!("Invalid from_week_start: {}", e))?;
-    let next_start = (from_date + chrono::Duration::days(7)).format("%Y-%m-%d").to_string();
-    let (_, next_end) = parse_week_start_monday(&next_start)?;
-
-    for item_id in item_ids {
-        let row = sqlx::query_as::<_, WeeklyReviewItem>(
-            "SELECT id, week_start, week_end, wrong_question_id, title_snapshot, status, carried_from_week, completed_at, created_at, updated_at
-             FROM weekly_review_items
-             WHERE id = ? AND week_start = ?",
-        )
-        .bind(item_id)
-        .bind(&from_start)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| format!("Failed to read source weekly review item: {}", e))?;
-
-        if let Some(item) = row {
-            db_create_weekly_review_item_if_absent(
-                pool,
-                &next_start,
-                &next_end,
-                &item.wrong_question_id,
-                &item.title_snapshot,
-                Some(&from_start),
-            )
-            .await?;
-        }
-    }
-
-    Ok(())
 }
 
 async fn db_get_wrong_question_stats(pool: &sqlx::SqlitePool) -> Result<WrongQuestionStats, String> {
@@ -1786,7 +1724,8 @@ async fn save_chat_image_to_workspace(root: &str, image_data: &[u8], ext: &str) 
     let clean_ext = ext.trim().trim_start_matches('.').to_lowercase();
     let final_ext = if clean_ext.is_empty() { "png".to_string() } else { clean_ext };
     let image_id = gen_focus_id("img");
-    let relative = format!("ErrorImages/{}/{}.{}", month_dir, image_id, final_ext);
+    // A1-P1-7: 聊天图与错题资源分目录，各自生命周期清晰（旧 ErrorImages 记录仍可读）
+    let relative = format!("ChatImages/{}/{}.{}", month_dir, image_id, final_ext);
 
     let abs_path = PathBuf::from(root).join(&relative);
     if let Some(parent) = abs_path.parent() {
@@ -2234,21 +2173,16 @@ async fn api_weekly_review_toggle_handler(
     Ok(Json(row))
 }
 
-async fn api_weekly_review_carry_handler(
+async fn api_wrong_question_unarchive_handler(
     AxumState(state): AxumState<LanAppState>,
-    Json(body): Json<CarryNextWeekBody>,
+    AxumPath(id): AxumPath<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let db = state.db.lock().await;
-    db_carry_weekly_review_items_to_next_week(&db.db, &body.from_week_start, &body.item_ids)
+    db_unarchive_wrong_question(&db.db, &id)
         .await
-        .map_err(|e| {
-            if e.contains("week_start") {
-                (StatusCode::BAD_REQUEST, e)
-            } else {
-                (StatusCode::INTERNAL_SERVER_ERROR, e)
-            }
-        })?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     drop(db);
+    emit_sync_action(&state.sync_hub, "SYNC_WRONG_QUESTIONS");
     emit_sync_action(&state.sync_hub, "SYNC_WEEKLY_REVIEW_ITEMS");
     Ok(StatusCode::NO_CONTENT)
 }
@@ -2469,15 +2403,15 @@ async fn toggle_local_server(
             "/api/wrong-questions/{id}/hard-delete",
             axum::routing::delete(api_delete_wrong_question_handler),
         )
+        .route(
+            "/api/wrong-questions/{id}/unarchive",
+            axum::routing::post(api_wrong_question_unarchive_handler),
+        )
         .route("/api/wrong-questions/stats", get(api_wrong_question_stats_handler))
         .route("/api/weekly-review/items", get(api_weekly_review_items_handler))
         .route(
             "/api/weekly-review/items/{id}/toggle",
             axum::routing::post(api_weekly_review_toggle_handler),
-        )
-        .route(
-            "/api/weekly-review/carry-next-week",
-            axum::routing::post(api_weekly_review_carry_handler),
         )
         .route("/api/images/upload", axum::routing::post(api_image_upload_handler))
         .route("/api/images/{*path}", get(api_image_file_handler))
@@ -3616,6 +3550,50 @@ async fn delete_wrong_question(
     Ok(())
 }
 
+/// A3-P1-1: 归档可逆——恢复进行中状态
+async fn db_unarchive_wrong_question(pool: &sqlx::SqlitePool, id: &str) -> Result<(), String> {
+    let result = sqlx::query("UPDATE wrong_questions SET is_archived = 0, updated_at = ? WHERE id = ?")
+        .bind(now_iso())
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("Failed to unarchive wrong question: {}", e))?;
+    if result.rows_affected() == 0 {
+        return Err("Wrong question not found".to_string());
+    }
+
+    // 复审修复：跨周/旧数据场景当周可能没有周复习行，恢复时确保回到本周清单
+    if let Ok(Some(row)) = sqlx::query_as::<_, (String, String)>(
+        "SELECT question_content, ai_solution FROM wrong_questions WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    {
+        let (content, solution) = row;
+        let week_start = current_week_start_str();
+        if let Ok((start, end)) = parse_week_start_monday(&week_start) {
+            let title = make_title_snapshot(&content, &solution);
+            let _ = db_create_weekly_review_item_if_absent(pool, &start, &end, id, &title, None).await;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn unarchive_wrong_question(
+    id: String,
+    db: State<'_, Arc<Mutex<AppDb>>>,
+    sync_hub: State<'_, Arc<SyncHub>>,
+) -> Result<(), String> {
+    let db = db.lock().await;
+    db_unarchive_wrong_question(&db.db, &id).await?;
+    drop(db);
+    emit_sync_action(sync_hub.inner().as_ref(), "SYNC_WRONG_QUESTIONS");
+    emit_sync_action(sync_hub.inner().as_ref(), "SYNC_WEEKLY_REVIEW_ITEMS");
+    Ok(())
+}
+
 #[tauri::command]
 async fn get_weekly_review_items(
     week_start: String,
@@ -3641,20 +3619,6 @@ async fn toggle_weekly_review_item_done(
 }
 
 #[tauri::command]
-async fn carry_weekly_review_items_to_next_week(
-    item_ids: Vec<String>,
-    from_week_start: String,
-    db: State<'_, Arc<Mutex<AppDb>>>,
-    sync_hub: State<'_, Arc<SyncHub>>,
-) -> Result<(), String> {
-    let db = db.lock().await;
-    db_carry_weekly_review_items_to_next_week(&db.db, &from_week_start, &item_ids).await?;
-    drop(db);
-    emit_sync_action(sync_hub.inner().as_ref(), "SYNC_WEEKLY_REVIEW_ITEMS");
-    Ok(())
-}
-
-#[tauri::command]
 async fn get_wrong_question_stats(
     db: State<'_, Arc<Mutex<AppDb>>>,
 ) -> Result<WrongQuestionStats, String> {
@@ -3665,9 +3629,14 @@ async fn get_wrong_question_stats(
 #[tauri::command]
 async fn save_chat_image(
     app: tauri::AppHandle,
-    image_data: Vec<u8>,
+    image_data_b64: String,
     ext: String,
 ) -> Result<String, String> {
+    // A1-P1-7(F12): base64 传输替代 JSON 数字数组，IPC 体积约降 2/3
+    use base64::Engine as _;
+    let image_data = base64::engine::general_purpose::STANDARD
+        .decode(image_data_b64.trim())
+        .map_err(|e| format!("image_data_b64 不是合法 base64: {}", e))?;
     if image_data.is_empty() {
         return Err("image_data 不能为空".to_string());
     }
@@ -3885,11 +3854,36 @@ async fn update_ai_session_title(
 #[tauri::command]
 async fn delete_ai_session(session_id: String, db: State<'_, Arc<Mutex<AppDb>>>) -> Result<(), String> {
     let db = db.lock().await;
+    // A1-P0-3: 同一事务显式清理消息，不依赖 per-connection 的 FK 级联
+    let mut tx = db
+        .db
+        .begin()
+        .await
+        .map_err(|e| format!("Failed to begin delete session tx: {}", e))?;
+    sqlx::query("DELETE FROM ai_messages WHERE session_id = ?")
+        .bind(&session_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Failed to delete ai messages: {}", e))?;
     sqlx::query("DELETE FROM ai_sessions WHERE id = ?")
-        .bind(session_id)
-        .execute(&db.db)
+        .bind(&session_id)
+        .execute(&mut *tx)
         .await
         .map_err(|e| format!("Failed to delete ai session: {}", e))?;
+    tx.commit()
+        .await
+        .map_err(|e| format!("Failed to commit delete session tx: {}", e))?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn delete_ai_message(message_id: String, db: State<'_, Arc<Mutex<AppDb>>>) -> Result<(), String> {
+    let db = db.lock().await;
+    sqlx::query("DELETE FROM ai_messages WHERE id = ?")
+        .bind(&message_id)
+        .execute(&db.db)
+        .await
+        .map_err(|e| format!("Failed to delete ai message: {}", e))?;
     Ok(())
 }
 
@@ -4557,6 +4551,7 @@ async fn ensure_workspace_dirs(app: &tauri::AppHandle) -> Result<String, String>
         root.clone(),
         root.join("Database"),
         root.join("ErrorImages"),
+        root.join("ChatImages"),
         root.join("Logs"),
         root.join("Notes"),
         root.join("Resources"),
@@ -4848,15 +4843,17 @@ async fn reset_all_data(
     let resources_path = root.join("Resources");
     let logs_path = root.join("Logs");
     let error_images_path = root.join("ErrorImages");
+    let chat_images_path = root.join("ChatImages");
 
     let removed_notes = clear_directory_contents(&notes_path)?;
     let removed_resources = clear_directory_contents(&resources_path)?;
     let removed_logs = clear_directory_contents(&logs_path)?;
     let removed_error_images = clear_directory_contents(&error_images_path)?;
+    let removed_chat_images = clear_directory_contents(&chat_images_path)?;
 
     Ok(format!(
-        "系统重置完成：数据库已清空，Notes 删除 {} 项，Resources 删除 {} 项，Logs 删除 {} 项，ErrorImages 删除 {} 项。",
-        removed_notes, removed_resources, removed_logs, removed_error_images
+        "系统重置完成：数据库已清空，Notes 删除 {} 项，Resources 删除 {} 项，Logs 删除 {} 项，ErrorImages 删除 {} 项，ChatImages 删除 {} 项。",
+        removed_notes, removed_resources, removed_logs, removed_error_images, removed_chat_images
     ))
 }
 
@@ -4924,7 +4921,7 @@ async fn backup_workspace(
             .map_err(|e| format!("Failed to snapshot database: {}", e))?;
     }
 
-    for dir in ["Notes", "Resources", "Logs", "ErrorImages"] {
+    for dir in ["Notes", "Resources", "Logs", "ErrorImages", "ChatImages"] {
         let src = root.join(dir);
         if fs::metadata(&src).await.is_ok() {
             copy_dir_recursive(&src, &backup_root.join(dir)).await?;
@@ -5479,10 +5476,10 @@ pub fn run() {
             create_wrong_question,
             update_wrong_question,
             archive_wrong_question,
+            unarchive_wrong_question,
             delete_wrong_question,
             get_weekly_review_items,
             toggle_weekly_review_item_done,
-            carry_weekly_review_items_to_next_week,
             get_wrong_question_stats,
             save_chat_image,
             get_video_bookmarks,
@@ -5513,6 +5510,7 @@ pub fn run() {
             delete_ai_session,
             get_ai_messages,
             add_ai_message,
+            delete_ai_message,
             create_notes_folder,
             delete_notes_item,
             move_notes_item,
