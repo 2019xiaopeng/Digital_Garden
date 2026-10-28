@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from "react";
-import { 
+import {
   Folder, FileText, ChevronRight, ChevronDown,
-  Search, Plus, Sparkles, Send, Bot, User, X, File, Upload, Edit2, Trash2, MessageSquarePlus, RefreshCw, ImagePlus, BookmarkPlus
+  Search, Plus, Sparkles, Send, Bot, User, X, File, Upload, Edit2, Trash2, MessageSquarePlus, RefreshCw, ImagePlus, BookmarkPlus, Copy, Globe, Download, Square
 } from "lucide-react";
 import { cn } from "../lib/utils";
 import { ThemedPromptDialog } from "../components/ThemedPromptDialog";
@@ -10,6 +10,7 @@ import { isTauriAvailable } from "../lib/dataService";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   createWrongQuestion,
+  deleteAiMessage,
   fetchNoteContent,
   fetchNotesTree,
   getImageUrl,
@@ -61,6 +62,8 @@ type ChatMessage = {
   text: string;
   createdAt: string;
   imagePath?: string | null;
+  /** A1-P1-8: 该条消息请求时开启了联网（仅会话内存态，不入库） */
+  webSearch?: boolean;
 };
 type ChatSession = {
   id: string;
@@ -130,7 +133,12 @@ export function Notes() {
     const s = getSettings();
     return s.aiModel || getVendor(s.aiVendorId).defaultModel;
   });
-  const chatVendorModels = Array.from(new Set([getVendor(getSettings().aiVendorId).defaultModel, ...getVendor(getSettings().aiVendorId).models]));
+  const chatVendor = getVendor(getSettings().aiVendorId);
+  const chatVendorModels = Array.from(new Set([chatVendor.defaultModel, ...chatVendor.models]));
+  // A1-P0-4: 停止生成 / 失败重试；A1-P1-8: 联网开关（仅支持服务端搜索的厂商显示）
+  const abortRef = useRef<AbortController | null>(null);
+  const [retryPayload, setRetryPayload] = useState<{ text: string; image: PendingImage | null; asResend?: boolean; history?: ChatMessage[] } | null>(null);
+  const [webSearchOn, setWebSearchOn] = useState(() => localStorage.getItem("eva.ai.websearch") === "1");
   const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
   const [chatMessagesBySession, setChatMessagesBySession] = useState<Record<string, ChatMessage[]>>({});
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -162,6 +170,11 @@ export function Notes() {
   const renameTargetSession = chatSessions.find(session => session.id === chatSessionToRenameId) || null;
   const deleteTargetSession = chatSessions.find(session => session.id === chatSessionToDeleteId) || null;
   const chatHistory = activeSessionId ? (chatMessagesBySession[activeSessionId] || []) : [];
+
+  // 复审修复：切换会话后旧的重试载荷作废，防止把回答落进另一个会话
+  useEffect(() => {
+    setRetryPayload(null);
+  }, [activeSessionId]);
   const isDesktopRuntime = isTauriAvailable();
   const readonlyWebHint = "局域网模式下仅支持跨端阅读，请在桌面端进行文件管理";
   const [isCompactViewport, setIsCompactViewport] = useState(() => {
@@ -1224,12 +1237,17 @@ export function Notes() {
     return `\n\n以下是用户当前选中的知识库文件内容片段，请优先结合这些上下文回答：\n${chunks.join("\n\n---\n\n")}`;
   };
 
-  const handleAiSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if ((!chatInput.trim() && !pendingImage) || isAiLoading) return;
+  const handleAiSubmit = async (
+    e?: React.FormEvent,
+    override?: { text: string; image: PendingImage | null; asResend?: boolean; history?: ChatMessage[] },
+  ) => {
+    e?.preventDefault();
+    const inputText = override ? override.text : chatInput.trim();
+    const activePendingImage = override ? override.image : pendingImage;
+    if ((!inputText && !activePendingImage) || isAiLoading) return;
 
-    const userMsg = chatInput.trim() || "请识别这道题并详细解答。";
-    setChatInput("");
+    const userMsg = inputText || "请识别这道题并详细解答。";
+    if (!override) setChatInput("");
 
     const currentSession = activeSession || await createSession(userMsg);
     if (!currentSession) {
@@ -1237,41 +1255,54 @@ export function Notes() {
       return;
     }
 
+    // A1-P0-1: 发送前捕获历史（在追加本次 user 消息之前），最近 10 条随请求发给模型
+    const historyMsgs = override?.history
+      ?? (chatMessagesBySession[currentSession.id] || []).filter((m) => m.text.trim()).slice(-10);
+
     const nowIso = new Date().toISOString();
     const tempUserId = `temp-user-${Date.now()}`;
     let imagePath: string | null = null;
-    if (pendingImage?.keepOriginal) {
+    if (override?.asResend) {
+      imagePath = null;
+    } else if (activePendingImage?.keepOriginal) {
       try {
-        const bytes = new Uint8Array(await pendingImage.file.arrayBuffer());
-        imagePath = await uploadChatImage(bytes, pendingImage.ext);
+        const bytes = new Uint8Array(await activePendingImage.file.arrayBuffer());
+        imagePath = await uploadChatImage(bytes, activePendingImage.ext);
       } catch (err: any) {
         showUploadToast("error", `保存图片失败：${err?.message || String(err)}`);
       }
     }
 
-    appendMessageLocal(currentSession.id, {
-      id: tempUserId,
-      role: "user",
-      text: userMsg,
-      imagePath,
-      createdAt: nowIso,
-    });
+    if (!override?.asResend) {
+      appendMessageLocal(currentSession.id, {
+        id: tempUserId,
+        role: "user",
+        text: userMsg,
+        imagePath,
+        createdAt: nowIso,
+        webSearch: webSearchOn,
+      });
 
-    if (isDesktopRuntime) {
-      try {
-        await invokeDesktop<string>("add_ai_message", {
-          sessionId: currentSession.id,
-          role: "user",
-          content: userMsg,
-          imagePath,
-        });
-      } catch (err: any) {
-        console.error("[Notes] Failed to persist user ai message:", err);
-        showUploadToast("error", `保存用户消息失败：${err?.message || String(err)}`);
+      if (isDesktopRuntime) {
+        try {
+          await invokeDesktop<string>("add_ai_message", {
+            sessionId: currentSession.id,
+            role: "user",
+            content: userMsg,
+            imagePath,
+          });
+        } catch (err: any) {
+          console.error("[Notes] Failed to persist user ai message:", err);
+          showUploadToast("error", `保存用户消息失败：${err?.message || String(err)}`);
+        }
       }
     }
 
     setIsAiLoading(true);
+
+    let streamed = "";
+    const controller = new AbortController();
+    abortRef.current = controller;
 
     try {
       const selectedContext = await buildSelectedFilesContext();
@@ -1285,18 +1316,18 @@ export function Notes() {
         createdAt: new Date().toISOString(),
       });
 
-      let streamed = "";
-      if (pendingImage) {
+      if (activePendingImage) {
         for await (const chunk of visionChatCompletion({
-          imageBase64: pendingImage.dataUrl,
+          imageBase64: activePendingImage.dataUrl,
           userPrompt: `${userMsg}\n\n请严格按以下格式回答：\n题型总结：...\n【题目识别】\n(只写题目原文，选择题需保留并分行列出 A/B/C/D 选项)\n【详细解答】\n(完整步骤；数学题至少两种思路：主解法+备选思路)\n\n${selectedContext}`,
           reasoningModel: selectedModel,
-          signal: undefined,
+          signal: controller.signal,
         })) {
           streamed += chunk;
           replaceLastAssistantMessageText(currentSession.id, (current) => current + chunk);
         }
       } else {
+        // A1-P0-1: 恢复多轮上下文——system + 最近历史 + 本条
         for await (const chunk of chatCompletion({
           model: selectedModel,
           messages: [
@@ -1304,13 +1335,13 @@ export function Notes() {
               role: "system",
               content: `你是EVA系统的知识库AI助手，简洁清晰地回答问题。若用户在问题/解题，请严格按以下格式输出：第一行“题型总结：...”；随后“【题目识别】”区仅保留题目原文（选择题选项分行）；再输出“【详细解答】”区。如果是数学题，请至少给两种思路（主解法+备选思路）。${context}${selectedContext}`,
             },
-            {
-              role: "user",
-              content: userMsg,
-            },
+            ...historyMsgs.map((m) => ({ role: m.role, content: m.text } as const)),
+            { role: "user", content: userMsg },
           ],
           temperature: 0.7,
           maxTokens: 1024,
+          signal: controller.signal,
+          webSearch: webSearchOn,
         })) {
           streamed += chunk;
           replaceLastAssistantMessageText(currentSession.id, (current) => current + chunk);
@@ -1333,26 +1364,136 @@ export function Notes() {
         await Promise.all([loadAiMessages(currentSession.id), refreshAiSessions(currentSession.id)]);
       }
     } catch (error: any) {
+      if (error?.name === "AbortError") {
+        // A1-P0-4: 停止生成——已流出的部分内容照常落库，未产生内容则清掉临时气泡
+        if (streamed.trim()) {
+          if (isDesktopRuntime) {
+            try {
+              await invokeDesktop<string>("add_ai_message", {
+                sessionId: currentSession.id,
+                role: "assistant",
+                content: streamed,
+                imagePath: null,
+              });
+              await Promise.all([loadAiMessages(currentSession.id), refreshAiSessions(currentSession.id)]);
+            } catch (persistErr: any) {
+              console.error("[Notes] Failed to persist aborted reply:", persistErr);
+            }
+          }
+        } else {
+          removeLastAssistantMessage(currentSession.id);
+        }
+        return;
+      }
       console.error("AI Error:", error);
       const message = `调用 ${getModelLabel(selectedModel)} 失败: ${error.message || "Failed to get response."}`;
       replaceLastAssistantMessageText(currentSession.id, (current) => (current.trim() ? current : message));
-
-      if (isDesktopRuntime) {
-        try {
-          await invokeDesktop<string>("add_ai_message", {
-            sessionId: currentSession.id,
-            role: "assistant",
-            content: message,
-            imagePath: null,
-          });
-          await Promise.all([loadAiMessages(currentSession.id), refreshAiSessions(currentSession.id)]);
-        } catch (persistErr: any) {
-          console.error("[Notes] Failed to persist assistant error message:", persistErr);
-        }
-      }
+      // A1-P0-4: 错误文本不再作为 assistant 消息落库污染历史；记录载荷供「重试」。
+      // 失败时 user 消息已落库，重试必须走 asResend（只重跑 assistant，不重复追加 user）；
+      // 重试再失败也重设载荷，保留重试入口
+      setRetryPayload({ text: userMsg, image: activePendingImage, asResend: true, history: historyMsgs });
     } finally {
       setIsAiLoading(false);
-      clearPendingImage();
+      abortRef.current = null;
+      if (!override) clearPendingImage();
+    }
+  };
+
+  // A1-P1-5: 消息级操作
+  const handleCopyMessage = async (text: string) => {
+    try {
+      await navigator.clipboard?.writeText(text);
+      showUploadToast("success", "已复制");
+    } catch {
+      showUploadToast("error", "复制失败");
+    }
+  };
+
+  const handleDeleteMessage = async (msg: ChatMessage) => {
+    if (!activeSessionId) return;
+    setChatMessagesBySession((prev) => ({
+      ...prev,
+      [activeSessionId]: (prev[activeSessionId] || []).filter((m) => m.id !== msg.id),
+    }));
+    if (isDesktopRuntime) {
+      try {
+        await deleteAiMessage(msg.id);
+      } catch (err: any) {
+        console.error("[Notes] Failed to delete ai message:", err);
+        showUploadToast("error", `删除失败：${err?.message || String(err)}`);
+      }
+    }
+  };
+
+  const handleRegenerate = async (assistantMsg: ChatMessage, idx: number) => {
+    if (isAiLoading || !activeSessionId) return;
+    let prevUser: ChatMessage | null = null;
+    let prevUserIdx = -1;
+    for (let i = idx - 1; i >= 0; i -= 1) {
+      if (chatHistory[i]?.role === "user") {
+        prevUser = chatHistory[i];
+        prevUserIdx = i;
+        break;
+      }
+    }
+    if (!prevUser) return;
+    if (prevUser.imagePath) {
+      // 复审修复：图片消息重新生成拿不到原图，提示用户重新发送而非答非所问
+      showUploadToast("error", "图片消息暂不支持重新生成，请重新发送图片提问");
+      return;
+    }
+    const history = chatHistory.slice(0, prevUserIdx).filter((m) => m.text.trim()).slice(-10);
+    await handleDeleteMessage(assistantMsg);
+    await handleAiSubmit(undefined, { text: prevUser.text, image: null, asResend: true, history });
+  };
+
+  // 复审修复：中止且无内容时移除临时气泡（置空会留下带头像的空气泡）
+  const removeLastAssistantMessage = (sessionId: string) => {
+    setChatMessagesBySession((prev) => {
+      const list = [...(prev[sessionId] || [])];
+      for (let i = list.length - 1; i >= 0; i -= 1) {
+        if (list[i].role === "assistant") {
+          list.splice(i, 1);
+          break;
+        }
+      }
+      return { ...prev, [sessionId]: list };
+    });
+  };
+
+  // A1-P1-6: 会话导出 Markdown（dialog.save + fs + opener，零新依赖）
+  const handleExportSession = async () => {
+    if (!activeSession || chatHistory.length === 0) {
+      showUploadToast("error", "当前会话没有可导出的消息");
+      return;
+    }
+    try {
+      const { save } = await import("@tauri-apps/plugin-dialog");
+      const { writeTextFile } = await import("@tauri-apps/plugin-fs");
+      const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
+      const md = [
+        `# ${activeSession.title}`,
+        "",
+        ...chatHistory.map((m) => [
+          `## ${m.role === "user" ? "🧑 我" : "🤖 EVA"}（${m.createdAt}）`,
+          "",
+          m.text,
+          "",
+        ].join("\n")),
+      ].join("\n");
+      const safeName = activeSession.title.replace(/[\\/:*?"<>|]/g, "_").slice(0, 40) || "AI会话";
+      // 复审修复：fs scope 只允许 $DOCUMENT/**，默认路径锚定到工作区（用户另选他处会被 scope 拒绝并提示）
+      const root = (localStorage.getItem("eva.workspace.root") || getSettings().docRoot || "").replace(/[\\/]+$/, "");
+      const path = await save({
+        defaultPath: root ? `${root}/${safeName}.md` : `${safeName}.md`,
+        filters: [{ name: "Markdown", extensions: ["md"] }],
+      });
+      if (!path || typeof path !== "string") return;
+      await writeTextFile(path, md);
+      showUploadToast("success", "已导出会话");
+      void revealItemInDir(path).catch(() => {});
+    } catch (err: any) {
+      showUploadToast("error", `导出失败（仅支持保存在文档目录内）：${err?.message || String(err)}`);
     }
   };
 
@@ -1831,6 +1972,16 @@ export function Notes() {
             <div className="p-4 border-b border-white/45 dark:border-[#2a3b52] flex items-center gap-2 bg-[#88B5D3]/6 dark:bg-[#88B5D3]/10">
               <Sparkles className="w-5 h-5 text-[#88B5D3]" />
               <h3 className="font-semibold text-gray-900 dark:text-white">知识库 AI 助手</h3>
+              {activeSession && (
+                <button
+                  type="button"
+                  onClick={() => { void handleExportSession(); }}
+                  className="ml-1 p-1.5 rounded-lg text-gray-400 hover:text-[#88B5D3] hover:bg-[#88B5D3]/10"
+                  title="导出当前会话为 Markdown"
+                >
+                  <Download className="w-4 h-4" />
+                </button>
+              )}
               <select
                 value={selectedModel}
                 onChange={(e) => setSelectedModel(e.target.value)}
@@ -1852,10 +2003,21 @@ export function Notes() {
                 <div className="h-full min-h-56 flex flex-col items-center justify-center text-center text-gray-500 dark:text-gray-400">
                   <Bot className="w-11 h-11 mb-3 text-[#88B5D3]/70" />
                   <p className="font-medium">当前暂无历史对话，开始提问吧</p>
-                  <p className="text-xs mt-1">已支持 SiliconFlow 流式返回（DeepSeek 系列）</p>
+                  <p className="text-xs mt-1">流式对话 · 支持多厂商切换（见设置页）{chatVendor.capabilities.webSearch ? " · 可联网检索" : ""}</p>
                 </div>
               ) : chatHistory.map((msg, idx) => (
-                <div key={msg.id} className={cn("flex gap-4", msg.role === 'user' ? "flex-row-reverse" : "")}>
+                <React.Fragment key={msg.id}>
+                  {/* A1-P0-1: 上下文窗口提示线——与发送路径同口径（过滤空文本后取最后 10 条） */}
+                  {(() => {
+                    const ctxMsgs = chatHistory.filter((m) => m.text.trim());
+                    const dividerId = ctxMsgs.length > 10 ? ctxMsgs[ctxMsgs.length - 10].id : null;
+                    return dividerId && msg.id === dividerId ? (
+                      <div className="text-center text-[11px] text-gray-400 dark:text-gray-500 py-1">
+                        <span className="inline-block px-2 border-t border-dashed border-gray-300/70 dark:border-[#2a3b52]">↓ 以下消息将作为上下文发送（更早的不发送）</span>
+                      </div>
+                    ) : null;
+                  })()}
+                  <div className={cn("flex gap-4", msg.role === 'user' ? "flex-row-reverse" : "")}>
                   <div className={cn(
                     "w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0",
                     msg.role === 'user' ? "bg-gray-100 dark:bg-gray-800" : "bg-[#88B5D3]/10 dark:bg-[#88B5D3]/20 text-[#88B5D3]"
@@ -1890,7 +2052,10 @@ export function Notes() {
                       </button>
                     )}
                     {msg.role === "user" ? (
-                      <div className="whitespace-pre-wrap break-words">{msg.text}</div>
+                      <div className="whitespace-pre-wrap break-words">
+                        {msg.webSearch && <span className="mr-1.5 inline-flex items-center gap-0.5 text-[11px] text-[#88B5D3]"><Globe className="w-3 h-3" />已联网</span>}
+                        {msg.text}
+                      </div>
                     ) : (
                       <div>
                         <div className="prose prose-sm dark:prose-invert max-w-none prose-pre:rounded-xl prose-pre:border prose-pre:border-[#88B5D3]/20 prose-code:before:content-none prose-code:after:content-none">
@@ -1921,7 +2086,33 @@ export function Notes() {
                             {normalizeMathDelimiters(msg.text)}
                           </ReactMarkdown>
                         </div>
-                        <div className="mt-3 flex justify-end">
+                        <div className="mt-3 flex justify-end gap-1.5">
+                          <button
+                            type="button"
+                            className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium text-gray-400 hover:text-[#88B5D3] hover:bg-[#88B5D3]/10 transition-opacity opacity-0 group-hover:opacity-100"
+                            onClick={() => { void handleCopyMessage(msg.text); }}
+                            title="复制"
+                          >
+                            <Copy className="w-3.5 h-3.5" />
+                          </button>
+                          {idx === chatHistory.length - 1 && (
+                            <button
+                              type="button"
+                              className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium text-gray-400 hover:text-[#88B5D3] hover:bg-[#88B5D3]/10 transition-opacity opacity-0 group-hover:opacity-100"
+                              onClick={() => { void handleRegenerate(msg, idx); }}
+                              title="重新生成（删除本条并以原问题重问）"
+                            >
+                              <RefreshCw className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium text-gray-400 hover:text-red-500 hover:bg-red-500/10 transition-opacity opacity-0 group-hover:opacity-100"
+                            onClick={() => { void handleDeleteMessage(msg); }}
+                            title="删除本条"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
                           <button
                             type="button"
                             className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium text-[#88B5D3] bg-[#88B5D3]/10 hover:bg-[#88B5D3]/20 transition-opacity opacity-0 group-hover:opacity-100"
@@ -1935,6 +2126,7 @@ export function Notes() {
                     )}
                   </div>
                 </div>
+                </React.Fragment>
               ))}
               {isAiLoading && (
                 <div className="flex gap-4">
@@ -1985,6 +2177,25 @@ export function Notes() {
                   >
                     <ImagePlus className="w-4 h-4" />
                   </button>
+                  {chatVendor.capabilities.webSearch && (
+                    <button
+                      type="button"
+                      onClick={() => setWebSearchOn((prev) => {
+                        const next = !prev;
+                        localStorage.setItem("eva.ai.websearch", next ? "1" : "0");
+                        return next;
+                      })}
+                      className={cn(
+                        "h-10 w-10 rounded-xl border flex items-center justify-center transition-colors",
+                        webSearchOn
+                          ? "border-[#88B5D3] bg-[#88B5D3]/15 text-[#88B5D3]"
+                          : "border-gray-200 dark:border-[#2c3f58] text-gray-400 hover:bg-[#88B5D3]/10"
+                      )}
+                      title={webSearchOn ? "已开启联网搜索（点击关闭）" : "联网搜索（厂商服务端检索最新资料）"}
+                    >
+                      <Globe className="w-4 h-4" />
+                    </button>
+                  )}
                   <input
                     ref={chatFileInputRef}
                     type="file"
@@ -2022,14 +2233,48 @@ export function Notes() {
                     className="flex-1 min-h-[44px] max-h-28 resize-none pl-4 pr-12 py-3 bg-white/90 dark:bg-[#0f1826] border border-gray-200 dark:border-[#2c3f58] rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-[#88B5D3]/20 focus:border-[#88B5D3] text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 shadow-sm transition-all"
                   />
                 </div>
-                <button 
-                  type="submit"
-                  disabled={(!chatInput.trim() && !pendingImage) || isAiLoading}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 bg-[#88B5D3] text-white rounded-lg hover:bg-[#75a0be] disabled:opacity-50 disabled:hover:bg-[#88B5D3] transition-colors"
-                >
-                  <Send className="w-4 h-4" />
-                </button>
+                {isAiLoading ? (
+                  <button
+                    type="button"
+                    onClick={() => abortRef.current?.abort()}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 bg-red-500 text-white rounded-lg hover:bg-red-600 transition-colors"
+                    title="停止生成（保留已生成的部分）"
+                  >
+                    <Square className="w-4 h-4" />
+                  </button>
+                ) : (
+                  <button
+                    type="submit"
+                    disabled={(!chatInput.trim() && !pendingImage) || isAiLoading}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 bg-[#88B5D3] text-white rounded-lg hover:bg-[#75a0be] disabled:opacity-50 disabled:hover:bg-[#88B5D3] transition-colors"
+                  >
+                    <Send className="w-4 h-4" />
+                  </button>
+                )}
               </form>
+              {retryPayload && !isAiLoading && (
+                <div className="mt-2 flex items-center gap-2 text-xs text-red-500">
+                  上次发送失败。
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const payload = retryPayload;
+                      setRetryPayload(null);
+                      if (payload) void handleAiSubmit(undefined, payload);
+                    }}
+                    className="px-2.5 py-1 rounded-lg border border-red-400/60 text-red-500 hover:bg-red-500/10 font-semibold"
+                  >
+                    重试
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setRetryPayload(null)}
+                    className="px-2 py-1 rounded-lg text-gray-400 hover:text-gray-600"
+                  >
+                    忽略
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         </div>}

@@ -462,7 +462,8 @@ export function Dashboard() {
   }, [nervCollapsed]);
 
   useEffect(() => {
-    if (!isPomodoroRunning || pomodoroSeconds <= 0) return;
+    // FOCUS-F28: interval 只随运行状态创建一次，不再每秒销毁重建
+    if (!isPomodoroRunning) return;
     const timer = setInterval(() => {
       setPomodoroSeconds((prev) => {
         if (prev <= 1) { clearInterval(timer); setIsPomodoroRunning(false); return 0; }
@@ -470,11 +471,16 @@ export function Dashboard() {
       });
     }, 1000);
     return () => clearInterval(timer);
-  }, [isPomodoroRunning, pomodoroSeconds]);
+  }, [isPomodoroRunning]);
 
+  // FOCUS-F24: 只有目标身份变化才重置秒数——任务列表刷新产生的新对象引用不再悄悄清零计时
+  const pomodoroTargetKeyRef = useRef("");
   useEffect(() => {
     if (pomodoroMode !== "template") return;
     if (!selectedTemplate) return;
+    const key = `template:${selectedTemplate.id}:${selectedTemplate.duration_minutes}`;
+    if (pomodoroTargetKeyRef.current === key) return;
+    pomodoroTargetKeyRef.current = key;
     const seconds = Math.max(1, selectedTemplate.duration_minutes) * 60;
     setPomodoroTotal(seconds);
     setPomodoroSeconds(seconds);
@@ -483,6 +489,9 @@ export function Dashboard() {
   useEffect(() => {
     if (pomodoroMode !== "task") return;
     if (!selectedPomodoroTask) return;
+    const key = `task:${selectedPomodoroTask.id}:${selectedPomodoroTask.timerDuration}`;
+    if (pomodoroTargetKeyRef.current === key) return;
+    pomodoroTargetKeyRef.current = key;
     const seconds = Math.max(1, selectedPomodoroTask.timerDuration || 25) * 60;
     setPomodoroTotal(seconds);
     setPomodoroSeconds(seconds);
@@ -678,6 +687,8 @@ export function Dashboard() {
   const setPomodoroPreset = (minutes: number) => {
     setPomodoroSeconds(minutes * 60);
     setPomodoroTotal(minutes * 60);
+    // 复审修复：quick 预设也要更新目标 key，否则切回模板/任务页时守卫挡住重置
+    pomodoroTargetKeyRef.current = `quick:${minutes}`;
   };
 
   const finishDashboardRun = useCallback(async (
@@ -721,6 +732,10 @@ export function Dashboard() {
     }
 
     if (!activeRunId) {
+      // 复审修复：00:00 时点开始等于开启新一轮整计时，而不是记一条整时长的幽灵 completed
+      if (pomodoroSeconds <= 0) {
+        setPomodoroSeconds(pomodoroTotal);
+      }
       let payloadTemplateId: string | null = null;
       let payloadTaskId: string | null = null;
       let payloadTimerType: "pomodoro" | "countdown" = "pomodoro";
@@ -766,6 +781,10 @@ export function Dashboard() {
     }
 
     setIsPomodoroRunning(true);
+    // FOCUS-P1-2: 接活原「自动全屏」死设置
+    if (getSettings().autoFullscreenPomodoro) {
+      enterZen();
+    }
   };
 
   const handlePomodoroReset = async () => {
@@ -777,6 +796,27 @@ export function Dashboard() {
   };
 
   /* ═══ Fullscreen Mode ═══ */
+  // FOCUS-P1-2: Tauri 窗口真全屏为主（Web 模式静默降级为纯 overlay）
+  const setWindowFullscreen = async (fullscreen: boolean) => {
+    try {
+      const { getCurrentWindow } = await import("@tauri-apps/api/window");
+      await getCurrentWindow().setFullscreen(fullscreen);
+    } catch {
+      // Web 模式无 Tauri 窗口 API
+    }
+  };
+  const enterZen = () => { setIsPomodoroFullscreen(true); void setWindowFullscreen(true); };
+  const exitZen = () => { setIsPomodoroFullscreen(false); void setWindowFullscreen(false); };
+
+  // FOCUS-P1-1/F25: 离开页面时结算进行中的 focus_run，杜绝僵尸 running
+  const finishRunRef = useRef(finishDashboardRun);
+  finishRunRef.current = finishDashboardRun;
+  useEffect(() => () => {
+    void finishRunRef.current("aborted");
+    // 复审修复：zen 模式下离开页面要退出 OS 级全屏，否则窗口卡死在全屏
+    void setWindowFullscreen(false);
+  }, []);
+
   if (isPomodoroFullscreen) {
     return (
       <FullscreenPomodoro
@@ -786,7 +826,7 @@ export function Dashboard() {
         totalSeconds={pomodoroTotal}
         onToggle={() => void handlePomodoroToggle()}
         onReset={() => { void handlePomodoroReset(); }}
-        onExit={() => setIsPomodoroFullscreen(false)}
+        onExit={exitZen}
       />
     );
   }
@@ -851,7 +891,7 @@ export function Dashboard() {
               <AlarmClockCheck className="w-4 h-4 text-[#88B5D3]" /> 番茄钟
             </h3>
             <button
-              onClick={() => setIsPomodoroFullscreen(true)}
+              onClick={() => enterZen()}
               className="p-1.5 text-gray-400 hover:text-[#88B5D3] hover:bg-[#88B5D3]/10 rounded-lg transition-colors"
               title="全屏沉浸模式"
             >

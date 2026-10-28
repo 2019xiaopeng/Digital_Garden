@@ -842,30 +842,25 @@ export async function toggleWeeklyReviewItemDone(itemId: string, done: boolean):
   return (await response.json()) as WeeklyReviewItem;
 }
 
-export async function carryWeeklyReviewItemsToNextWeek(itemIds: string[], fromWeekStart: string): Promise<void> {
-  if (!fromWeekStart.trim()) throw new Error("fromWeekStart 不能为空");
-  if (!itemIds.length) return;
-
+export async function unarchiveWrongQuestion(id: string): Promise<void> {
   if (isTauriRuntime()) {
     const invoke = await getInvoke();
-    await invoke("carry_weekly_review_items_to_next_week", {
-      itemIds,
-      fromWeekStart,
-    });
+    await invoke("unarchive_wrong_question", { id });
     return;
   }
-
-  const response = await fetch(`${getLanBaseUrl()}/api/weekly-review/carry-next-week`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ item_ids: itemIds, from_week_start: fromWeekStart }),
-  });
+  const response = await fetch(`${getLanBaseUrl()}/api/wrong-questions/${encodeURIComponent(id)}/unarchive`, { method: "POST" });
   if (!response.ok && response.status !== 204) {
     const text = await response.text().catch(() => "");
     throw new Error(`HTTP 请求失败 (${response.status}): ${text || response.statusText}`);
   }
+}
+
+export async function deleteAiMessage(messageId: string): Promise<void> {
+  if (!isTauriRuntime()) {
+    throw new Error("当前 Web 模式暂不支持删除消息，请在桌面端执行。");
+  }
+  const invoke = await getInvoke();
+  await invoke("delete_ai_message", { messageId });
 }
 
 export async function uploadChatImage(imageData: Uint8Array, ext: string): Promise<string> {
@@ -874,9 +869,16 @@ export async function uploadChatImage(imageData: Uint8Array, ext: string): Promi
   }
 
   if (isTauriRuntime()) {
+    // A1-P1-7(F12): base64 过 IPC，替代 JSON 数字数组（体积约 ×3 → ×1.33）
+    let binary = "";
+    const CHUNK = 0x8000;
+    for (let i = 0; i < imageData.length; i += CHUNK) {
+      binary += String.fromCharCode(...imageData.subarray(i, i + CHUNK));
+    }
+    const b64 = btoa(binary);
     const invoke = await getInvoke();
     return await invoke<string>("save_chat_image", {
-      imageData: Array.from(imageData),
+      imageDataB64: b64,
       ext,
     });
   }

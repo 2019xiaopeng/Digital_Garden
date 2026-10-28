@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Archive, BookOpenCheck, Plus, Search, Trash2 } from "lucide-react";
+import { Archive, BookOpenCheck, Plus, RotateCcw, Search, Trash2 } from "lucide-react";
 import {
   archiveWrongQuestion,
-  carryWeeklyReviewItemsToNextWeek,
   createWrongQuestion,
   deleteWrongQuestion,
   fetchWeeklyReviewItems,
@@ -10,10 +9,12 @@ import {
   fetchWrongQuestions,
   getImageUrl,
   toggleWeeklyReviewItemDone,
+  unarchiveWrongQuestion,
   type WeeklyReviewItem,
   type WrongQuestion,
   type WrongQuestionStats,
 } from "../utils/apiBridge";
+import { QuestionImage } from "../components/QuestionImage";
 import ReactMarkdown from "react-markdown";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { extractQuestionType, extractReviewSummary, formatQuestionLayout, normalizeMathDelimiters, questionRemarkPlugins, questionRehypePlugins } from "../lib/markdown";
@@ -42,6 +43,19 @@ function masteryLabel(level: number) {
   if (level === 2) return "基本掌握";
   return "熟练";
 }
+
+// 复审修复：components 提升为模块级常量——内联闭包会让 react-markdown 每次渲染
+// 重挂载图片子树，QuestionImage 的 failed 状态被重置、图片反复重载
+const markdownComponents = {
+  img: ({ src, alt }: { src?: string; alt?: string }) => (
+    <QuestionImage
+      key={String(src || "")}
+      src={getImageUrl(String(src || ""))}
+      alt={alt}
+      className="max-h-96 rounded-xl border border-[#88B5D3]/30"
+    />
+  ),
+};
 
 export function ErrorBook() {
   const navigate = useNavigate();
@@ -266,17 +280,7 @@ export function ErrorBook() {
         <section className="glass-card rounded-2xl p-4 space-y-3">
           <div className="flex items-center justify-between">
             <h2 className="font-semibold text-gray-900 dark:text-white flex items-center gap-2"><BookOpenCheck className="w-4 h-4 text-[#88B5D3]" /> 本周待复习清单</h2>
-            <button
-              onClick={async () => {
-                const ids = pendingWeekly.map((item) => item.id);
-                if (!ids.length) return;
-                await carryWeeklyReviewItemsToNextWeek(ids, weekStart);
-                await loadData();
-              }}
-              className="text-xs px-3 py-1.5 rounded-lg border border-[#88B5D3]/30 text-[#88B5D3] hover:bg-[#88B5D3]/10"
-            >
-              延续未完成到下周
-            </button>
+            <span className="text-xs text-gray-400">未完成的题下周一打开时自动顺延</span>
           </div>
           <div className="space-y-2">
             {pendingWeekly.length === 0 ? (
@@ -343,12 +347,29 @@ export function ErrorBook() {
                     <Archive className="w-3.5 h-3.5" /> 归档
                   </button>
                 ) : (
-                  <button
-                    onClick={() => setDeleteTarget(item)}
-                    className="inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-lg border border-red-400/70 text-red-600 hover:bg-red-500/10"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" /> 删除
-                  </button>
+                  <>
+                    <button
+                      onClick={async () => {
+                        try {
+                          await unarchiveWrongQuestion(item.id);
+                          setNotice("已恢复为进行中，本周清单会自动重新纳入");
+                          await loadData();
+                        } catch (error) {
+                          console.error("[ErrorBook] unarchive failed:", error);
+                          setNotice("恢复失败，请重试");
+                        }
+                      }}
+                      className="inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-lg border border-emerald-300/60 text-emerald-600 hover:bg-emerald-500/10"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" /> 恢复
+                    </button>
+                    <button
+                      onClick={() => setDeleteTarget(item)}
+                      className="inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-lg border border-red-400/70 text-red-600 hover:bg-red-500/10"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" /> 删除
+                    </button>
+                  </>
                 )}
               </div>
             </article>
@@ -362,43 +383,16 @@ export function ErrorBook() {
           <div className="relative w-full max-w-4xl max-h-[88vh] overflow-y-auto rounded-3xl bg-white dark:bg-[#0f1826] border border-[#88B5D3]/25 p-6 space-y-4">
             <h3 className="text-xl font-semibold text-gray-900 dark:text-white">[{detail.subject}] 错题详情</h3>
             {detail.question_image_path && (
-              <img
+              <QuestionImage
                 src={getImageUrl(detail.question_image_path)}
-                alt="题图"
                 className="max-h-72 rounded-xl border border-[#88B5D3]/30"
-                onError={(e) => {
-                  console.error("[image-debug] errorbook-header-image-load-failed", {
-                    rawPath: detail.question_image_path,
-                    resolvedUrl: getImageUrl(detail.question_image_path || ""),
-                    currentSrc: (e.currentTarget as HTMLImageElement).currentSrc,
-                  });
-                }}
               />
             )}
             <article className="prose prose-sm dark:prose-invert max-w-none">
               <ReactMarkdown
                 remarkPlugins={questionRemarkPlugins}
                 rehypePlugins={questionRehypePlugins}
-                components={{
-                  img: ({ src, alt }) => {
-                    const rawSrc = String(src || "");
-                    const resolvedSrc = getImageUrl(rawSrc);
-                    return (
-                      <img
-                        src={resolvedSrc}
-                        alt={alt || "题图"}
-                        className="max-h-96 rounded-xl border border-[#88B5D3]/30"
-                        onError={(e) => {
-                          console.error("[image-debug] errorbook-question-markdown-image-load-failed", {
-                            rawSrc,
-                            resolvedSrc,
-                            currentSrc: (e.currentTarget as HTMLImageElement).currentSrc,
-                          });
-                        }}
-                      />
-                    );
-                  },
-                }}
+                components={markdownComponents}
               >
                 {normalizeMathDelimiters(`### 题目\n${formatQuestionLayout(detail.question_content)}`)}
               </ReactMarkdown>
@@ -417,26 +411,7 @@ export function ErrorBook() {
                 <ReactMarkdown
                   remarkPlugins={questionRemarkPlugins}
                   rehypePlugins={questionRehypePlugins}
-                  components={{
-                    img: ({ src, alt }) => {
-                      const rawSrc = String(src || "");
-                      const resolvedSrc = getImageUrl(rawSrc);
-                      return (
-                        <img
-                          src={resolvedSrc}
-                          alt={alt || "题图"}
-                          className="max-h-96 rounded-xl border border-[#88B5D3]/30"
-                          onError={(e) => {
-                            console.error("[image-debug] errorbook-solution-markdown-image-load-failed", {
-                              rawSrc,
-                              resolvedSrc,
-                              currentSrc: (e.currentTarget as HTMLImageElement).currentSrc,
-                            });
-                          }}
-                        />
-                      );
-                    },
-                  }}
+                  components={markdownComponents}
                 >
                   {normalizeMathDelimiters(`### 解答\n${detail.ai_solution}\n\n### 笔记\n${detail.user_note || "（暂无）"}`)}
                 </ReactMarkdown>

@@ -18,6 +18,8 @@ export type ChatCompletionOptions = {
   signal?: AbortSignal;
   /** 覆盖当前对话厂商（视觉链路用），缺省读 settings.aiVendorId */
   vendorId?: string;
+  /** A1-P1-8: 请求厂商服务端联网搜索（仅能力位 webSearch=true 的厂商生效，如 GLM） */
+  webSearch?: boolean;
 };
 
 const MODEL_ALIASES: Record<string, string> = {
@@ -62,19 +64,24 @@ export async function* chatCompletion(options: ChatCompletionOptions): AsyncGene
     ? (settings.aiVisionModel?.trim() || vendor.visionModels[0] || vendor.defaultModel)
     : (settings.aiModel?.trim() || vendor.defaultModel);
 
+  const body: Record<string, unknown> = {
+    model: resolveModel(options.model, fallbackModel),
+    messages: options.messages,
+    temperature: options.temperature ?? 0.7,
+    max_tokens: options.maxTokens ?? 1024,
+    stream: true,
+  };
+  if (options.webSearch && vendor.capabilities.webSearch) {
+    body.tools = [{ type: "web_search", web_search: { enable: true, search_result: true } }];
+  }
+
   const response = await fetch(`${vendor.baseUrl}/chat/completions`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`,
     },
-    body: JSON.stringify({
-      model: resolveModel(options.model, fallbackModel),
-      messages: options.messages,
-      temperature: options.temperature ?? 0.7,
-      max_tokens: options.maxTokens ?? 1024,
-      stream: true,
-    }),
+    body: JSON.stringify(body),
     signal: options.signal,
   });
 
@@ -136,6 +143,8 @@ export async function* visionChatCompletion(options: {
   reasoningModel?: string;
   mode?: "single" | "pipeline";
   signal?: AbortSignal;
+  /** A1-P1-7: 覆盖默认的错题解析模板（普通图片提问传自己的 systemPrompt） */
+  systemPrompt?: string;
 }): AsyncGenerator<string, void, unknown> {
   const imageBase64 = options.imageBase64?.trim();
   if (!imageBase64) {
@@ -147,7 +156,7 @@ export async function* visionChatCompletion(options: {
   const visionVendorId = getSettings().aiVisionVendorId;
 
   if (mode === "single") {
-    const systemPrompt = "你是一位考研辅导名师。请严格按以下格式输出：\n1) 第一行必须是：题型总结：<一句话，例如\"高数定积分计算\"/\"线代特征值计算\">。\n2) 然后给出题目原文（LaTeX）。\n3) 给出详细解答。若是数学题，至少给两种思路：主解法 + 备选思路（可简略对比优劣）。\n所有数学公式使用 LaTeX（行内 $...$，行间 $$...$$）。";
+    const systemPrompt = options.systemPrompt || "你是一位考研辅导名师。请严格按以下格式输出：\n1) 第一行必须是：题型总结：<一句话，例如\"高数定积分计算\"/\"线代特征值计算\">。\n2) 然后给出题目原文（LaTeX）。\n3) 给出详细解答。若是数学题，至少给两种思路：主解法 + 备选思路（可简略对比优劣）。\n所有数学公式使用 LaTeX（行内 $...$，行间 $$...$$）。";
     const messages: OpenAIChatMessage[] = [
       {
         role: "system",

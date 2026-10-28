@@ -247,20 +247,25 @@ export function Tasks() {
     };
   }, []);
 
+  // 复审修复：同步 ref 持有 run id，卸载 cleanup 的旧闭包不会对同一 run 二次结算
+  const activeRunIdRef = useRef<string | null>(null);
+
   const finalizeFocusRun = useCallback(async (
     status: "completed" | "aborted",
     explicitActualSeconds?: number
   ) => {
-    if (!activeRunId || runFinalizeGuardRef.current) return;
+    const runId = activeRunIdRef.current;
+    if (!runId || runFinalizeGuardRef.current) return;
 
     runFinalizeGuardRef.current = true;
+    activeRunIdRef.current = null;
     const plannedSeconds = (activeTimerTask?.timerDuration || 25) * 60;
     const actualSeconds = typeof explicitActualSeconds === "number"
       ? Math.max(0, explicitActualSeconds)
       : Math.max(0, plannedSeconds - timeLeft);
 
     try {
-      await finishFocusRun(activeRunId, {
+      await finishFocusRun(runId, {
         actual_seconds: actualSeconds,
         status,
       });
@@ -270,29 +275,35 @@ export function Tasks() {
       setActiveRunId(null);
       runFinalizeGuardRef.current = false;
     }
-  }, [activeRunId, activeTimerTask?.timerDuration, timeLeft]);
+  }, [activeTimerTask?.timerDuration, timeLeft]);
+
+  // FOCUS-F28/F25: 用 ref 持有 finalize，interval 只随运行状态创建一次，卸载时结算
+  const finalizeRef = useRef(finalizeFocusRun);
+  finalizeRef.current = finalizeFocusRun;
 
   useEffect(() => {
-    if (isTimerRunning && timeLeft > 0) {
-      timerRef.current = setInterval(() => {
-        setTimeLeft(prev => {
-          if (prev <= 1) {
-            clearInterval(timerRef.current!);
-            setIsTimerRunning(false);
-            audioRef.current?.play().catch(e => console.log("Audio play failed:", e));
-            void finalizeFocusRun("completed", (activeTimerTask?.timerDuration || 25) * 60);
-            return 0;
-          }
-          return prev - 1;
-        });
-      }, 1000);
-    } else if (!isTimerRunning && timerRef.current) {
-      clearInterval(timerRef.current);
-    }
+    if (!isTimerRunning) return;
+    timerRef.current = setInterval(() => {
+      setTimeLeft(prev => {
+        if (prev <= 1) {
+          clearInterval(timerRef.current!);
+          setIsTimerRunning(false);
+          audioRef.current?.play().catch(e => console.log("Audio play failed:", e));
+          void finalizeRef.current("completed", (activeTimerTask?.timerDuration || 25) * 60);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
     };
-  }, [activeTimerTask?.timerDuration, finalizeFocusRun, isTimerRunning, timeLeft]);
+  }, [isTimerRunning, activeTimerTask?.timerDuration]);
+
+  useEffect(() => () => {
+    // 离开页面时把进行中的 run 结算为 aborted，杜绝僵尸 running 污染完成率
+    void finalizeRef.current("aborted");
+  }, []);
 
   const startTimerForTask = useCallback(async (task: Task) => {
     if (activeRunId) {
@@ -314,9 +325,11 @@ export function Tasks() {
     try {
       const run = await startFocusRun(payload);
       setActiveRunId(run.id);
+      activeRunIdRef.current = run.id;
     } catch (error) {
       console.warn("start focus run failed:", error);
       setActiveRunId(null);
+      activeRunIdRef.current = null;
     }
 
     if (task.status === "todo") {
